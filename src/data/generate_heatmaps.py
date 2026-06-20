@@ -4,6 +4,7 @@ import argparse
 import numpy as np
 import cv2
 from urllib.parse import urlparse, parse_qs
+from tqdm import tqdm
 
 LANDMARK_CLASSES = [
     "C2_PI",
@@ -55,12 +56,13 @@ def process_label_studio_export(json_path, images_dir, output_dir, sigma):
     processed_count = 0
     missing_images = 0
 
-    for record in data:
+    # Wrap the data loop with tqdm for a visual progress bar
+    for record in tqdm(data, desc="Generating Heatmaps", unit="img"):
         # 1. Extract raw path from either file_upload or data.image
         raw_path = record.get("file_upload") or record.get("data", {}).get("img")
 
         if not raw_path:
-            print("Could not determine filename for a record, skipping.")
+            # We skip printing here to avoid messing up the progress bar UI
             continue
 
         # 2. Parse the URL to handle Local Storage parameters (e.g., ?d=cvm-images/0000.jpg)
@@ -84,7 +86,6 @@ def process_label_studio_export(json_path, images_dir, output_dir, sigma):
 
         # Verify image exists to get its shape
         if not os.path.exists(img_path):
-            print(f"Warning: Image not found -> {img_path}")
             missing_images += 1
             continue
 
@@ -139,10 +140,8 @@ def process_label_studio_export(json_path, images_dir, output_dir, sigma):
         np.savez_compressed(npz_output_path, heatmaps=heatmaps)
         processed_count += 1
 
-        if processed_count % 100 == 0:
-            print(f"Processed {processed_count} images...")
-
-    print("-" * 30)
+    # Final summary output
+    print("\n" + "-" * 30)
     print("Export Complete!")
     print(f"Successfully generated: {processed_count} .npz files.")
     if missing_images > 0:
