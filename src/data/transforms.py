@@ -11,12 +11,13 @@ def get_transforms(img_size=640):
     """
     train_transform = A.Compose(
         [  # type: ignore[arg-type]
-            A.ShiftScaleRotate(
-                shift_limit=0.05,
-                scale_limit=0.1,
-                rotate_limit=10,
+            A.Affine(
+                translate_percent=0.05,
+                scale=(0.9, 1.1),
+                rotate=(-10, 10),
                 border_mode=cv2.BORDER_CONSTANT,
-                value=0,  # type: ignore
+                fill=0,
+                fill_mask=0,
                 p=0.6,
             ),
             A.RandomBrightnessContrast(

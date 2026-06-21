@@ -53,8 +53,9 @@ class CVMDataset(Dataset):
         coords = data["coords"]
 
         # 3. Prepare data structures for Albumentations
-        heatmaps_hwc = np.transpose(heatmaps, (1, 2, 0))
-        coords_pixels = coords * self.img_size
+        # Cast to float32 to prevent OpenCV assertion errors during augmentation
+        heatmaps_hwc = np.transpose(heatmaps, (1, 2, 0)).astype(np.float32)
+        coords_pixels = (coords * self.img_size).astype(np.float32)
 
         # 4. Apply synchronized transformations
         if self.transform:
