@@ -5,6 +5,15 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 from src.data.transforms import get_transforms
 
+TRAIN_IMG_DIR = "dataset/train/images"
+TRAIN_NPZ_DIR = "dataset/train/labels"
+
+VAL_IMG_DIR = "dataset/val/images"
+VAL_NPZ_DIR = "dataset/val/labels"
+
+TEST_IMG_DIR = "dataset/test/images"
+TEST_NPZ_DIR = "dataset/test/labels"
+
 
 class CVMDataset(Dataset):
     def __init__(
@@ -72,19 +81,88 @@ class CVMDataset(Dataset):
         }
 
 
+def get_dataloaders(
+    train_img_dir=TRAIN_IMG_DIR,
+    train_npz_dir=TRAIN_NPZ_DIR,
+    val_img_dir=VAL_IMG_DIR,
+    val_npz_dir=VAL_NPZ_DIR,
+    batch_size=8,
+    img_size=640,
+):
+    train_transform, val_transform = get_transforms(img_size=img_size)
+
+    train_files = [
+        f for f in os.listdir(train_img_dir) if f.endswith((".png", ".jpg", ".jpeg"))
+    ]
+    val_files = [
+        f for f in os.listdir(val_img_dir) if f.endswith((".png", ".jpg", ".jpeg"))
+    ]
+
+    train_dataset = CVMDataset(
+        train_img_dir,
+        train_npz_dir,
+        train_files,
+        transform=train_transform,
+        img_size=img_size,
+    )
+    val_dataset = CVMDataset(
+        val_img_dir, val_npz_dir, val_files, transform=val_transform, img_size=img_size
+    )
+
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=4,
+        pin_memory=True,
+    )
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=4,
+        pin_memory=True,
+    )
+
+    return train_loader, val_loader
+
+
+def get_test_dataloader(
+    test_img_dir=TEST_IMG_DIR,
+    test_npz_dir=TEST_NPZ_DIR,
+    batch_size=8,
+    img_size=640,
+):
+    """
+    Factory function specifically for the test dataset.
+    """
+    _, test_transform = get_transforms(img_size=img_size)
+
+    test_files = [
+        f for f in os.listdir(test_img_dir) if f.endswith((".png", ".jpg", ".jpeg"))
+    ]
+
+    test_dataset = CVMDataset(
+        image_dir=test_img_dir,
+        npz_dir=test_npz_dir,
+        image_filenames=test_files,
+        transform=test_transform,
+        img_size=img_size,
+    )
+
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=4,
+        pin_memory=True,
+    )
+
+    return test_loader
+
+
 if __name__ == "__main__":
-    # 1. Define base paths for your pre-split data
-    # Adjust these paths to match your actual directory structure
-    TRAIN_IMG_DIR = "path/to/dataset/images/train"
-    TRAIN_NPZ_DIR = "path/to/dataset/labels/train"
 
-    VAL_IMG_DIR = "path/to/dataset/images/val"
-    VAL_NPZ_DIR = "path/to/dataset/labels/val"
-
-    TEST_IMG_DIR = "path/to/dataset/images/test"
-    TEST_NPZ_DIR = "path/to/dataset/labels/test"
-
-    # 2. Extract filenames directly from the respective folders
     def get_image_files(directory):
         return [
             f for f in os.listdir(directory) if f.endswith((".png", ".jpg", ".jpeg"))
@@ -98,34 +176,9 @@ if __name__ == "__main__":
         f"Loaded from disk - Train: {len(train_files)}, Val: {len(val_files)}, Test: {len(test_files)}"
     )
 
-    # 3. Initialize Pipelines
-    train_transform, val_transform = get_transforms(img_size=640)
+    train_loader, val_loader = get_dataloaders()
+    test_loader = get_test_dataloader()
 
-    # 4. Instantiate separate Datasets, passing the specific directories and files
-    train_dataset = CVMDataset(
-        TRAIN_IMG_DIR, TRAIN_NPZ_DIR, train_files, transform=train_transform
-    )
-    val_dataset = CVMDataset(
-        VAL_IMG_DIR, VAL_NPZ_DIR, val_files, transform=val_transform
-    )
-    test_dataset = CVMDataset(
-        TEST_IMG_DIR, TEST_NPZ_DIR, test_files, transform=val_transform
-    )
-
-    # 5. Instantiate DataLoaders
-    train_loader = DataLoader(
-        train_dataset, batch_size=8, shuffle=True, num_workers=4, pin_memory=True
-    )
-
-    val_loader = DataLoader(
-        val_dataset, batch_size=8, shuffle=False, num_workers=4, pin_memory=True
-    )
-
-    test_loader = DataLoader(
-        test_dataset, batch_size=8, shuffle=False, num_workers=4, pin_memory=True
-    )
-
-    # --- SANITY CHECK ---
     print("\nVerifying Train Loader...")
     for batch in train_loader:
         print("Batch verification successful:")
