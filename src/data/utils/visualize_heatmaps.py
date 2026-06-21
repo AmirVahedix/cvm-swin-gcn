@@ -78,7 +78,7 @@ def visualize_random_samples(npz_dir, images_dir, num_samples=4):
 
 if __name__ == "__main__":
     # Update these paths to match your directories
-    NPZ_DIRECTORY = "data/heatmaps"
+    NPZ_DIRECTORY = "data/labels"
     IMAGES_DIRECTORY = "data/images"
 
     visualize_random_samples(NPZ_DIRECTORY, IMAGES_DIRECTORY, num_samples=2)

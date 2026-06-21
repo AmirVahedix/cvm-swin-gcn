@@ -13,59 +13,117 @@ def run_sanity_checks(npz_dir):
 
     print(f"Found {len(npz_files)} .npz files. Running checks...\n")
 
-    unique_shapes = set()
-    unique_dtypes = set()
-    missing_keys = 0
+    # --- Tracking Variables ---
+    # Heatmaps
+    unique_heatmap_shapes = set()
+    unique_heatmap_dtypes = set()
+    missing_heatmaps_key = 0
 
-    # Store one example for detailed printing
-    example_data = None
+    # GCN Coordinates
+    unique_coords_shapes = set()
+    unique_coords_dtypes = set()
+    missing_coords_key = 0
+    total_missing_landmarks = 0
+
+    # Track min/max of VALID coordinates to ensure they are in [0, 1]
+    global_coords_min = float("inf")
+    global_coords_max = float("-inf")
+
+    example_data_heatmaps = None
+    example_data_coords = None
     example_file = None
 
-    # Wrap the iterable with tqdm for a visual progress bar
     for file_path in tqdm(npz_files, desc="Checking .npz files"):
         try:
             with np.load(file_path) as data:
+                # 1. Check Heatmaps
                 if "heatmaps" not in data:
-                    missing_keys += 1
-                    continue
+                    missing_heatmaps_key += 1
+                else:
+                    heatmaps = data["heatmaps"]
+                    unique_heatmap_shapes.add(heatmaps.shape)
+                    unique_heatmap_dtypes.add(heatmaps.dtype)
 
-                heatmaps = data["heatmaps"]
-                unique_shapes.add(heatmaps.shape)
-                unique_dtypes.add(heatmaps.dtype)
+                # 2. Check GCN Coords
+                if "coords" not in data:
+                    missing_coords_key += 1
+                else:
+                    coords = data["coords"]
+                    unique_coords_shapes.add(coords.shape)
+                    unique_coords_dtypes.add(coords.dtype)
+
+                    # Count missing landmarks (where x == -1.0)
+                    total_missing_landmarks += np.sum(coords[:, 0] == -1.0)
+
+                    # Track valid coordinate ranges (ignoring the -1.0 missing markers)
+                    valid_coords = coords[coords[:, 0] != -1.0]
+                    if valid_coords.size > 0:
+                        global_coords_min = min(global_coords_min, np.min(valid_coords))
+                        global_coords_max = max(global_coords_max, np.max(valid_coords))
 
                 # Grab the first valid file as our example
-                if example_data is None:
-                    example_data = heatmaps
+                if example_file is None and "heatmaps" in data and "coords" in data:
+                    example_data_heatmaps = heatmaps
+                    example_data_coords = coords
                     example_file = os.path.basename(file_path)
 
         except Exception as e:
-            # Use tqdm.write instead of print to prevent the progress bar from glitching
             tqdm.write(f"Error reading {file_path}: {e}")
 
     # --- Print Results ---
-    print("\n--- Sanity Check Results ---")
+    print("\n" + "=" * 40)
+    print(" SANITY CHECK RESULTS")
+    print("=" * 40)
     print(f"Total files checked: {len(npz_files)}")
-    print(f"Files missing 'heatmaps' array: {missing_keys}")
-    print(f"Unique array shapes found: {unique_shapes}")
-    print(f"Unique data types found: {unique_dtypes}")
 
-    if len(unique_shapes) > 1:
-        print("\nWARNING: Inconsistent dimensions detected across your dataset!")
-    elif len(unique_shapes) == 1:
-        print("\nSUCCESS: All heatmap arrays have consistent dimensions.")
+    print("\n--- Heatmaps (Swin) ---")
+    print(f"Files missing key:  {missing_heatmaps_key}")
+    print(f"Unique shapes:      {unique_heatmap_shapes}")
+    print(f"Unique data types:  {unique_heatmap_dtypes}")
+    if len(unique_heatmap_shapes) > 1:
+        print("  -> WARNING: Inconsistent heatmap dimensions detected!")
 
-    if example_data is not None:
-        print(f"\n--- Data Example ({example_file}) ---")
-        print(f"Shape: {example_data.shape}")
-        print(f"Data Type: {example_data.dtype}")
-        print(f"Min Value: {np.min(example_data)}")
-        print(f"Max Value: {np.max(example_data)}")
-        # Check if the array is entirely empty/zeros
-        non_zero = np.count_nonzero(example_data)
-        print(f"Non-zero elements: {non_zero} (out of {example_data.size})")
+    print("\n--- GCN Coordinates ---")
+    print(f"Files missing key:  {missing_coords_key}")
+    print(f"Unique shapes:      {unique_coords_shapes}")
+    print(f"Unique data types:  {unique_coords_dtypes}")
+    print(f"Missing landmarks:  {total_missing_landmarks} (marked as -1.0)")
+
+    if global_coords_min != float("inf"):
+        print(f"Valid value range:  [{global_coords_min:.4f}, {global_coords_max:.4f}]")
+        if global_coords_min < 0.0 or global_coords_max > 1.0:
+            print(
+                "  -> WARNING: Valid coordinates fall outside the expected [0, 1] normalized range!"
+            )
+    else:
+        print("Valid value range:  N/A (No valid coordinates found)")
+
+    if len(unique_coords_shapes) > 1:
+        print("  -> WARNING: Inconsistent coordinate array shapes detected!")
+
+    # --- Example Breakdown ---
+    if example_file is not None:
+        print("\n" + "-" * 40)
+        print(f" EXAMPLE BREAKDOWN: {example_file}")
+        print("-" * 40)
+
+        print(f"[Heatmaps]")
+        print(f"  Shape: {example_data_heatmaps.shape}")
+        print(f"  Type:  {example_data_heatmaps.dtype}")
+        print(
+            f"  Range: [{np.min(example_data_heatmaps):.4f}, {np.max(example_data_heatmaps):.4f}]"
+        )
+        non_zero = np.count_nonzero(example_data_heatmaps)
+        print(f"  Active Pixels: {non_zero} / {example_data_heatmaps.size}")
+
+        print(f"\n[Coordinates]")
+        print(f"  Shape: {example_data_coords.shape}")
+        print(f"  Type:  {example_data_coords.dtype}")
+        print("  Values (first 3):")
+        for i in range(min(3, len(example_data_coords))):
+            print(f"    Point {i + 1}: {example_data_coords[i]}")
 
 
 if __name__ == "__main__":
-    # Update this path to match your output directory
-    NPZ_DIRECTORY = "data/heatmaps"
+    NPZ_DIRECTORY = "data/labels"
     run_sanity_checks(NPZ_DIRECTORY)
