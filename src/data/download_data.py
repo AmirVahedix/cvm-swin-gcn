@@ -164,12 +164,12 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--out_img_dir",
-        default="data/images",
+        default="data/raw/images",
         help="Directory to save the downloaded images",
     )
     parser.add_argument(
         "--out_export_dir",
-        default="data/exports",
+        default="data/raw/exports",
         help="Directory to save the raw JSON export file (default: data/exports)",
     )
 

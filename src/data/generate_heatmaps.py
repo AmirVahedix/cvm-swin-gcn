@@ -207,7 +207,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--output_dir",
         type=str,
-        default="data/npz_exports",
+        default="data/heatmaps",
         help="Directory where the .npz heatmaps will be saved.",
     )
     parser.add_argument(
