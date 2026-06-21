@@ -40,16 +40,11 @@ class CVMDataset(Dataset):
         npz_path = os.path.join(self.npz_dir, f"{base_name}.npz")
         data = np.load(npz_path)
 
-        # Shape expected: [13, 640, 640]
         heatmaps = data["heatmaps"]
-        # Shape expected: [13, 2] (normalized [0, 1])
         coords = data["coords"]
 
         # 3. Prepare data structures for Albumentations
-        # Transpose heatmaps from CHW to HWC
         heatmaps_hwc = np.transpose(heatmaps, (1, 2, 0))
-
-        # Convert normalized coordinates to absolute pixel values
         coords_pixels = coords * self.img_size
 
         # 4. Apply synchronized transformations
@@ -58,71 +53,83 @@ class CVMDataset(Dataset):
                 image=image, mask=heatmaps_hwc, keypoints=coords_pixels
             )
             image = augmented["image"]
-            heatmaps_tensor = augmented[
-                "mask"
-            ]  # ToTensorV2 converts this back to [13, 640, 640]
+            heatmaps_tensor = augmented["mask"]
             transformed_coords = np.array(augmented["keypoints"])
         else:
-            # Fallback manual conversion if no transform provided
             image = torch.from_numpy(np.transpose(image, (2, 0, 1))).float()
             heatmaps_tensor = torch.from_numpy(heatmaps).float()
             transformed_coords = coords_pixels
 
-        # 5. Re-normalize coordinates back to [0, 1] for GCN network safety
-        # Handle cases where keypoints might be pushed out of borders during heavy scaling/shifting
+        # 5. Re-normalize coordinates back to [0, 1] for network safety
         transformed_coords = np.clip(transformed_coords, 0, self.img_size - 1)
         coords_normalized = transformed_coords / self.img_size
         coords_tensor = torch.tensor(coords_normalized, dtype=torch.float32)
 
         return {
-            "image": image,  # torch.Tensor [3, 640, 640]
-            "heatmaps": heatmaps_tensor,  # torch.Tensor [13, 640, 640]
-            "coords": coords_tensor,  # torch.Tensor [13, 2]
+            "image": image,
+            "heatmaps": heatmaps_tensor,
+            "coords": coords_tensor,
         }
 
 
 if __name__ == "__main__":
-    # Mock setups for paths and file lists
-    IMAGE_DIR = "path/to/640x640_images"
-    NPZ_DIR = "path/to/npz_labels"
+    # 1. Define base paths for your pre-split data
+    # Adjust these paths to match your actual directory structure
+    TRAIN_IMG_DIR = "path/to/dataset/images/train"
+    TRAIN_NPZ_DIR = "path/to/dataset/labels/train"
 
-    # Example train/val split using files present in directory
-    all_files = [
-        f for f in os.listdir(IMAGE_DIR) if f.endswith((".png", ".jpg", ".jpeg"))
-    ]
-    split_idx = int(len(all_files) * 0.8)
-    train_files = all_files[:split_idx]
-    val_files = all_files[split_idx:]
+    VAL_IMG_DIR = "path/to/dataset/images/val"
+    VAL_NPZ_DIR = "path/to/dataset/labels/val"
 
-    # Initialize Pipelines
-    train_transform, val_transform = get_transforms(img_size=640)
+    TEST_IMG_DIR = "path/to/dataset/images/test"
+    TEST_NPZ_DIR = "path/to/dataset/labels/test"
 
-    train_dataset = CVMDataset(
-        image_dir=IMAGE_DIR,
-        npz_dir=NPZ_DIR,
-        image_filenames=train_files,
-        transform=train_transform,
+    # 2. Extract filenames directly from the respective folders
+    def get_image_files(directory):
+        return [
+            f for f in os.listdir(directory) if f.endswith((".png", ".jpg", ".jpeg"))
+        ]
+
+    train_files = get_image_files(TRAIN_IMG_DIR)
+    val_files = get_image_files(VAL_IMG_DIR)
+    test_files = get_image_files(TEST_IMG_DIR)
+
+    print(
+        f"Loaded from disk - Train: {len(train_files)}, Val: {len(val_files)}, Test: {len(test_files)}"
     )
 
+    # 3. Initialize Pipelines
+    train_transform, val_transform = get_transforms(img_size=640)
+
+    # 4. Instantiate separate Datasets, passing the specific directories and files
+    train_dataset = CVMDataset(
+        TRAIN_IMG_DIR, TRAIN_NPZ_DIR, train_files, transform=train_transform
+    )
+    val_dataset = CVMDataset(
+        VAL_IMG_DIR, VAL_NPZ_DIR, val_files, transform=val_transform
+    )
+    test_dataset = CVMDataset(
+        TEST_IMG_DIR, TEST_NPZ_DIR, test_files, transform=val_transform
+    )
+
+    # 5. Instantiate DataLoaders
     train_loader = DataLoader(
-        train_dataset,
-        batch_size=8,
-        shuffle=True,
-        num_workers=4,
-        pin_memory=True,
+        train_dataset, batch_size=8, shuffle=True, num_workers=4, pin_memory=True
+    )
+
+    val_loader = DataLoader(
+        val_dataset, batch_size=8, shuffle=False, num_workers=4, pin_memory=True
+    )
+
+    test_loader = DataLoader(
+        test_dataset, batch_size=8, shuffle=False, num_workers=4, pin_memory=True
     )
 
     # --- SANITY CHECK ---
-    print(f"Total training samples: {len(train_dataset)}")
+    print("\nVerifying Train Loader...")
     for batch in train_loader:
         print("Batch verification successful:")
-        print(
-            f" -> Images batch tensor shape:    {batch['image'].shape}"
-        )  # Expected: [8, 3, 640, 640]
-        print(
-            f" -> Heatmaps batch tensor shape:  {batch['heatmaps'].shape}"
-        )  # Expected: [8, 13, 640, 640]
-        print(
-            f" -> Coordinates batch tensor shape: {batch['coords'].shape}"
-        )  # Expected: [8, 13, 2]
+        print(f" -> Images batch tensor shape:    {batch['image'].shape}")
+        print(f" -> Heatmaps batch tensor shape:  {batch['heatmaps'].shape}")
+        print(f" -> Coordinates batch tensor shape: {batch['coords'].shape}")
         break
