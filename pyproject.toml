@@ -12,6 +12,7 @@ dependencies = [
     "pillow>=12.2.0",
     "python-dotenv>=1.2.2",
     "requests>=2.34.2",
+    "scikit-learn>=1.9.0",
     "torch>=2.12.1",
     "tqdm>=4.68.3",
 ]
