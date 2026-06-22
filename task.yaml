@@ -1,10 +1,10 @@
 name: cvm-swin-gcn
 
-resources:
-  cloud: vast
-  accelerators: RTX3090:1
-  disk_size: 10
-  use_spot: true
+# resources:
+#   cloud: vast
+#   accelerators: RTX3090:1
+#   disk_size: 10
+#   use_spot: false
 
 file_mounts:
   ~/.env: .env
@@ -25,3 +25,8 @@ run: |
   python src/generate_labels.py
   python src/split_dataset.py
   python src/train.py
+
+  echo "Training complete. Destroying Vast instance..."
+  curl -X DELETE "https://console.vast.ai/api/v0/instances/${VAST_INSTANCE_ID}/" \
+       -H "Accept: application/json" \
+       -H "Authorization: Bearer ${VAST_API_KEY}"
