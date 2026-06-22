@@ -8,21 +8,30 @@ resources:
 file_mounts:
   ~/.env: .env
   
-  ~/local-outputs: 
+  ~/cvm-swin-gcn: ./src
+  
+  ~/local-storage: 
     name: ./artifacts
     mode: MOUNT
     source: local
 
 setup: |
-  git clone https://github.com/your-username/your-repo.git repo-dir
-  cd repo-dir && cp ~/.env .env
+  cd ~/cvm-swin-gcn
+  cp ~/.env .env
   pip install -r requirements.txt
 
 run: |
-  cd repo-dir
-  python data_prep.py
+  cd ~/cvm-swin-gcn
+
+  python download_data.py
+  
+  python resize_images.py
+  
+  python generate_labels.py
+  
+  python split_dataset.py
+
   python train.py
-  python eval.py
   
   echo "Saving artifacts to mounted directory..."
-  cp -r outputs/* ~/local-outputs/
+  cp -r artifacts/* ~/local-storage/

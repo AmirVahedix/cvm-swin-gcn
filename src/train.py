@@ -15,7 +15,7 @@ EPOCHS = 100
 LR = 1e-4
 LAMBDA_HM = 1.0
 LAMBDA_CD = 10.0
-SAVE_PATH = "best_swin_gcn_model.pth"
+SAVE_PATH = "./artifacts/best_swin_gcn_model.pth"
 
 
 def train_epoch(
