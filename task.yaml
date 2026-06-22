@@ -4,6 +4,8 @@ resources:
   cloud: vast
   accelerators: RTX3090:1
   disk_size: 10
+  use_spot: true
+  spot_bid_price: 0.25
 
 file_mounts:
   ~/.env: .env
