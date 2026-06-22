@@ -2,8 +2,8 @@ import os
 import cv2
 import numpy as np
 import torch
-from torch.utils.data import Dataset, DataLoader
-from src.data.transforms import get_transforms
+from torch.utils.data import Dataset
+from src.data.dataloader import get_dataloaders, get_test_dataloader
 
 TRAIN_IMG_DIR = "dataset/train/images"
 TRAIN_NPZ_DIR = "dataset/train/labels"
@@ -82,86 +82,6 @@ class CVMDataset(Dataset):
         }
 
 
-def get_dataloaders(
-    train_img_dir=TRAIN_IMG_DIR,
-    train_npz_dir=TRAIN_NPZ_DIR,
-    val_img_dir=VAL_IMG_DIR,
-    val_npz_dir=VAL_NPZ_DIR,
-    batch_size=8,
-    img_size=640,
-):
-    train_transform, val_transform = get_transforms(img_size=img_size)
-
-    train_files = [
-        f for f in os.listdir(train_img_dir) if f.endswith((".png", ".jpg", ".jpeg"))
-    ]
-    val_files = [
-        f for f in os.listdir(val_img_dir) if f.endswith((".png", ".jpg", ".jpeg"))
-    ]
-
-    train_dataset = CVMDataset(
-        train_img_dir,
-        train_npz_dir,
-        train_files,
-        transform=train_transform,
-        img_size=img_size,
-    )
-    val_dataset = CVMDataset(
-        val_img_dir, val_npz_dir, val_files, transform=val_transform, img_size=img_size
-    )
-
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=4,
-        pin_memory=True,
-    )
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=4,
-        pin_memory=True,
-    )
-
-    return train_loader, val_loader
-
-
-def get_test_dataloader(
-    test_img_dir=TEST_IMG_DIR,
-    test_npz_dir=TEST_NPZ_DIR,
-    batch_size=8,
-    img_size=640,
-):
-    """
-    Factory function specifically for the test dataset.
-    """
-    _, test_transform = get_transforms(img_size=img_size)
-
-    test_files = [
-        f for f in os.listdir(test_img_dir) if f.endswith((".png", ".jpg", ".jpeg"))
-    ]
-
-    test_dataset = CVMDataset(
-        image_dir=test_img_dir,
-        npz_dir=test_npz_dir,
-        image_filenames=test_files,
-        transform=test_transform,
-        img_size=img_size,
-    )
-
-    test_loader = DataLoader(
-        test_dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=4,
-        pin_memory=True,
-    )
-
-    return test_loader
-
-
 if __name__ == "__main__":
 
     def get_image_files(directory):
@@ -177,7 +97,12 @@ if __name__ == "__main__":
         f"Loaded from disk - Train: {len(train_files)}, Val: {len(val_files)}, Test: {len(test_files)}"
     )
 
-    train_loader, val_loader = get_dataloaders()
+    train_loader, val_loader = get_dataloaders(
+        train_img_dir=TRAIN_IMG_DIR,
+        train_npz_dir=TRAIN_NPZ_DIR,
+        val_img_dir=VAL_IMG_DIR,
+        val_npz_dir=VAL_NPZ_DIR,
+    )
     test_loader = get_test_dataloader()
 
     print("\nVerifying Train Loader...")
