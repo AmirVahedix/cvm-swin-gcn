@@ -3,6 +3,9 @@ import torch.nn as nn
 import torch.optim as optim
 from src.data.dataloader import get_dataloaders
 from src.models.model import CephalometricSwinGCN
+import boto3
+from dotenv import load_dotenv
+import os
 
 TRAIN_IMG_DIR = "dataset/train/images"
 TRAIN_NPZ_DIR = "dataset/train/labels"
@@ -16,6 +19,30 @@ LR = 1e-4
 LAMBDA_HM = 1.0
 LAMBDA_CD = 10.0
 SAVE_PATH = "./artifacts/best.pth"
+
+load_dotenv()
+
+
+s3_client = boto3.client(
+    "s3",
+    endpoint_url=os.getenv("MINIO_ENDPOINT"),
+    aws_access_key_id=os.getenv("MINIO_ACCESS_KEY"),
+    aws_secret_access_key=os.getenv("MINIO_SECRET_KEY"),
+)
+
+BUCKET_NAME = os.getenv("MINIO_BUCKET", "cvm-artifacts")
+
+
+def upload_artifact_to_minio(file_path, object_name=None):
+    """Uploads a file to MinIO."""
+    if object_name is None:
+        object_name = os.path.basename(file_path)
+
+    try:
+        s3_client.upload_file(file_path, BUCKET_NAME, object_name)
+        print(f"✅ Successfully uploaded {object_name} to MinIO.")
+    except Exception as e:
+        print(f"❌ Failed to upload {object_name} to MinIO: {e}")
 
 
 def train_epoch(
@@ -137,7 +164,11 @@ def main():
                 },
                 SAVE_PATH,
             )
-            print(f"--> Saved new best model (Val Loss: {best_val_loss:.4f})")
+            print(f"--> Saved new best model locally (Val Loss: {best_val_loss:.4f})")
+
+            # --- MINIO UPLOAD TRIGGER ---
+            upload_artifact_to_minio(SAVE_PATH, "best_latest.pth")
+            # upload_artifact_to_minio(SAVE_PATH, f"best_epoch_{epoch + 1}.pth")
 
 
 if __name__ == "__main__":
