@@ -3,16 +3,6 @@ import cv2
 import numpy as np
 import torch
 from torch.utils.data import Dataset
-from src.data.dataloader import get_dataloaders, get_test_dataloader
-
-TRAIN_IMG_DIR = "dataset/train/images"
-TRAIN_NPZ_DIR = "dataset/train/labels"
-
-VAL_IMG_DIR = "dataset/val/images"
-VAL_NPZ_DIR = "dataset/val/labels"
-
-TEST_IMG_DIR = "dataset/test/images"
-TEST_NPZ_DIR = "dataset/test/labels"
 
 
 class CVMDataset(Dataset):
@@ -80,35 +70,3 @@ class CVMDataset(Dataset):
             "heatmaps": heatmaps_tensor,
             "coords": coords_tensor,
         }
-
-
-if __name__ == "__main__":
-
-    def get_image_files(directory):
-        return [
-            f for f in os.listdir(directory) if f.endswith((".png", ".jpg", ".jpeg"))
-        ]
-
-    train_files = get_image_files(TRAIN_IMG_DIR)
-    val_files = get_image_files(VAL_IMG_DIR)
-    test_files = get_image_files(TEST_IMG_DIR)
-
-    print(
-        f"Loaded from disk - Train: {len(train_files)}, Val: {len(val_files)}, Test: {len(test_files)}"
-    )
-
-    train_loader, val_loader = get_dataloaders(
-        train_img_dir=TRAIN_IMG_DIR,
-        train_npz_dir=TRAIN_NPZ_DIR,
-        val_img_dir=VAL_IMG_DIR,
-        val_npz_dir=VAL_NPZ_DIR,
-    )
-    test_loader = get_test_dataloader()
-
-    print("\nVerifying Train Loader...")
-    for batch in train_loader:
-        print("Batch verification successful:")
-        print(f" -> Images batch tensor shape:    {batch['image'].shape}")
-        print(f" -> Heatmaps batch tensor shape:  {batch['heatmaps'].shape}")
-        print(f" -> Coordinates batch tensor shape: {batch['coords'].shape}")
-        break
