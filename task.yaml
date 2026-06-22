@@ -1,0 +1,28 @@
+name: cvm-swin-gcn
+
+resources:
+  cloud: vast
+  accelerators: RTX3090:1
+  disk_size: 10
+
+file_mounts:
+  ~/.env: .env
+  
+  ~/local-outputs: 
+    name: ./artifacts
+    mode: MOUNT
+    source: local
+
+setup: |
+  git clone https://github.com/your-username/your-repo.git repo-dir
+  cd repo-dir && cp ~/.env .env
+  pip install -r requirements.txt
+
+run: |
+  cd repo-dir
+  python data_prep.py
+  python train.py
+  python eval.py
+  
+  echo "Saving artifacts to mounted directory..."
+  cp -r outputs/* ~/local-outputs/
