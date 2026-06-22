@@ -8,13 +8,7 @@ resources:
 
 file_mounts:
   ~/.env: .env
-  
   ~/cvm-swin-gcn: .
-  
-  ~/cvm-swin-gcn/artifacts:
-    name: ./artifacts
-    mode: MOUNT
-    source: local
 
 setup: |
   cd ~/cvm-swin-gcn
@@ -24,12 +18,10 @@ setup: |
 run: |
   cd ~/cvm-swin-gcn
 
-  python src/download_data.py
-  
-  python src/resize_images.py
-  
-  python src/generate_labels.py
-  
-  python src/split_dataset.py
+  set -a; source .env; set +a
 
+  python src/download_data.py
+  python src/resize_images.py
+  python src/generate_labels.py
+  python src/split_dataset.py
   python src/train.py

@@ -11,7 +11,7 @@ VAL_IMG_DIR = "dataset/val/images"
 VAL_NPZ_DIR = "dataset/val/labels"
 
 BATCH_SIZE = 8
-EPOCHS = 100
+EPOCHS = 1
 LR = 1e-4
 LAMBDA_HM = 1.0
 LAMBDA_CD = 10.0
