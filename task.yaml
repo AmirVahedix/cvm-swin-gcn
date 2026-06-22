@@ -8,9 +8,9 @@ resources:
 file_mounts:
   ~/.env: .env
   
-  ~/cvm-swin-gcn: ./src
+  ~/cvm-swin-gcn: .
   
-  ~/local-storage: 
+  ~/cvm-swin-gcn/artifacts:
     name: ./artifacts
     mode: MOUNT
     source: local
@@ -23,15 +23,15 @@ setup: |
 run: |
   cd ~/cvm-swin-gcn
 
-  python download_data.py
+  python src/download_data.py
   
-  python resize_images.py
+  python src/resize_images.py
   
-  python generate_labels.py
+  python src/generate_labels.py
   
-  python split_dataset.py
+  python src/split_dataset.py
 
-  python train.py
+  python src/train.py
   
   echo "Saving artifacts to mounted directory..."
   cp -r artifacts/* ~/local-storage/
