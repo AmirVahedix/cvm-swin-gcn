@@ -1,10 +1,5 @@
 name: cvm-swin-gcn
 
-# resources:
-#   cloud: vast
-#   accelerators: RTX3090:1
-#   disk_size: 10
-#   use_spot: false
 
 file_mounts:
   ~/.env: .env

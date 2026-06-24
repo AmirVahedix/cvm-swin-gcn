@@ -169,11 +169,31 @@ if __name__ == "__main__":
         description="Process Label Studio keypoint exports into NPZ heatmap masks and GCN coordinates."
     )
 
-    parser.add_argument("--json_path", type=str, default="data/exports/export.json")
-    parser.add_argument("--images_dir", type=str, default="data/images")
-    parser.add_argument("--output_dir", type=str, default="data/labels")
-    parser.add_argument("--sigma", type=float, default=3.0)
-    parser.add_argument("--workers", type=int, default=None)
+    parser.add_argument(
+        "--json_path",
+        type=str,
+        default="data/exports/export.json",
+    )
+    parser.add_argument(
+        "--images_dir",
+        type=str,
+        default="data/images",
+    )
+    parser.add_argument(
+        "--output_dir",
+        type=str,
+        default="data/labels",
+    )
+    parser.add_argument(
+        "--sigma",
+        type=float,
+        default=3.0,
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+    )
 
     args = parser.parse_args()
 

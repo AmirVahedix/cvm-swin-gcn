@@ -3,6 +3,7 @@ import torch
 import timm
 import torch.nn.functional as F
 
+
 class GraphConvolution(nn.Module):
     def __init__(self, in_features, out_features):
         super().__init__()
@@ -18,7 +19,10 @@ class CephalometricSwinGCN(nn.Module):
         super().__init__()
 
         self.backbone = timm.create_model(
-            "swin_base_patch4_window7_224", pretrained=True, features_only=True
+            "swin_base_patch4_window7_224",
+            pretrained=True,
+            features_only=True,
+            img_size=(640, 640),
         )
 
         # Note: Adjust these transposed convolutions based on the exact
@@ -71,16 +75,37 @@ class CephalometricSwinGCN(nn.Module):
 
     def forward(self, x):
         features = self.backbone(x)
-        deepest_features = features[-1]
+        deepest_features = features[-1]  # Shape: [8, 20, 20, 1024]
 
-        heatmaps = self.heatmap_head(deepest_features)
+        # 1. Fix channel ordering: (B, H, W, C) -> (B, C, H, W)
+        deepest_features = deepest_features.permute(0, 3, 1, 2).contiguous()
+
+        # 2. Generate Heatmaps
+        heatmaps = self.heatmap_head(deepest_features)  # Shape: [8, 13, 640, 640]
         B, N, H, W = heatmaps.shape
 
-        attention = F.softmax(heatmaps.view(B, N, -1), dim=2).view(B, N, H, W)
-        attn_down = F.adaptive_avg_pool2d(attention, deepest_features.shape[-2:])
+        # 3. SAFE ATTENTION CALCULATION:
+        # Flatten only the spatial dimensions (H and W) into a single dimension (H*W)
+        # Shape changes: [8, 13, 640, 640] -> [8, 13, 409600]
+        flat_heatmaps = heatmaps.flatten(2)
 
-        node_features = torch.einsum("bnij,bcij->bnc", attn_down, deepest_features)
+        # Apply Softmax over the flattened spatial dimension (dim=2)
+        flat_attention = F.softmax(flat_heatmaps, dim=2)
 
+        # Reshape cleanly back to spatial layout: [8, 13, 640, 640]
+        attention = flat_attention.view(B, N, H, W)
+
+        # 4. Pool attention map down to match backbone spatial dimensions (20, 20)
+        attn_down = F.adaptive_avg_pool2d(
+            attention, deepest_features.shape[-2:]
+        )  # Shape: [8, 13, 20, 20]
+
+        # 5. Extract landmark features via Einstein summation
+        node_features = torch.einsum(
+            "bnij,bcij->bnc", attn_down, deepest_features
+        )  # Shape: [8, 13, 1024]
+
+        # 6. Graph Layers & Coordinate Prediction
         x_gcn = F.relu(self.gcn1(node_features, self.adj_matrix))
         x_gcn = F.relu(self.gcn2(x_gcn, self.adj_matrix))
         coords = torch.sigmoid(self.coord_head(x_gcn))
