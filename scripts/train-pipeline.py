@@ -80,7 +80,9 @@ def main():
                 reverse=True,
             )
             raw_json_path = (
-                str(raw_json_files[0]) if raw_json_files else "data/raw/exports/export.json"
+                str(raw_json_files[0])
+                if raw_json_files
+                else "data/raw/exports/export.json"
             )
 
             resize_images(

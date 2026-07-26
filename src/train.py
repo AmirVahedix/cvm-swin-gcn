@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import time
 from src.data import get_dataloaders
 from src.models.model import CephalometricSwinGCN
 import boto3
@@ -84,8 +85,7 @@ def train_epoch(
 def validate_epoch(model, dataloader, mse_loss, l1_loss, lambda_hm, lambda_cd, device, img_size=640):
     model.eval()
     epoch_loss = 0.0
-    total_mre_pixels = 0.0
-    total_samples = 0
+    all_radial_errors = []
 
     with torch.no_grad():
         for batch in dataloader:
@@ -101,16 +101,35 @@ def validate_epoch(model, dataloader, mse_loss, l1_loss, lambda_hm, lambda_cd, d
             total_loss = (lambda_hm * loss_heatmap) + (lambda_cd * loss_coord)
             epoch_loss += total_loss.item()
 
-            # Calculate Mean Radial Error (MRE) in pixels across landmarks
+            # Radial errors (in pixels) across landmarks
             pred_px = pred_coords * img_size
             gt_px = gt_coords * img_size
             radial_errors = torch.sqrt(torch.sum((pred_px - gt_px) ** 2, dim=-1))  # [B, N]
-            total_mre_pixels += radial_errors.mean(dim=-1).sum().item()
-            total_samples += images.size(0)
+            all_radial_errors.append(radial_errors.cpu())
 
     val_loss = epoch_loss / len(dataloader) if len(dataloader) > 0 else 0.0
-    val_mre = total_mre_pixels / total_samples if total_samples > 0 else 0.0
-    return val_loss, val_mre
+
+    if len(all_radial_errors) > 0:
+        all_errors = torch.cat(all_radial_errors, dim=0)  # [Total_Samples, N]
+        val_mae = all_errors.mean().item()
+        val_rmse = torch.sqrt((all_errors ** 2).mean()).item()
+        sdr_2_0 = (all_errors <= 2.0).float().mean().item() * 100.0
+        sdr_2_5 = (all_errors <= 2.5).float().mean().item() * 100.0
+        sdr_3_0 = (all_errors <= 3.0).float().mean().item() * 100.0
+        sdr_4_0 = (all_errors <= 4.0).float().mean().item() * 100.0
+    else:
+        val_mae, val_rmse, sdr_2_0, sdr_2_5, sdr_3_0, sdr_4_0 = 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+
+    metrics = {
+        "mae": val_mae,
+        "rmse": val_rmse,
+        "sdr_2_0": sdr_2_0,
+        "sdr_2_5": sdr_2_5,
+        "sdr_3_0": sdr_3_0,
+        "sdr_4_0": sdr_4_0,
+    }
+
+    return val_loss, metrics
 
 
 def main():
@@ -143,6 +162,8 @@ def main():
 
     print("Starting training...")
     for epoch in range(EPOCHS):
+        start_time = time.time()
+
         train_loss = train_epoch(
             model,
             train_loader,
@@ -154,14 +175,19 @@ def main():
             device,
         )
 
-        val_loss, val_mre = validate_epoch(
+        val_loss, metrics = validate_epoch(
             model, val_loader, mse_loss, l1_loss, LAMBDA_HM, LAMBDA_CD, device
         )
+
+        epoch_time = time.time() - start_time
 
         scheduler.step(val_loss)
 
         print(
-            f"Epoch [{epoch + 1}/{EPOCHS}] | Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | Val MRE: {val_mre:.2f} px"
+            f"Epoch [{epoch + 1}/{EPOCHS}] | Time: {epoch_time:.2f}s | "
+            f"Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | "
+            f"MAE: {metrics['mae']:.2f} px | RMSE: {metrics['rmse']:.2f} px | "
+            f"SDR@2.5px: {metrics['sdr_2_5']:.1f}%"
         )
 
         # Checkpoint Saving
@@ -174,11 +200,16 @@ def main():
                     "model_state_dict": model.state_dict(),
                     "optimizer_state_dict": optimizer.state_dict(),
                     "val_loss": best_val_loss,
-                    "val_mre": val_mre,
+                    "val_mae": metrics["mae"],
+                    "val_rmse": metrics["rmse"],
+                    "val_sdr_2_5": metrics["sdr_2_5"],
                 },
                 SAVE_PATH,
             )
-            print(f"--> Saved new best model locally (Val Loss: {best_val_loss:.4f}, Val MRE: {val_mre:.2f} px)")
+            print(
+                f"--> Saved new best model locally (Val Loss: {best_val_loss:.4f}, "
+                f"MAE: {metrics['mae']:.2f} px, RMSE: {metrics['rmse']:.2f} px, SDR@2.5px: {metrics['sdr_2_5']:.1f}%)"
+            )
 
             # --- MINIO UPLOAD TRIGGER ---
             upload_artifact_to_minio(SAVE_PATH, "best_latest.pth")
