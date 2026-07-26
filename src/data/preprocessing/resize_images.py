@@ -1,14 +1,15 @@
 import json
 import os
 import cv2
+import numpy as np
 import argparse
 from tqdm import tqdm
 
 
 def resize_images(img_dir, json_path, out_img_dir, out_json_path, target_size=640):
     """
-    Reads Label Studio JSON, crops (2400, 1935) images from the top to make them square,
-    resizes to (640, 640) without distortion, and translates the JSON coordinates.
+    Reads Label Studio JSON, resizes images of any size/aspect ratio to target_size x target_size
+    without cropping or distortion using letterboxing padding, and translates JSON annotation coordinates.
     """
     os.makedirs(out_img_dir, exist_ok=True)
     os.makedirs(os.path.dirname(out_json_path) or ".", exist_ok=True)
@@ -25,7 +26,7 @@ def resize_images(img_dir, json_path, out_img_dir, out_json_path, target_size=64
     ):
         img_url = task["data"]["img"]
 
-        # Replicate your download script's filename cleaning logic
+        # Replicate filename cleaning logic
         base_name = os.path.splitext(os.path.basename(img_url))[0]
         clean_name = (
             img_url.split("-", 1)[1] if "-" in base_name else os.path.basename(img_url)
@@ -51,39 +52,35 @@ def resize_images(img_dir, json_path, out_img_dir, out_json_path, target_size=64
 
         h, w = img.shape[:2]
 
-        # Scenario 1: Image is already target size (640x640)
-        if h == target_size and w == target_size:
-            cv2.imwrite(out_path, img)
-            update_annotations(task, h, w, target_size, crop_y=0)
-            processed_count += 1
-            continue
+        # Calculate uniform scale factor to preserve aspect ratio without cropping
+        scale = min(target_size / w, target_size / h)
+        new_w = int(round(w * scale))
+        new_h = int(round(h * scale))
 
-        # Scenario 2: Image is portrait, e.g., (2400, 1935)
-        if h > w:
-            # 1. Crop from the top to make it square
-            crop_y = h - w
-            cropped_img = img[crop_y:, :]  # Image is now W x W
+        interp = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_CUBIC
+        resized_img = cv2.resize(img, (new_w, new_h), interpolation=interp)
 
-            # 2. Resize the square to 640x640 (No distortion)
-            resized_img = cv2.resize(
-                cropped_img, (target_size, target_size), interpolation=cv2.INTER_AREA
-            )
-            cv2.imwrite(out_path, resized_img)
+        # Calculate symmetric letterbox padding
+        pad_x_int = (target_size - new_w) // 2
+        pad_y_int = (target_size - new_h) // 2
 
-            # 3. Update the JSON coordinates
-            update_annotations(task, h, w, target_size, crop_y)
-            processed_count += 1
+        if len(img.shape) == 3:
+            canvas = np.zeros((target_size, target_size, img.shape[2]), dtype=img.dtype)
         else:
-            # Fallback for unexpected landscape images (ignores cropping top, just resizes)
-            tqdm.write(
-                f"⚠️ Warning: {img_filename} is not portrait ({w}x{h}). Force resizing."
-            )
-            resized_img = cv2.resize(
-                img, (target_size, target_size), interpolation=cv2.INTER_AREA
-            )
-            cv2.imwrite(out_path, resized_img)
-            update_annotations(task, h, w, target_size, crop_y=0)
-            processed_count += 1
+            canvas = np.zeros((target_size, target_size), dtype=img.dtype)
+
+        canvas[pad_y_int : pad_y_int + new_h, pad_x_int : pad_x_int + new_w] = (
+            resized_img
+        )
+        cv2.imwrite(out_path, canvas)
+
+        # Exact sub-pixel padding for continuous coordinate translation
+        pad_x_float = (target_size - (w * scale)) / 2.0
+        pad_y_float = (target_size - (h * scale)) / 2.0
+
+        # Update JSON coordinates to account for scaling and letterbox padding
+        update_annotations(task, h, w, target_size, scale, pad_x_float, pad_y_float)
+        processed_count += 1
 
     print(f"💾 Saving updated JSON export to: {out_json_path}")
     with open(out_json_path, "w", encoding="utf-8") as f:
@@ -92,38 +89,71 @@ def resize_images(img_dir, json_path, out_img_dir, out_json_path, target_size=64
     print(f"\n🚀 Done! Processed {processed_count} images. Skipped {skipped_count}.")
 
 
-def update_annotations(task, orig_h, orig_w, target_size, crop_y):
+def update_annotations(task, orig_h, orig_w, target_size, scale, pad_x, pad_y):
     """
-    Updates the keypoint coordinates inside the Label Studio task dictionary.
+    Updates annotation coordinates inside the Label Studio task dictionary.
+    Supports keypointlabels, rectanglelabels, and polygonlabels.
     """
-    # The new base dimension for percentage calculation after cropping to square
-    new_orig_h = orig_h - crop_y
-
     for annotation in task.get("annotations", []):
         for result in annotation.get("result", []):
-            if result.get("type") == "keypointlabels":
-                val = result.get("value", {})
+            label_type = result.get("type")
+            val = result.get("value", {})
 
-                if crop_y > 0:
-                    # 1. Convert Y percentage to absolute original pixels
-                    abs_y = (val["y"] * orig_h) / 100.0
+            item_orig_w = result.get("original_width") or orig_w
+            item_orig_h = result.get("original_height") or orig_h
 
-                    # 2. Apply the top crop shift
-                    new_abs_y = abs_y - crop_y
+            if label_type == "keypointlabels":
+                abs_x = (val.get("x", 0.0) * item_orig_w) / 100.0
+                abs_y = (val.get("y", 0.0) * item_orig_h) / 100.0
 
-                    # 3. Convert back to percentage relative to the new square dimension
-                    # Note: We don't touch X, because cropping from top doesn't change width,
-                    # and the subsequent resize to 640x640 keeps the percentages identical.
-                    val["y"] = (new_abs_y / new_orig_h) * 100.0
+                new_abs_x = abs_x * scale + pad_x
+                new_abs_y = abs_y * scale + pad_y
 
-                # 4. Update the Label Studio metadata to reflect the new 640x640 reality
+                val["x"] = (new_abs_x / target_size) * 100.0
+                val["y"] = (new_abs_y / target_size) * 100.0
+
+                result["original_width"] = target_size
+                result["original_height"] = target_size
+
+            elif label_type == "rectanglelabels":
+                abs_x = (val.get("x", 0.0) * item_orig_w) / 100.0
+                abs_y = (val.get("y", 0.0) * item_orig_h) / 100.0
+                abs_w = (val.get("width", 0.0) * item_orig_w) / 100.0
+                abs_h = (val.get("height", 0.0) * item_orig_h) / 100.0
+
+                new_abs_x = abs_x * scale + pad_x
+                new_abs_y = abs_y * scale + pad_y
+                new_abs_w = abs_w * scale
+                new_abs_h = abs_h * scale
+
+                val["x"] = (new_abs_x / target_size) * 100.0
+                val["y"] = (new_abs_y / target_size) * 100.0
+                val["width"] = (new_abs_w / target_size) * 100.0
+                val["height"] = (new_abs_h / target_size) * 100.0
+
+                result["original_width"] = target_size
+                result["original_height"] = target_size
+
+            elif label_type == "polygonlabels":
+                points = val.get("points", [])
+                new_points = []
+                for pt in points:
+                    px, py = pt[0], pt[1]
+                    abs_x = (px * item_orig_w) / 100.0
+                    abs_y = (py * item_orig_h) / 100.0
+
+                    new_px = ((abs_x * scale + pad_x) / target_size) * 100.0
+                    new_py = ((abs_y * scale + pad_y) / target_size) * 100.0
+                    new_points.append([new_px, new_py])
+
+                val["points"] = new_points
                 result["original_width"] = target_size
                 result["original_height"] = target_size
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Crop, resize, and adjust JSON coordinates for Cephalometric landmarks."
+        description="Resize images of any aspect ratio with letterboxing and adjust JSON coordinates."
     )
     parser.add_argument(
         "--img_dir",
