@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from src.data.dataloader import get_dataloaders
+from src.data import get_dataloaders
 from src.models.model import CephalometricSwinGCN
 import boto3
 from dotenv import load_dotenv

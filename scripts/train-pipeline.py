@@ -4,7 +4,7 @@ import argparse
 # ---------------------------------------------------------
 # Pipeline Imports
 # ---------------------------------------------------------
-from src.data.download_data import download_export_and_images
+from src.data.preprocessing.download_data import download_export_and_images
 from src.utils.verify_env import verify_env
 
 

@@ -3,7 +3,6 @@ import os
 import shutil
 import requests
 import argparse
-import sys
 from datetime import datetime
 from dotenv import load_dotenv
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -180,7 +179,4 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    download_export_and_images(
-        export_dir=args.out_export_dir, img_dir=args.out_img_dir
-    )
-
+    download_export_and_images(export_dir=args.out_export_dir, img_dir=args.out_img_dir)

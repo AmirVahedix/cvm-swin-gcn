@@ -15,10 +15,10 @@ run: |
 
   set -a; source .env; set +a
 
-  python src/download_data.py
-  python src/resize_images.py
-  python src/generate_labels.py
-  python src/split_dataset.py
+  python src/data/preprocessing/download_data.py
+  python src/data/preprocessing/resize_images.py
+  python src/data/preprocessing/generate_labels.py
+  python src/data/preprocessing/split_dataset.py
   python src/train.py
 
   echo "Training complete. Destroying Vast instance..."

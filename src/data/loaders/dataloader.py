@@ -1,6 +1,6 @@
 import os
-from src.data.dataset import CVMDataset
-from src.data.transforms import get_transforms
+from .dataset import CVMDataset
+from .transforms import get_transforms
 from torch.utils.data import DataLoader
 
 
