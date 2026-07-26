@@ -15,12 +15,12 @@ class GraphConvolution(nn.Module):
 
 
 class CephalometricSwinGCN(nn.Module):
-    def __init__(self, num_landmarks=13):
+    def __init__(self, num_landmarks=13, pretrained=True):
         super().__init__()
 
         self.backbone = timm.create_model(
             "swin_base_patch4_window7_224",
-            pretrained=True,
+            pretrained=pretrained,
             features_only=True,
             img_size=(640, 640),
         )
@@ -75,35 +75,39 @@ class CephalometricSwinGCN(nn.Module):
 
     def forward(self, x):
         features = self.backbone(x)
-        deepest_features = features[-1]  # Shape: [8, 20, 20, 1024]
+        deepest_features = features[-1]  # Shape: [B, 20, 20, 1024]
 
         # 1. Fix channel ordering: (B, H, W, C) -> (B, C, H, W)
         deepest_features = deepest_features.permute(0, 3, 1, 2).contiguous()
 
         # 2. Generate Heatmaps
-        heatmaps = self.heatmap_head(deepest_features)  # Shape: [8, 13, 640, 640]
+        heatmaps = self.heatmap_head(deepest_features)  # Shape: [B, 13, 640, 640]
         B, N, H, W = heatmaps.shape
 
         # 3. SAFE ATTENTION CALCULATION:
         # Flatten only the spatial dimensions (H and W) into a single dimension (H*W)
-        # Shape changes: [8, 13, 640, 640] -> [8, 13, 409600]
+        # Shape changes: [B, 13, 640, 640] -> [B, 13, 409600]
         flat_heatmaps = heatmaps.flatten(2)
 
         # Apply Softmax over the flattened spatial dimension (dim=2)
         flat_attention = F.softmax(flat_heatmaps, dim=2)
 
-        # Reshape cleanly back to spatial layout: [8, 13, 640, 640]
+        # Reshape cleanly back to spatial layout: [B, 13, 640, 640]
         attention = flat_attention.view(B, N, H, W)
 
         # 4. Pool attention map down to match backbone spatial dimensions (20, 20)
+        # Re-normalize so each landmark's spatial attention sums to 1.0 across the 20x20 grid
         attn_down = F.adaptive_avg_pool2d(
             attention, deepest_features.shape[-2:]
-        )  # Shape: [8, 13, 20, 20]
+        )  # Shape: [B, 13, 20, 20]
+        attn_down_flat = attn_down.flatten(2)
+        attn_down_sum = attn_down_flat.sum(dim=-1, keepdim=True).clamp(min=1e-8)
+        attn_down = (attn_down_flat / attn_down_sum).view_as(attn_down)
 
         # 5. Extract landmark features via Einstein summation
         node_features = torch.einsum(
             "bnij,bcij->bnc", attn_down, deepest_features
-        )  # Shape: [8, 13, 1024]
+        )  # Shape: [B, 13, 1024]
 
         # 6. Graph Layers & Coordinate Prediction
         x_gcn = F.relu(self.gcn1(node_features, self.adj_matrix))

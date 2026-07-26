@@ -81,9 +81,11 @@ def train_epoch(
     return epoch_loss / len(dataloader)
 
 
-def validate_epoch(model, dataloader, mse_loss, l1_loss, lambda_hm, lambda_cd, device):
+def validate_epoch(model, dataloader, mse_loss, l1_loss, lambda_hm, lambda_cd, device, img_size=640):
     model.eval()
     epoch_loss = 0.0
+    total_mre_pixels = 0.0
+    total_samples = 0
 
     with torch.no_grad():
         for batch in dataloader:
@@ -99,7 +101,16 @@ def validate_epoch(model, dataloader, mse_loss, l1_loss, lambda_hm, lambda_cd, d
             total_loss = (lambda_hm * loss_heatmap) + (lambda_cd * loss_coord)
             epoch_loss += total_loss.item()
 
-    return epoch_loss / len(dataloader)
+            # Calculate Mean Radial Error (MRE) in pixels across landmarks
+            pred_px = pred_coords * img_size
+            gt_px = gt_coords * img_size
+            radial_errors = torch.sqrt(torch.sum((pred_px - gt_px) ** 2, dim=-1))  # [B, N]
+            total_mre_pixels += radial_errors.mean(dim=-1).sum().item()
+            total_samples += images.size(0)
+
+    val_loss = epoch_loss / len(dataloader) if len(dataloader) > 0 else 0.0
+    val_mre = total_mre_pixels / total_samples if total_samples > 0 else 0.0
+    return val_loss, val_mre
 
 
 def main():
@@ -111,6 +122,7 @@ def main():
         train_npz_dir=TRAIN_NPZ_DIR,
         val_img_dir=VAL_IMG_DIR,
         val_npz_dir=VAL_NPZ_DIR,
+        batch_size=BATCH_SIZE,
     )
 
     model = CephalometricSwinGCN(num_landmarks=NUM_LANDMARKS).to(device)
@@ -121,7 +133,6 @@ def main():
         mode="min",
         factor=0.5,
         patience=5,
-        verbose=True,  # type: ignore
     )
 
     mse_loss = nn.MSELoss()
@@ -143,29 +154,31 @@ def main():
             device,
         )
 
-        val_loss = validate_epoch(
+        val_loss, val_mre = validate_epoch(
             model, val_loader, mse_loss, l1_loss, LAMBDA_HM, LAMBDA_CD, device
         )
 
         scheduler.step(val_loss)
 
         print(
-            f"Epoch [{epoch + 1}/{EPOCHS}] | Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f}"
+            f"Epoch [{epoch + 1}/{EPOCHS}] | Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | Val MRE: {val_mre:.2f} px"
         )
 
         # Checkpoint Saving
         if val_loss < best_val_loss:
             best_val_loss = val_loss
+            os.makedirs(os.path.dirname(SAVE_PATH), exist_ok=True)
             torch.save(
                 {
                     "epoch": epoch,
                     "model_state_dict": model.state_dict(),
                     "optimizer_state_dict": optimizer.state_dict(),
                     "val_loss": best_val_loss,
+                    "val_mre": val_mre,
                 },
                 SAVE_PATH,
             )
-            print(f"--> Saved new best model locally (Val Loss: {best_val_loss:.4f})")
+            print(f"--> Saved new best model locally (Val Loss: {best_val_loss:.4f}, Val MRE: {val_mre:.2f} px)")
 
             # --- MINIO UPLOAD TRIGGER ---
             upload_artifact_to_minio(SAVE_PATH, "best_latest.pth")

@@ -21,6 +21,7 @@ def get_dataloaders(
     val_npz_dir,
     batch_size=8,
     img_size=640,
+    num_workers=4,
 ):
     train_transform, val_transform = get_transforms(img_size=img_size)
 
@@ -46,15 +47,15 @@ def get_dataloaders(
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
-        num_workers=4,
-        pin_memory=True,
+        num_workers=num_workers,
+        pin_memory=True if num_workers > 0 else False,
     )
     val_loader = DataLoader(
         val_dataset,
         batch_size=batch_size,
         shuffle=False,
-        num_workers=4,
-        pin_memory=True,
+        num_workers=num_workers,
+        pin_memory=True if num_workers > 0 else False,
     )
 
     return train_loader, val_loader
@@ -65,6 +66,7 @@ def get_test_dataloader(
     test_npz_dir=TEST_NPZ_DIR,
     batch_size=8,
     img_size=640,
+    num_workers=4,
 ):
     """
     Factory function specifically for the test dataset.
@@ -87,8 +89,8 @@ def get_test_dataloader(
         test_dataset,
         batch_size=batch_size,
         shuffle=False,
-        num_workers=4,
-        pin_memory=True,
+        num_workers=num_workers,
+        pin_memory=True if num_workers > 0 else False,
     )
 
     return test_loader

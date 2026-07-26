@@ -54,11 +54,15 @@ class CVMDataset(Dataset):
             )
             image = augmented["image"]
             heatmaps_tensor = augmented["mask"]
-            transformed_coords = np.array(augmented["keypoints"])
+            aug_kp = augmented["keypoints"]
+            if len(aug_kp) == len(coords_pixels):
+                transformed_coords = np.array(aug_kp, dtype=np.float32)
+            else:
+                transformed_coords = coords_pixels.copy().astype(np.float32)
         else:
             image = torch.from_numpy(np.transpose(image, (2, 0, 1))).float()
             heatmaps_tensor = torch.from_numpy(heatmaps).float()
-            transformed_coords = coords_pixels
+            transformed_coords = coords_pixels.copy().astype(np.float32)
 
         # 5. Re-normalize coordinates back to [0, 1] for network safety
         transformed_coords = np.clip(transformed_coords, 0, self.img_size - 1)
