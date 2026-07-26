@@ -63,8 +63,13 @@ def process_single_task(task, session, img_dir, ls_url):
 
 
 def download_export_and_images(
-    project_id, export_dir, img_dir, ls_url, username, password
+    export_dir="data/raw/exports", img_dir="data/raw/images"
 ):
+    ls_url = os.getenv("LABEL_STUDIO_URL")
+    project_id = os.getenv("LABEL_STUDIO_PROJECT_ID")
+    username = os.getenv("LABEL_STUDIO_USERNAME")
+    password = os.getenv("LABEL_STUDIO_PASSWORD")
+
     clear_directory(img_dir)
 
     # Ensure the export directory exists
@@ -175,31 +180,7 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    ls_url = os.environ.get("LABEL_STUDIO_URL")
-    project_id = os.environ.get("LABEL_STUDIO_PROJECT_ID")
-    ls_user = os.environ.get("LABEL_STUDIO_USERNAME")
-    ls_pass = os.environ.get("LABEL_STUDIO_PASSWORD")
-
-    missing_vars = [
-        var
-        for var, val in zip(
-            [
-                "LABEL_STUDIO_URL",
-                "LABEL_STUDIO_PROJECT_ID",
-                "LABEL_STUDIO_USERNAME",
-                "LABEL_STUDIO_PASSWORD",
-            ],
-            [ls_url, project_id, ls_user, ls_pass],
-        )
-        if not val
-    ]
-
-    if missing_vars:
-        print(
-            f"❌ Error: Missing required environment variables in .env: {', '.join(missing_vars)}"
-        )
-        sys.exit(1)
-
     download_export_and_images(
-        project_id, args.out_export_dir, args.out_img_dir, ls_url, ls_user, ls_pass
+        export_dir=args.out_export_dir, img_dir=args.out_img_dir
     )
+
