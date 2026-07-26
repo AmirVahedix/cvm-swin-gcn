@@ -2,6 +2,10 @@ import sys
 import argparse
 from pathlib import Path
 
+# Add project root to sys.path if needed
+ROOT_DIR = Path(__file__).resolve().parent.parent
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 
 from src.utils.verify_env import verify_env
 from src.data.preprocessing.download_data import download_export_and_images
@@ -9,11 +13,6 @@ from src.data.preprocessing.resize_images import resize_images
 from src.data.preprocessing.generate_labels import generate_labels
 from src.data.preprocessing.split_dataset import split_dataset
 from src.train import main as train_main
-
-# Add project root to sys.path if needed
-ROOT_DIR = Path(__file__).resolve().parent.parent
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
 
 
 def main():
@@ -36,6 +35,11 @@ def main():
         help="Skip downloading raw export and images from Label Studio.",
     )
     parser.add_argument(
+        "--train-only",
+        action="store_true",
+        help="Skip preprocessing steps 1-4 and run model training directly.",
+    )
+    parser.add_argument(
         "--target-size",
         type=int,
         default=640,
@@ -54,61 +58,64 @@ def main():
     print(f"Training configured for {args.epochs} epochs.")
 
     try:
-        # Step 1: Download Images & Exports
-        if not args.skip_download:
-            print("\n[1/5] Executing: download_export_and_images()")
-            download_export_and_images(
-                export_dir="data/raw/exports",
+        if not args.train_only:
+            # Step 1: Download Images & Exports
+            if not args.skip_download:
+                print("\n[1/5] Executing: download_export_and_images()")
+                download_export_and_images(
+                    export_dir="data/raw/exports",
+                    img_dir="data/raw/images",
+                )
+                print("-" * 20)
+            else:
+                print("\n[1/5] Skipping download as requested.")
+
+            # Step 2: Resize Images & Adjust Coordinates
+            print("\n[2/5] Executing: resize_images()")
+            # Find latest raw export JSON or fallback to standard export path
+            raw_exports_dir = Path("data/raw/exports")
+            raw_json_files = sorted(
+                raw_exports_dir.glob("*.json"),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+            raw_json_path = (
+                str(raw_json_files[0]) if raw_json_files else "data/raw/exports/export.json"
+            )
+
+            resize_images(
                 img_dir="data/raw/images",
+                json_path=raw_json_path,
+                out_img_dir="data/images",
+                out_json_path="data/exports/export.json",
+                target_size=args.target_size,
+            )
+            print("-" * 20)
+
+            # Step 3: Generate Heatmaps & GCN Landmark Labels
+            print("\n[3/5] Executing: generate_labels()")
+            generate_labels(
+                json_path="data/exports/export.json",
+                images_dir="data/images",
+                output_dir="data/labels",
+                sigma=args.sigma,
+            )
+            print("-" * 20)
+
+            # Step 4: Generate Data Splits
+            print("\n[4/5] Executing: split_dataset()")
+            split_dataset(
+                images_dir="data/images",
+                labels_dir="data/labels",
+                output_dir="./dataset",
+                train_ratio=0.70,
+                val_ratio=0.15,
+                test_ratio=0.15,
+                seed=42,
             )
             print("-" * 20)
         else:
-            print("\n[1/5] Skipping download as requested.")
-
-        # Step 2: Resize Images & Adjust Coordinates
-        print("\n[2/5] Executing: resize_images()")
-        # Find latest raw export JSON or fallback to standard export path
-        raw_exports_dir = Path("data/raw/exports")
-        raw_json_files = sorted(
-            raw_exports_dir.glob("*.json"),
-            key=lambda p: p.stat().st_mtime,
-            reverse=True,
-        )
-        raw_json_path = (
-            str(raw_json_files[0]) if raw_json_files else "data/raw/exports/export.json"
-        )
-
-        resize_images(
-            img_dir="data/raw/images",
-            json_path=raw_json_path,
-            out_img_dir="data/images",
-            out_json_path="data/exports/export.json",
-            target_size=args.target_size,
-        )
-        print("-" * 20)
-
-        # Step 3: Generate Heatmaps & GCN Landmark Labels
-        print("\n[3/5] Executing: generate_labels()")
-        generate_labels(
-            json_path="data/exports/export.json",
-            images_dir="data/images",
-            output_dir="data/labels",
-            sigma=args.sigma,
-        )
-        print("-" * 20)
-
-        # Step 4: Generate Data Splits
-        print("\n[4/5] Executing: split_dataset()")
-        split_dataset(
-            images_dir="data/images",
-            labels_dir="data/labels",
-            output_dir="./dataset",
-            train_ratio=0.70,
-            val_ratio=0.15,
-            test_ratio=0.15,
-            seed=42,
-        )
-        print("-" * 20)
+            print("\n[1-4/5] Skipping steps 1 to 4 (--train-only flag set).")
 
         # Step 5: Model Training
         print(f"\n[5/5] Executing: train_main() with {args.epochs} epochs")
