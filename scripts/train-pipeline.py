@@ -5,7 +5,7 @@ from pathlib import Path
 
 from src.utils.verify_env import verify_env
 from src.data.preprocessing.download_data import download_export_and_images
-from src.data.preprocessing.resize_images import process_and_resize_dataset
+from src.data.preprocessing.resize_images import resize_images
 from src.data.preprocessing.generate_labels import generate_labels
 from src.data.preprocessing.split_dataset import split_dataset
 from src.train import main as train_main
@@ -66,7 +66,7 @@ def main():
             print("\n[1/5] Skipping download as requested.")
 
         # Step 2: Resize Images & Adjust Coordinates
-        print("\n[2/5] Executing: process_and_resize_dataset()")
+        print("\n[2/5] Executing: resize_images()")
         # Find latest raw export JSON or fallback to standard export path
         raw_exports_dir = Path("data/raw/exports")
         raw_json_files = sorted(
@@ -78,7 +78,7 @@ def main():
             str(raw_json_files[0]) if raw_json_files else "data/raw/exports/export.json"
         )
 
-        process_and_resize_dataset(
+        resize_images(
             img_dir="data/raw/images",
             json_path=raw_json_path,
             out_img_dir="data/images",

@@ -5,9 +5,7 @@ import argparse
 from tqdm import tqdm
 
 
-def process_and_resize_dataset(
-    img_dir, json_path, out_img_dir, out_json_path, target_size=640
-):
+def resize_images(img_dir, json_path, out_img_dir, out_json_path, target_size=640):
     """
     Reads Label Studio JSON, crops (2400, 1935) images from the top to make them square,
     resizes to (640, 640) without distortion, and translates the JSON coordinates.
@@ -150,7 +148,7 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    process_and_resize_dataset(
+    resize_images(
         img_dir=args.img_dir,
         json_path=args.json_path,
         out_img_dir=args.out_img_dir,
