@@ -132,7 +132,7 @@ def validate_epoch(model, dataloader, mse_loss, l1_loss, lambda_hm, lambda_cd, d
     return val_loss, metrics
 
 
-def main():
+def main(epochs: int = EPOCHS):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
@@ -161,7 +161,7 @@ def main():
     best_val_loss = float("inf")
 
     print("Starting training...")
-    for epoch in range(EPOCHS):
+    for epoch in range(epochs):
         start_time = time.time()
 
         train_loss = train_epoch(
@@ -184,7 +184,7 @@ def main():
         scheduler.step(val_loss)
 
         print(
-            f"Epoch [{epoch + 1}/{EPOCHS}] | Time: {epoch_time:.2f}s | "
+            f"Epoch [{epoch + 1}/{epochs}] | Time: {epoch_time:.2f}s | "
             f"Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | "
             f"MAE: {metrics['mae']:.2f} px | RMSE: {metrics['rmse']:.2f} px | "
             f"SDR@2.5px: {metrics['sdr_2_5']:.1f}%"
@@ -217,4 +217,9 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+    parser = argparse.ArgumentParser(description="Train Cephalometric Swin-GCN model")
+    parser.add_argument("--epochs", "-e", type=int, default=EPOCHS, help="Number of training epochs")
+    args = parser.parse_args()
+    main(epochs=args.epochs)
+

@@ -149,8 +149,7 @@ def main():
 
         # Step 5: Model Training
         print(f"\n[5/6] Executing: train_main() with {args.epochs} epochs")
-        sys.argv = [sys.argv[0], f"--epochs={args.epochs}"]
-        train_main()
+        train_main(epochs=args.epochs)
         print("-" * 20)
 
         # Step 6: Model Evaluation
