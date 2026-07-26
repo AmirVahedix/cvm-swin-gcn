@@ -73,4 +73,5 @@ class CVMDataset(Dataset):
             "image": image,
             "heatmaps": heatmaps_tensor,
             "coords": coords_tensor,
+            "filename": img_name,
         }

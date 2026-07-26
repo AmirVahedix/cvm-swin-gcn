@@ -12,6 +12,8 @@ wheels/
 *.jpeg
 *.jpg
 *.pt
+*.pth
 .env
 *.npz
 *.json
+*.txt
