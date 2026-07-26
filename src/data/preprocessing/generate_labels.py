@@ -9,27 +9,13 @@ from tqdm import tqdm
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from functools import partial
 
-LANDMARK_CLASSES = [
-    "C2_PI",
-    "C2_IC",
-    "C2_AI",
-    "C3_PS",
-    "C3_AS",
-    "C3_PI",
-    "C3_IC",
-    "C3_AI",
-    "C4_PS",
-    "C4_AS",
-    "C4_PI",
-    "C4_IC",
-    "C4_AI",
-]
+from src.data.constants import LANDMARK_CLASSES, NUM_LANDMARKS
 
 
-def prepare_empty_directory(path):
+def prepare_empty_directory(path: str) -> None:
     if os.path.exists(path):
         shutil.rmtree(path)
-    os.makedirs(path)
+    os.makedirs(path, exist_ok=True)
 
 
 def generate_gaussian_heatmap(shape, center, sigma=3.0):
@@ -69,9 +55,9 @@ def process_single_record(record, images_dir, output_dir, sigma):
 
     h, w = img.shape[:2]
 
-    # Initialize both the heatmaps and the GCN coordinates arrays
-    heatmaps = np.zeros((13, h, w), dtype=np.float16)
-    coords = np.full((13, 2), -1.0, dtype=np.float32)
+    # Initialize both the heatmaps and the GCN coordinates arrays dynamically using NUM_LANDMARKS
+    heatmaps = np.zeros((NUM_LANDMARKS, h, w), dtype=np.float16)
+    coords = np.full((NUM_LANDMARKS, 2), -1.0, dtype=np.float32)
 
     annotations = record.get("annotations", [])
     if not annotations:
@@ -121,9 +107,25 @@ def process_single_record(record, images_dir, output_dir, sigma):
     return "SUCCESS"
 
 
-def process_label_studio_export(
-    json_path, images_dir, output_dir, sigma, max_workers=None
-):
+def generate_labels(
+    json_path: str = "data/exports/export.json",
+    images_dir: str = "data/images",
+    output_dir: str = "data/labels",
+    sigma: float = 3.0,
+    max_workers: int | None = None,
+) -> int:
+    """
+    Processes Label Studio JSON export into NPZ heatmap masks and GCN coordinates.
+
+    Returns:
+        int: Number of successfully generated label files (.npz).
+    """
+    if not os.path.exists(json_path):
+        raise FileNotFoundError(f"Export JSON file not found at: {json_path}")
+
+    if not os.path.exists(images_dir):
+        raise FileNotFoundError(f"Images directory not found at: {images_dir}")
+
     prepare_empty_directory(output_dir)
 
     with open(json_path, "r", encoding="utf-8") as f:
@@ -163,6 +165,12 @@ def process_label_studio_export(
     if missing_images > 0:
         print(f"Missing images in directory: {missing_images}")
 
+    return processed_count
+
+
+# Backwards compatibility alias
+process_label_studio_export = generate_labels
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
@@ -173,31 +181,36 @@ if __name__ == "__main__":
         "--json_path",
         type=str,
         default="data/exports/export.json",
+        help="Path to Label Studio JSON export file",
     )
     parser.add_argument(
         "--images_dir",
         type=str,
         default="data/images",
+        help="Path to images directory",
     )
     parser.add_argument(
         "--output_dir",
         type=str,
         default="data/labels",
+        help="Path to output directory for .npz label files",
     )
     parser.add_argument(
         "--sigma",
         type=float,
         default=3.0,
+        help="Gaussian heatmap sigma parameter",
     )
     parser.add_argument(
         "--workers",
         type=int,
         default=None,
+        help="Number of parallel worker processes",
     )
 
     args = parser.parse_args()
 
-    process_label_studio_export(
+    generate_labels(
         json_path=args.json_path,
         images_dir=args.images_dir,
         output_dir=args.output_dir,

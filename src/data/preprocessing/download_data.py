@@ -62,7 +62,7 @@ def process_single_task(task, session, img_dir, ls_url):
 
 
 def download_export_and_images(
-    export_dir="data/raw/exports", img_dir="data/raw/images"
+    export_dir="data/exports", img_dir="data/images"
 ):
     ls_url = os.getenv("LABEL_STUDIO_URL")
     project_id = os.getenv("LABEL_STUDIO_PROJECT_ID")

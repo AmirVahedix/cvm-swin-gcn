@@ -65,6 +65,60 @@ def copy_files(file_pairs, split_name, base_output_dir):
         shutil.copy2(label_path, label_dest)
 
 
+def split_dataset(
+    images_dir="data/images",
+    labels_dir="data/labels",
+    output_dir="./dataset",
+    train_ratio=0.70,
+    val_ratio=0.15,
+    test_ratio=0.15,
+    seed=42,
+):
+    """
+    Creates train-val-test splits for image/label pairs and copies them into output_dir structure.
+    """
+    total_ratio = train_ratio + val_ratio + test_ratio
+    if not (0.99 <= total_ratio <= 1.01):
+        raise ValueError(
+            f"Train, val, and test ratios must sum to 1.0. Current sum: {total_ratio}"
+        )
+
+    setup_directories(output_dir)
+    paired_files = get_paired_files(images_dir, labels_dir)
+
+    if not paired_files:
+        print("No paired files found. Please check your input directories.")
+        return
+
+    X = [pair[0] for pair in paired_files]
+    y = [pair[1] for pair in paired_files]
+
+    X_temp, X_test, y_temp, y_test = train_test_split(
+        X, y, test_size=test_ratio, random_state=seed
+    )
+
+    relative_val_ratio = val_ratio / (train_ratio + val_ratio)
+    X_train, X_val, y_train, y_val = train_test_split(
+        X_temp, y_temp, test_size=relative_val_ratio, random_state=seed
+    )
+
+    train_pairs = list(zip(X_train, y_train))
+    val_pairs = list(zip(X_val, y_val))
+    test_pairs = list(zip(X_test, y_test))
+
+    print("\n--- Starting Data Transfer ---")
+    copy_files(train_pairs, "train", output_dir)
+    copy_files(val_pairs, "val", output_dir)
+    copy_files(test_pairs, "test", output_dir)
+
+    print("\n--- Split Complete ---")
+    print(f"Total dataset size: {len(paired_files)}")
+    print(f"Train set: {len(train_pairs)} pairs")
+    print(f"Validation set: {len(val_pairs)} pairs")
+    print(f"Test set: {len(test_pairs)} pairs")
+    print(f"Output stored in: {os.path.abspath(output_dir)}")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Create train-val-test splits for C2-C4 cephalometric data."
@@ -114,59 +168,17 @@ def main():
 
     args = parser.parse_args()
 
-    # Validate ratios
-    total_ratio = args.train_ratio + args.val_ratio + args.test_ratio
-    if not (0.99 <= total_ratio <= 1.01):  # Account for minor floating point issues
-        raise ValueError(
-            f"Train, val, and test ratios must sum to 1.0. Current sum: {total_ratio}"
-        )
-
-    # 1. Setup output directories
-    setup_directories(args.output_dir)
-
-    # 2. Get matched image-label pairs
-    paired_files = get_paired_files(args.images_dir, args.labels_dir)
-
-    if not paired_files:
-        print("No paired files found. Please check your input directories.")
-        return
-
-    # Separate paths into two lists for scikit-learn
-    X = [pair[0] for pair in paired_files]  # Image paths
-    y = [pair[1] for pair in paired_files]  # Label paths
-
-    # 3. First Split: Separate out the Test set
-    # The test size is exactly what was requested
-    X_temp, X_test, y_temp, y_test = train_test_split(
-        X, y, test_size=args.test_ratio, random_state=args.seed
+    split_dataset(
+        images_dir=args.images_dir,
+        labels_dir=args.labels_dir,
+        output_dir=args.output_dir,
+        train_ratio=args.train_ratio,
+        val_ratio=args.val_ratio,
+        test_ratio=args.test_ratio,
+        seed=args.seed,
     )
-
-    # 4. Second Split: Separate the remaining data into Train and Validation
-    # We must calculate the relative validation ratio from the remaining temp data
-    relative_val_ratio = args.val_ratio / (args.train_ratio + args.val_ratio)
-
-    X_train, X_val, y_train, y_val = train_test_split(
-        X_temp, y_temp, test_size=relative_val_ratio, random_state=args.seed
-    )
-
-    # Recombine into pairs for the copying function
-    train_pairs = list(zip(X_train, y_train))
-    val_pairs = list(zip(X_val, y_val))
-    test_pairs = list(zip(X_test, y_test))
-
-    # 5. Copy files to the final directory structure
-    print("\n--- Starting Data Transfer ---")
-    copy_files(train_pairs, "train", args.output_dir)
-    copy_files(val_pairs, "val", args.output_dir)
-    copy_files(test_pairs, "test", args.output_dir)
-
-    print("\n--- Split Complete ---")
-    print(f"Total dataset size: {len(paired_files)}")
-    print(f"Train set: {len(train_pairs)} pairs")
-    print(f"Validation set: {len(val_pairs)} pairs")
-    print(f"Test set: {len(test_pairs)} pairs")
-    print(f"Output stored in: {os.path.abspath(args.output_dir)}")
 
 
 if __name__ == "__main__":
     main()
+

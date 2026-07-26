@@ -6,6 +6,7 @@ from src.models.model import CephalometricSwinGCN
 import boto3
 from dotenv import load_dotenv
 import os
+from src.data import NUM_LANDMARKS
 
 TRAIN_IMG_DIR = "dataset/train/images"
 TRAIN_NPZ_DIR = "dataset/train/labels"
@@ -112,7 +113,7 @@ def main():
         val_npz_dir=VAL_NPZ_DIR,
     )
 
-    model = CephalometricSwinGCN(num_landmarks=13).to(device)
+    model = CephalometricSwinGCN(num_landmarks=NUM_LANDMARKS).to(device)
 
     optimizer = optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-4)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
