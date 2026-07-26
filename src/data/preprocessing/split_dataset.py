@@ -3,30 +3,45 @@ import os
 import shutil
 from pathlib import Path
 from sklearn.model_selection import train_test_split
+from tqdm import tqdm
 
 
-def setup_directories(base_output_dir):
-    """Creates the necessary folder structure for the splits."""
+def setup_directories(base_output_dir, clean_output=True):
+    """Creates the necessary folder structure for the splits, optionally clearing existing split contents."""
     splits = ["train", "val", "test"]
     subdirs = ["images", "labels"]
 
+    base_path = Path(base_output_dir)
+
     for split in splits:
+        split_dir = base_path / split
+        if clean_output and split_dir.exists():
+            shutil.rmtree(split_dir)
         for subdir in subdirs:
-            dir_path = Path(base_output_dir) / split / subdir
-            dir_path.mkdir(parents=True, exist_ok=True)
+            (split_dir / subdir).mkdir(parents=True, exist_ok=True)
 
 
 def get_paired_files(images_dir, labels_dir):
-    """Matches images with their corresponding .npz label files."""
+    """Matches images with their corresponding .npz label files in deterministic order."""
     images_path = Path(images_dir)
     labels_path = Path(labels_dir)
+
+    if not images_path.exists():
+        raise FileNotFoundError(f"Images directory not found: {images_dir}")
+    if not labels_path.exists():
+        raise FileNotFoundError(f"Labels directory not found: {labels_dir}")
 
     # Supported image extensions
     valid_extensions = {".jpg", ".jpeg", ".png", ".bmp"}
 
-    image_files = [
-        f for f in images_path.iterdir() if f.suffix.lower() in valid_extensions
-    ]
+    # Sort files to ensure deterministic splits across OS/filesystems
+    image_files = sorted(
+        [
+            f
+            for f in images_path.iterdir()
+            if f.is_file() and f.suffix.lower() in valid_extensions
+        ]
+    )
 
     paired_data = []
     missing_labels = 0
@@ -51,16 +66,18 @@ def get_paired_files(images_dir, labels_dir):
 
 def copy_files(file_pairs, split_name, base_output_dir):
     """Copies the paired files to their respective split directories."""
-    print(f"Copying {len(file_pairs)} files to {split_name}...")
+    if not file_pairs:
+        print(f"No files to copy for {split_name}.")
+        return
 
-    for img_path, label_path in file_pairs:
-        # Define destinations
+    for img_path, label_path in tqdm(
+        file_pairs, desc=f"Copying files to {split_name}", unit="pair"
+    ):
         img_dest = Path(base_output_dir) / split_name / "images" / Path(img_path).name
         label_dest = (
             Path(base_output_dir) / split_name / "labels" / Path(label_path).name
         )
 
-        # Copy files
         shutil.copy2(img_path, img_dest)
         shutil.copy2(label_path, label_dest)
 
@@ -73,9 +90,13 @@ def split_dataset(
     val_ratio=0.15,
     test_ratio=0.15,
     seed=42,
+    clean_output=True,
 ):
     """
     Creates train-val-test splits for image/label pairs and copies them into output_dir structure.
+
+    Returns:
+        dict: Counts of dataset split pairs {"train": int, "val": int, "test": int}.
     """
     total_ratio = train_ratio + val_ratio + test_ratio
     if not (0.99 <= total_ratio <= 1.01):
@@ -83,40 +104,49 @@ def split_dataset(
             f"Train, val, and test ratios must sum to 1.0. Current sum: {total_ratio}"
         )
 
-    setup_directories(output_dir)
+    setup_directories(output_dir, clean_output=clean_output)
     paired_files = get_paired_files(images_dir, labels_dir)
 
     if not paired_files:
         print("No paired files found. Please check your input directories.")
-        return
+        return {"train": 0, "val": 0, "test": 0}
 
-    X = [pair[0] for pair in paired_files]
-    y = [pair[1] for pair in paired_files]
+    # First split: Separate test set if test_ratio > 0
+    if test_ratio > 0:
+        temp_pairs, test_pairs = train_test_split(
+            paired_files, test_size=test_ratio, random_state=seed
+        )
+    else:
+        temp_pairs, test_pairs = paired_files, []
 
-    X_temp, X_test, y_temp, y_test = train_test_split(
-        X, y, test_size=test_ratio, random_state=seed
-    )
-
-    relative_val_ratio = val_ratio / (train_ratio + val_ratio)
-    X_train, X_val, y_train, y_val = train_test_split(
-        X_temp, y_temp, test_size=relative_val_ratio, random_state=seed
-    )
-
-    train_pairs = list(zip(X_train, y_train))
-    val_pairs = list(zip(X_val, y_val))
-    test_pairs = list(zip(X_test, y_test))
+    # Second split: Separate train and validation sets
+    if val_ratio > 0:
+        relative_val_ratio = val_ratio / (train_ratio + val_ratio)
+        train_pairs, val_pairs = train_test_split(
+            temp_pairs, test_size=relative_val_ratio, random_state=seed
+        )
+    else:
+        train_pairs, val_pairs = temp_pairs, []
 
     print("\n--- Starting Data Transfer ---")
     copy_files(train_pairs, "train", output_dir)
     copy_files(val_pairs, "val", output_dir)
     copy_files(test_pairs, "test", output_dir)
 
+    split_counts = {
+        "train": len(train_pairs),
+        "val": len(val_pairs),
+        "test": len(test_pairs),
+    }
+
     print("\n--- Split Complete ---")
     print(f"Total dataset size: {len(paired_files)}")
-    print(f"Train set: {len(train_pairs)} pairs")
-    print(f"Validation set: {len(val_pairs)} pairs")
-    print(f"Test set: {len(test_pairs)} pairs")
+    print(f"Train set: {split_counts['train']} pairs")
+    print(f"Validation set: {split_counts['val']} pairs")
+    print(f"Test set: {split_counts['test']} pairs")
     print(f"Output stored in: {os.path.abspath(output_dir)}")
+
+    return split_counts
 
 
 def main():
@@ -165,6 +195,12 @@ def main():
         default=42,
         help="Random seed for reproducibility.",
     )
+    parser.add_argument(
+        "--no-clean",
+        action="store_false",
+        dest="clean_output",
+        help="Do not clean target split directories prior to copying.",
+    )
 
     args = parser.parse_args()
 
@@ -176,9 +212,11 @@ def main():
         val_ratio=args.val_ratio,
         test_ratio=args.test_ratio,
         seed=args.seed,
+        clean_output=args.clean_output,
     )
 
 
 if __name__ == "__main__":
     main()
+
 
