@@ -20,6 +20,7 @@ EPOCHS = 100
 LR = 1e-4
 LAMBDA_HM = 1.0
 LAMBDA_CD = 10.0
+EARLY_STOPPING_PATIENCE = 10
 SAVE_PATH = "./artifacts/best.pth"
 
 load_dotenv()
@@ -132,7 +133,7 @@ def validate_epoch(model, dataloader, mse_loss, l1_loss, lambda_hm, lambda_cd, d
     return val_loss, metrics
 
 
-def main(epochs: int = EPOCHS, batch_size: int = BATCH_SIZE):
+def main(epochs: int = EPOCHS, batch_size: int = BATCH_SIZE, patience: int = EARLY_STOPPING_PATIENCE):
     if torch.cuda.is_available():
         device = torch.device("cuda")
     elif torch.backends.mps.is_available():
@@ -164,6 +165,7 @@ def main(epochs: int = EPOCHS, batch_size: int = BATCH_SIZE):
 
     # --- Training Loop ---
     best_val_loss = float("inf")
+    patience_counter = 0
 
     print("Starting training...")
     for epoch in range(epochs):
@@ -195,9 +197,10 @@ def main(epochs: int = EPOCHS, batch_size: int = BATCH_SIZE):
             f"SDR@2.5px: {metrics['sdr_2_5']:.1f}%"
         )
 
-        # Checkpoint Saving
+        # Checkpoint Saving & Early Stopping
         if val_loss < best_val_loss:
             best_val_loss = val_loss
+            patience_counter = 0
             os.makedirs(os.path.dirname(SAVE_PATH), exist_ok=True)
             torch.save(
                 {
@@ -219,6 +222,12 @@ def main(epochs: int = EPOCHS, batch_size: int = BATCH_SIZE):
             # --- MINIO UPLOAD TRIGGER ---
             upload_artifact_to_minio(SAVE_PATH, "best_latest.pth")
             # upload_artifact_to_minio(SAVE_PATH, f"best_epoch_{epoch + 1}.pth")
+        else:
+            patience_counter += 1
+            print(f"No improvement in validation loss for {patience_counter} epoch(s).")
+            if patience_counter >= patience:
+                print(f"Early stopping triggered: Validation loss did not improve for {patience} consecutive epochs.")
+                break
 
 
 if __name__ == "__main__":
@@ -226,7 +235,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train Cephalometric Swin-GCN model")
     parser.add_argument("--epochs", "-e", type=int, default=EPOCHS, help="Number of training epochs")
     parser.add_argument("--batch-size", "-b", type=int, default=BATCH_SIZE, help="Batch size for training")
+    parser.add_argument("--patience", "-p", type=int, default=EARLY_STOPPING_PATIENCE, help="Early stopping patience (epochs)")
     args = parser.parse_args()
-    main(epochs=args.epochs, batch_size=args.batch_size)
+    main(epochs=args.epochs, batch_size=args.batch_size, patience=args.patience)
+
 
 
