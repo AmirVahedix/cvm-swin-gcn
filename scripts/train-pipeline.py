@@ -31,6 +31,13 @@ def main():
         help="Number of training epochs.",
     )
     parser.add_argument(
+        "--batch-size",
+        "-b",
+        type=int,
+        default=8,
+        help="Batch size for training.",
+    )
+    parser.add_argument(
         "--skip-download",
         action="store_true",
         help="Skip downloading raw export and images from Label Studio.",
@@ -148,8 +155,8 @@ def main():
             print("\n[1-4/6] Skipping steps 1 to 4 (--train-only flag set).")
 
         # Step 5: Model Training
-        print(f"\n[5/6] Executing: train_main() with {args.epochs} epochs")
-        train_main(epochs=args.epochs)
+        print(f"\n[5/6] Executing: train_main() with {args.epochs} epochs, batch_size={args.batch_size}")
+        train_main(epochs=args.epochs, batch_size=args.batch_size)
         print("-" * 20)
 
         # Step 6: Model Evaluation

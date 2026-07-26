@@ -15,8 +15,8 @@ TRAIN_NPZ_DIR = "dataset/train/labels"
 VAL_IMG_DIR = "dataset/val/images"
 VAL_NPZ_DIR = "dataset/val/labels"
 
-BATCH_SIZE = 8
-EPOCHS = 1
+BATCH_SIZE = 32
+EPOCHS = 100
 LR = 1e-4
 LAMBDA_HM = 1.0
 LAMBDA_CD = 10.0
@@ -132,7 +132,7 @@ def validate_epoch(model, dataloader, mse_loss, l1_loss, lambda_hm, lambda_cd, d
     return val_loss, metrics
 
 
-def main(epochs: int = EPOCHS):
+def main(epochs: int = EPOCHS, batch_size: int = BATCH_SIZE):
     if torch.cuda.is_available():
         device = torch.device("cuda")
     elif torch.backends.mps.is_available():
@@ -146,7 +146,7 @@ def main(epochs: int = EPOCHS):
         train_npz_dir=TRAIN_NPZ_DIR,
         val_img_dir=VAL_IMG_DIR,
         val_npz_dir=VAL_NPZ_DIR,
-        batch_size=BATCH_SIZE,
+        batch_size=batch_size,
     )
 
     model = CephalometricSwinGCN(num_landmarks=NUM_LANDMARKS).to(device)
@@ -225,6 +225,8 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Train Cephalometric Swin-GCN model")
     parser.add_argument("--epochs", "-e", type=int, default=EPOCHS, help="Number of training epochs")
+    parser.add_argument("--batch-size", "-b", type=int, default=BATCH_SIZE, help="Batch size for training")
     args = parser.parse_args()
-    main(epochs=args.epochs)
+    main(epochs=args.epochs, batch_size=args.batch_size)
+
 
