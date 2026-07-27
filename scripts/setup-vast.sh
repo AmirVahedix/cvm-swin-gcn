@@ -68,15 +68,70 @@ else
     cd "$PROJECT_DIR" || exit
 fi
 
-# 5. Install uv and sync dependencies
-echo -e "\n${BLUE}📦 Syncing UV dependencies...${NC}"
-# Removed 's' (silent) from curl flags to show download progress
+# 5. Install uv and detect CUDA / PyTorch configuration
+echo -e "\n${BLUE}📦 Setting up UV and PyTorch environment...${NC}"
 curl -LSf https://astral.sh/uv/install.sh | sh
 
-# Ensure the cargo bin directory is in PATH for the current script execution
+# Ensure the cargo bin directory is in PATH for current script execution
 export PATH="$HOME/.cargo/bin:$PATH"
 
-# Run uv sync (output is already visible by default)
-uv pip install --system .
+# --- Automatic CUDA & GPU Detection ---
+echo -e "${BLUE}🔍 Detecting GPU and CUDA version...${NC}"
 
-echo -e "${GREEN}✅ Setup Complete!${NC}"
+CUDA_VERSION=""
+if command -v nvidia-smi &> /dev/null; then
+    CUDA_VERSION=$(nvidia-smi 2>/dev/null | grep -i "CUDA Version" | sed -E 's/.*CUDA Version:[[:space:]]*([0-9]+\.[0-9]+).*/\1/' | head -n 1)
+fi
+
+if [ -z "$CUDA_VERSION" ] && command -v nvcc &> /dev/null; then
+    CUDA_VERSION=$(nvcc --version 2>/dev/null | grep -i "release" | sed -E 's/.*release ([0-9]+\.[0-9]+).*/\1/' | head -n 1)
+fi
+
+if [ -n "$CUDA_VERSION" ]; then
+    CUDA_MAJOR=$(echo "$CUDA_VERSION" | cut -d'.' -f1)
+    CUDA_MINOR=$(echo "$CUDA_VERSION" | cut -d'.' -f2)
+    echo -e "${GREEN}✅ Detected host CUDA version: ${CUDA_VERSION}${NC}"
+
+    if [ "$CUDA_MAJOR" -ge 12 ]; then
+        if [ "$CUDA_MINOR" -ge 6 ]; then
+            CUDA_TAG="cu126"
+        elif [ "$CUDA_MINOR" -ge 4 ]; then
+            CUDA_TAG="cu124"
+        else
+            CUDA_TAG="cu121"
+        fi
+    elif [ "$CUDA_MAJOR" -eq 11 ]; then
+        CUDA_TAG="cu118"
+    else
+        CUDA_TAG="cpu"
+    fi
+else
+    echo -e "${RED}⚠️ No NVIDIA GPU / CUDA detected. Falling back to CPU PyTorch index.${NC}"
+    CUDA_TAG="cpu"
+fi
+
+PYTORCH_INDEX_URL="https://download.pytorch.org/whl/${CUDA_TAG}"
+echo -e "${BLUE}🎯 Selected PyTorch Index: ${PYTORCH_INDEX_URL}${NC}"
+
+# Pre-install CUDA-matched PyTorch & torchvision
+echo -e "${BLUE}⬇️ Installing PyTorch and torchvision (${CUDA_TAG})...${NC}"
+uv pip install --system torch torchvision torchaudio --index-url "${PYTORCH_INDEX_URL}"
+
+# Install project dependencies using extra index url
+echo -e "${BLUE}📦 Syncing remaining project dependencies...${NC}"
+uv pip install --system --extra-index-url "${PYTORCH_INDEX_URL}" .
+
+# --- Verify PyTorch & CUDA installation ---
+echo -e "\n${BLUE}🧪 Verifying PyTorch GPU / CUDA installation...${NC}"
+python3 -c '
+import torch
+print(f"  - PyTorch version: {torch.__version__}")
+print(f"  - CUDA Available:  {torch.cuda.is_available()}")
+if torch.cuda.is_available():
+    print(f"  - Device Count:    {torch.cuda.device_count()}")
+    print(f"  - Device Name:     {torch.cuda.get_device_name(0)}")
+else:
+    print("  - WARNING: CUDA is NOT available to PyTorch! Training will use CPU.")
+'
+
+echo -e "\n${GREEN}✅ Setup Complete!${NC}"
