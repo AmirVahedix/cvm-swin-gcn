@@ -64,7 +64,18 @@ class CVMDataset(Dataset):
             heatmaps_tensor = torch.from_numpy(heatmaps).float()
             transformed_coords = coords_pixels.copy().astype(np.float32)
 
-        # 5. Re-normalize coordinates back to [0, 1] for network safety
+        # 5. Ensure heatmaps_tensor is a float32 tensor with shape [C, H, W]
+        if isinstance(heatmaps_tensor, torch.Tensor):
+            if heatmaps_tensor.ndim == 3 and heatmaps_tensor.shape[-1] == 13:
+                heatmaps_tensor = heatmaps_tensor.permute(2, 0, 1).float()
+            else:
+                heatmaps_tensor = heatmaps_tensor.float()
+        else:
+            heatmaps_tensor = torch.from_numpy(heatmaps_tensor).float()
+            if heatmaps_tensor.ndim == 3 and heatmaps_tensor.shape[-1] == 13:
+                heatmaps_tensor = heatmaps_tensor.permute(2, 0, 1)
+
+        # 6. Re-normalize coordinates back to [0, 1] for network safety
         transformed_coords = np.clip(transformed_coords, 0, self.img_size - 1)
         coords_normalized = transformed_coords / self.img_size
         coords_tensor = torch.tensor(coords_normalized, dtype=torch.float32)

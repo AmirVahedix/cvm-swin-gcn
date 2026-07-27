@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import time
+from tqdm import tqdm
 from src.data import get_dataloaders
 from src.models.model import CephalometricSwinGCN
 import boto3
@@ -57,11 +58,18 @@ def train_epoch(
     lambda_hm,
     lambda_cd,
     device,
+    epoch: int = 1,
+    epochs: int = 1,
 ):
     model.train()
     epoch_loss = 0.0
 
-    for batch in dataloader:
+    pbar = tqdm(
+        dataloader,
+        desc=f"Epoch [{epoch}/{epochs}] Train",
+        leave=False,
+    )
+    for step, batch in enumerate(pbar, 1):
         images = batch["image"].to(device)
         gt_heatmaps = batch["heatmaps"].to(device)
         gt_coords = batch["coords"].to(device)
@@ -79,17 +87,34 @@ def train_epoch(
         optimizer.step()
 
         epoch_loss += total_loss.item()
+        pbar.set_postfix(loss=f"{epoch_loss / step:.4f}")
 
-    return epoch_loss / len(dataloader)
+    return epoch_loss / len(dataloader) if len(dataloader) > 0 else 0.0
 
 
-def validate_epoch(model, dataloader, mse_loss, l1_loss, lambda_hm, lambda_cd, device, img_size=640):
+def validate_epoch(
+    model,
+    dataloader,
+    mse_loss,
+    l1_loss,
+    lambda_hm,
+    lambda_cd,
+    device,
+    img_size=640,
+    epoch: int = 1,
+    epochs: int = 1,
+):
     model.eval()
     epoch_loss = 0.0
     all_radial_errors = []
 
+    pbar = tqdm(
+        dataloader,
+        desc=f"Epoch [{epoch}/{epochs}] Val",
+        leave=False,
+    )
     with torch.no_grad():
-        for batch in dataloader:
+        for step, batch in enumerate(pbar, 1):
             images = batch["image"].to(device)
             gt_heatmaps = batch["heatmaps"].to(device)
             gt_coords = batch["coords"].to(device)
@@ -107,6 +132,8 @@ def validate_epoch(model, dataloader, mse_loss, l1_loss, lambda_hm, lambda_cd, d
             gt_px = gt_coords * img_size
             radial_errors = torch.sqrt(torch.sum((pred_px - gt_px) ** 2, dim=-1))  # [B, N]
             all_radial_errors.append(radial_errors.cpu())
+
+            pbar.set_postfix(loss=f"{epoch_loss / step:.4f}")
 
     val_loss = epoch_loss / len(dataloader) if len(dataloader) > 0 else 0.0
 
@@ -180,10 +207,21 @@ def main(epochs: int = EPOCHS, batch_size: int = BATCH_SIZE, patience: int = EAR
             LAMBDA_HM,
             LAMBDA_CD,
             device,
+            epoch=epoch + 1,
+            epochs=epochs,
         )
 
         val_loss, metrics = validate_epoch(
-            model, val_loader, mse_loss, l1_loss, LAMBDA_HM, LAMBDA_CD, device
+            model,
+            val_loader,
+            mse_loss,
+            l1_loss,
+            LAMBDA_HM,
+            LAMBDA_CD,
+            device,
+            img_size=640,
+            epoch=epoch + 1,
+            epochs=epochs,
         )
 
         epoch_time = time.time() - start_time
