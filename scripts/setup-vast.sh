@@ -75,6 +75,20 @@ curl -LSf https://astral.sh/uv/install.sh | sh
 # Ensure the cargo bin directory is in PATH for current script execution
 export PATH="$HOME/.cargo/bin:$PATH"
 
+# --- Locate Python Executable ---
+PYTHON_BIN=""
+if command -v python3 &> /dev/null; then
+    PYTHON_BIN=$(command -v python3)
+elif command -v python &> /dev/null; then
+    PYTHON_BIN=$(command -v python)
+else
+    echo -e "${RED}❌ Python binary not found in PATH!${NC}"
+    exit 1
+fi
+
+PYTHON_VERSION=$("$PYTHON_BIN" --version 2>&1)
+echo -e "${BLUE}🐍 Using Python binary: ${PYTHON_BIN} (${PYTHON_VERSION})${NC}"
+
 # --- Automatic CUDA & GPU Detection ---
 echo -e "${BLUE}🔍 Detecting GPU and CUDA version...${NC}"
 
@@ -113,17 +127,17 @@ fi
 PYTORCH_INDEX_URL="https://download.pytorch.org/whl/${CUDA_TAG}"
 echo -e "${BLUE}🎯 Selected PyTorch Index: ${PYTORCH_INDEX_URL}${NC}"
 
-# Pre-install CUDA-matched PyTorch & torchvision
+# Pre-install CUDA-matched PyTorch & torchvision into detected Python environment
 echo -e "${BLUE}⬇️ Installing PyTorch and torchvision (${CUDA_TAG})...${NC}"
-uv pip install --system torch torchvision torchaudio --index-url "${PYTORCH_INDEX_URL}"
+uv pip install --system --python "$PYTHON_BIN" torch torchvision torchaudio --index-url "${PYTORCH_INDEX_URL}"
 
 # Install project dependencies using extra index url
 echo -e "${BLUE}📦 Syncing remaining project dependencies...${NC}"
-uv pip install --system --extra-index-url "${PYTORCH_INDEX_URL}" .
+uv pip install --system --python "$PYTHON_BIN" --extra-index-url "${PYTORCH_INDEX_URL}" .
 
 # --- Verify PyTorch & CUDA installation ---
 echo -e "\n${BLUE}🧪 Verifying PyTorch GPU / CUDA installation...${NC}"
-python3 -c '
+"$PYTHON_BIN" -c '
 import torch
 print(f"  - PyTorch version: {torch.__version__}")
 print(f"  - CUDA Available:  {torch.cuda.is_available()}")
