@@ -52,6 +52,9 @@ fi
 
 REPO_URL="https://${GITHUB_TOKEN}@github.com/${GITHUB_USER}/${REPO_NAME}.git"
 
+# Prevent uv from downloading an external Python version
+export UV_PYTHON_DOWNLOADS=never
+
 # 4. Clone or update the repository
 if [ -d "$PROJECT_DIR" ]; then
     cd "$PROJECT_DIR" || exit
@@ -66,6 +69,13 @@ else
         exit 1
     fi
     cd "$PROJECT_DIR" || exit
+fi
+
+# Clean up any cloned .python-version or strict requires-python that force uv to switch Python runtimes
+rm -f "${PROJECT_DIR}/.python-version" 2>/dev/null || true
+if [ -f "${PROJECT_DIR}/pyproject.toml" ]; then
+    sed -i 's/requires-python = ">=[0-9]*\.[0-9]*"/requires-python = ">=3.8"/g' "${PROJECT_DIR}/pyproject.toml" 2>/dev/null || true
+    sed -i 's/torch>=[0-9]*\.[0-9]*\.[0-9]*/torch>=2.0.0/g' "${PROJECT_DIR}/pyproject.toml" 2>/dev/null || true
 fi
 
 # 5. Install uv and detect CUDA / PyTorch configuration
@@ -129,11 +139,17 @@ echo -e "${BLUE}🎯 Selected PyTorch Index: ${PYTORCH_INDEX_URL}${NC}"
 
 # Pre-install CUDA-matched PyTorch & torchvision into detected Python environment
 echo -e "${BLUE}⬇️ Installing PyTorch and torchvision (${CUDA_TAG})...${NC}"
-uv pip install --system --python "$PYTHON_BIN" torch torchvision torchaudio --index-url "${PYTORCH_INDEX_URL}"
+if ! uv pip install --system --python "$PYTHON_BIN" --no-python-downloads --break-system-packages torch torchvision torchaudio --index-url "${PYTORCH_INDEX_URL}"; then
+    echo -e "${RED}⚠️ uv pip install failed, attempting fallback via $PYTHON_BIN -m pip...${NC}"
+    "$PYTHON_BIN" -m pip install --break-system-packages torch torchvision torchaudio --index-url "${PYTORCH_INDEX_URL}"
+fi
 
 # Install project dependencies using extra index url
 echo -e "${BLUE}📦 Syncing remaining project dependencies...${NC}"
-uv pip install --system --python "$PYTHON_BIN" --extra-index-url "${PYTORCH_INDEX_URL}" .
+if ! uv pip install --system --python "$PYTHON_BIN" --no-python-downloads --break-system-packages --extra-index-url "${PYTORCH_INDEX_URL}" .; then
+    echo -e "${RED}⚠️ uv pip install . failed, attempting fallback via $PYTHON_BIN -m pip...${NC}"
+    "$PYTHON_BIN" -m pip install --break-system-packages --extra-index-url "${PYTORCH_INDEX_URL}" .
+fi
 
 # --- Verify PyTorch & CUDA installation ---
 echo -e "\n${BLUE}🧪 Verifying PyTorch GPU / CUDA installation...${NC}"
