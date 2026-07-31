@@ -24,29 +24,7 @@ LAMBDA_CD = 10.0
 EARLY_STOPPING_PATIENCE = 10
 SAVE_PATH = "./artifacts/best.pth"
 
-load_dotenv()
-
-
-s3_client = boto3.client(
-    "s3",
-    endpoint_url=os.getenv("MINIO_ENDPOINT"),
-    aws_access_key_id=os.getenv("MINIO_USERNAME") or os.getenv("MINIO_USER") or os.getenv("MINIO_ACCESS_KEY"),
-    aws_secret_access_key=os.getenv("MINIO_PASSWORD") or os.getenv("MINIO_SECRET_KEY"),
-)
-
-BUCKET_NAME = os.getenv("MINIO_BUCKET", "cvm-artifacts")
-
-
-def upload_artifact_to_minio(file_path, object_name=None):
-    """Uploads a file to MinIO."""
-    if object_name is None:
-        object_name = os.path.basename(file_path)
-
-    try:
-        s3_client.upload_file(file_path, BUCKET_NAME, object_name)
-        print(f"✅ Successfully uploaded {object_name} to MinIO.")
-    except Exception as e:
-        print(f"❌ Failed to upload {object_name} to MinIO: {e}")
+from src.utils.minio_utils import upload_artifact_to_minio
 
 
 def train_epoch(
