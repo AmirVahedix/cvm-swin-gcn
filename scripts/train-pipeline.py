@@ -2,6 +2,12 @@ import sys
 import argparse
 from pathlib import Path
 
+# Add project root to sys.path if needed
+ROOT_DIR = Path(__file__).resolve().parent.parent
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+
 from src.utils.verify_env import verify_env
 from src.data.preprocessing.download_data import download_export_and_images
 from src.data.preprocessing.resize_images import resize_images
@@ -10,11 +16,6 @@ from src.data.preprocessing.split_dataset import split_dataset
 from src.train import main as train_main
 from src.eval import run_evaluation
 from src.utils.test_mlflow import run_mlflow_test
-
-# Add project root to sys.path if needed
-ROOT_DIR = Path(__file__).resolve().parent.parent
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
 
 
 def main():
