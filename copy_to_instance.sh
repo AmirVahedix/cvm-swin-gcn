@@ -48,8 +48,8 @@ if [ -z "$INSTANCE_PORT" ]; then
     INSTANCE_PORT="${INPUT_PORT:-22}"
 fi
 
-# Remote destination directory (defaults to home directory ~)
-REMOTE_DEST="${3:-~}"
+# Remote destination directory (defaults to /workspace)
+REMOTE_DEST="${3:-/workspace}"
 
 echo -e "\n${BLUE}🚀 Uploading files to ${SSH_USER}@${INSTANCE_IP}:${INSTANCE_PORT} (${REMOTE_DEST}/)...${NC}"
 echo -e "   📄 .env             -> ${ENV_FILE}"
@@ -58,6 +58,14 @@ echo -e "   📜 scripts/setup.sh -> ${SETUP_SCRIPT}\n"
 # Execute scp
 if scp -P "$INSTANCE_PORT" "$ENV_FILE" "$SETUP_SCRIPT" "${SSH_USER}@${INSTANCE_IP}:${REMOTE_DEST}/"; then
     echo -e "\n${GREEN}✅ Files copied successfully to ${SSH_USER}@${INSTANCE_IP}:${INSTANCE_PORT}:${REMOTE_DEST}/${NC}"
+    
+    echo -e "${BLUE}🔧 Making setup.sh executable...${NC}"
+    if ssh -p "$INSTANCE_PORT" "${SSH_USER}@${INSTANCE_IP}" "chmod +x ${REMOTE_DEST}/setup.sh"; then
+        echo -e "${GREEN}✅ setup.sh is now executable.${NC}"
+    else
+        echo -e "${RED}❌ Failed to set executable permissions for setup.sh via ssh.${NC}"
+        exit 1
+    fi
 else
     echo -e "\n${RED}❌ Failed to copy files via scp.${NC}"
     exit 1
