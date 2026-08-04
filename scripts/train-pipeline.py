@@ -2,11 +2,6 @@ import sys
 import argparse
 from pathlib import Path
 
-# Add project root to sys.path if needed
-ROOT_DIR = Path(__file__).resolve().parent.parent
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
-
 from src.utils.verify_env import verify_env
 from src.data.preprocessing.download_data import download_export_and_images
 from src.data.preprocessing.resize_images import resize_images
@@ -14,7 +9,12 @@ from src.data.preprocessing.generate_labels import generate_labels
 from src.data.preprocessing.split_dataset import split_dataset
 from src.train import main as train_main
 from src.eval import run_evaluation
-from scripts.test_mlflow import run_mlflow_test
+from src.utils.test_mlflow import run_mlflow_test
+
+# Add project root to sys.path if needed
+ROOT_DIR = Path(__file__).resolve().parent.parent
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 
 
 def main():
@@ -124,10 +124,15 @@ def main():
             success = run_mlflow_test(
                 tracking_uri=args.mlflow_tracking_uri,
                 experiment_name=args.mlflow_experiment_name,
-                run_name=f"preflight-{args.mlflow_run_name}" if args.mlflow_run_name else None,
+                run_name=f"preflight-{args.mlflow_run_name}"
+                if args.mlflow_run_name
+                else None,
             )
             if not success:
-                print("❌ MLflow connection test failed. Aborting pipeline.", file=sys.stderr)
+                print(
+                    "❌ MLflow connection test failed. Aborting pipeline.",
+                    file=sys.stderr,
+                )
                 sys.exit(1)
             print("✅ MLflow connection test passed.\n" + "-" * 20)
 
@@ -192,7 +197,9 @@ def main():
             print("\n[1-4/6] Skipping steps 1 to 4 (--train-only flag set).")
 
         # Step 5: Model Training
-        print(f"\n[5/6] Executing: train_main() with {args.epochs} epochs, batch_size={args.batch_size}")
+        print(
+            f"\n[5/6] Executing: train_main() with {args.epochs} epochs, batch_size={args.batch_size}"
+        )
         train_main(
             epochs=args.epochs,
             batch_size=args.batch_size,
