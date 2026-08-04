@@ -6,6 +6,16 @@ BLUE='\033[0;34m'
 RED='\033[0;31m'
 NC='\033[0m' # No Color
 
+# --- Command-line arguments parsing ---
+ONLY_PULL=false
+for arg in "$@"; do
+    case $arg in
+        --only-pull)
+            ONLY_PULL=true
+            ;;
+    esac
+done
+
 echo -e "${BLUE}=== Step 1: Environment Setup ===${NC}"
 
 WORKSPACE="/workspace"
@@ -25,6 +35,37 @@ else
     echo -e "${RED}⚠️ .env file not found at $ENV_FILE. Relying on system env vars...${NC}"
 fi
 # ----------------------
+
+# --- Only Pull Mode ---
+if [ "$ONLY_PULL" = true ]; then
+    echo -e "${BLUE}=== Mode: Only Pull Repository Changes ===${NC}"
+    TARGET_DIR="$PROJECT_DIR"
+    if [ ! -d "$TARGET_DIR" ] && [ -d "${SCRIPT_DIR}/../.git" ]; then
+        TARGET_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+    fi
+
+    if [ -d "$TARGET_DIR" ]; then
+        echo -e "${BLUE}🔄 Pulling latest changes into ${TARGET_DIR}...${NC}"
+        cd "$TARGET_DIR" || exit 1
+        git pull
+        echo -e "${GREEN}✅ Successfully pulled latest repository changes without touching existing data.${NC}"
+    else
+        echo -e "${BLUE}📥 Repository not found. Cloning repository into ${PROJECT_DIR}...${NC}"
+        if [ -z "${GITHUB_TOKEN// }" ] || [ -z "${GITHUB_USER// }" ]; then
+            echo -e "${RED}❌ GITHUB_TOKEN or GITHUB_USER missing in environment variables${NC}"
+            exit 1
+        fi
+        REPO_URL="https://${GITHUB_TOKEN}@github.com/${GITHUB_USER}/${REPO_NAME}.git"
+        mkdir -p "$WORKSPACE"
+        cd "$WORKSPACE" || exit 1
+        if ! git clone "$REPO_URL" "$PROJECT_DIR" 2>&1 | sed "s|${GITHUB_TOKEN}|***HIDDEN_TOKEN***|g"; then
+            echo -e "${RED}❌ Failed to clone repository.${NC}"
+            exit 1
+        fi
+        echo -e "${GREEN}✅ Successfully cloned repository.${NC}"
+    fi
+    exit 0
+fi
 
 # 1. Check if repository already exists and prompt for update
 if [ -d "$PROJECT_DIR" ]; then

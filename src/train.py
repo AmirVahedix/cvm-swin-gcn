@@ -465,7 +465,7 @@ def main(
                     f"MAE: {metrics['mae']:.2f} px, RMSE: {metrics['rmse']:.2f} px, SDR@2.5px: {metrics['sdr_2_5']:.1f}%)"
                 )
 
-                # Log best metrics and checkpoint artifact to MLflow
+                # Log best metrics to MLflow
                 mlflow.log_metrics(
                     {
                         "best_val_loss": best_val_loss,
@@ -475,7 +475,6 @@ def main(
                     },
                     step=epoch + 1,
                 )
-                mlflow.log_artifact(SAVE_PATH, artifact_path="checkpoints")
             else:
                 patience_counter += 1
                 print(f"No improvement in validation loss for {patience_counter} epoch(s).")
@@ -486,6 +485,15 @@ def main(
         # --- GENERATE & LOG TRAINING METRIC PNG CHARTS TO MLFLOW ---
         print("\n--- Generating and Logging Training Metric PNG Charts to MLflow ---")
         generate_and_log_training_charts(history, log_to_mlflow=True)
+
+        # --- LOG BEST MODEL CHECKPOINT TO MLFLOW ---
+        if os.path.exists(SAVE_PATH):
+            print("\n--- Logging Best Model Checkpoint to MLflow ---")
+            try:
+                mlflow.log_artifact(SAVE_PATH, artifact_path="checkpoints")
+                print(f"--> Successfully logged best checkpoint artifact '{SAVE_PATH}' to MLflow.")
+            except Exception as ml_err:
+                print(f"⚠️ Warning: Could not log checkpoint artifact to MLflow: {ml_err}")
 
         # --- POST-TRAINING EVALUATION & MLFLOW LOGGING ---
         if not skip_eval and os.path.exists(SAVE_PATH):
