@@ -1,6 +1,7 @@
 import os
 import sys
 import time
+import tempfile
 from pathlib import Path
 
 import torch
@@ -145,6 +146,145 @@ def validate_epoch(
     return val_loss, metrics
 
 
+def generate_and_log_training_charts(history: dict, log_to_mlflow: bool = True):
+    """
+    Generates PNG diagram charts for all metrics tracked during training history over epochs,
+    and logs them as artifacts inside MLflow.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    if not history or "epochs" not in history or len(history["epochs"]) == 0:
+        print("⚠️ No training history available to plot charts.")
+        return
+
+    epochs = history["epochs"]
+    with tempfile.TemporaryDirectory() as temp_dir:
+        target_dir = Path(temp_dir)
+        plt.style.use("seaborn-v0_8-whitegrid" if "seaborn-v0_8-whitegrid" in plt.style.available else "default")
+        plt.rcParams.update({"font.sans-serif": "DejaVu Sans", "font.family": "sans-serif"})
+
+        # 1. Loss Chart (Train Loss vs Val Loss)
+        fig1, ax1 = plt.subplots(figsize=(8, 4.5), dpi=300)
+        ax1.plot(epochs, history.get("train_loss", []), label="Train Loss", color="#e76f51", linewidth=2)
+        ax1.plot(epochs, history.get("val_loss", []), label="Val Loss", color="#2a9d8f", linewidth=2, linestyle="--")
+        ax1.set_xlabel("Epoch")
+        ax1.set_ylabel("Loss")
+        ax1.set_title("Training & Validation Loss Over Epochs", fontsize=12, fontweight="bold")
+        ax1.legend(loc="upper right")
+        ax1.grid(True, linestyle="--", alpha=0.5)
+        plt.tight_layout()
+        fig1.savefig(target_dir / "chart_training_val_loss.png", bbox_inches="tight")
+        plt.close(fig1)
+
+        # 2. Validation MAE Chart
+        fig2, ax2 = plt.subplots(figsize=(8, 4.5), dpi=300)
+        ax2.plot(epochs, history.get("val_mae", []), label="Val MAE (px)", color="#e63946", linewidth=2, marker="o", markersize=4)
+        ax2.set_xlabel("Epoch")
+        ax2.set_ylabel("MAE (Pixels)")
+        ax2.set_title("Validation Mean Absolute Error (MAE) Over Epochs", fontsize=12, fontweight="bold")
+        ax2.legend(loc="upper right")
+        ax2.grid(True, linestyle="--", alpha=0.5)
+        plt.tight_layout()
+        fig2.savefig(target_dir / "chart_val_mae.png", bbox_inches="tight")
+        plt.close(fig2)
+
+        # 3. Validation RMSE Chart
+        fig3, ax3 = plt.subplots(figsize=(8, 4.5), dpi=300)
+        ax3.plot(epochs, history.get("val_rmse", []), label="Val RMSE (px)", color="#457b9d", linewidth=2, marker="s", markersize=4)
+        ax3.set_xlabel("Epoch")
+        ax3.set_ylabel("RMSE (Pixels)")
+        ax3.set_title("Validation Root Mean Squared Error (RMSE) Over Epochs", fontsize=12, fontweight="bold")
+        ax3.legend(loc="upper right")
+        ax3.grid(True, linestyle="--", alpha=0.5)
+        plt.tight_layout()
+        fig3.savefig(target_dir / "chart_val_rmse.png", bbox_inches="tight")
+        plt.close(fig3)
+
+        # 4. Validation SDR Chart
+        fig4, ax4 = plt.subplots(figsize=(8, 4.5), dpi=300)
+        ax4.plot(epochs, history.get("val_sdr_2_0", []), label="SDR @ 2.0px", color="#d62828", linewidth=1.8)
+        ax4.plot(epochs, history.get("val_sdr_2_5", []), label="SDR @ 2.5px", color="#f77f00", linewidth=2.0)
+        ax4.plot(epochs, history.get("val_sdr_3_0", []), label="SDR @ 3.0px", color="#fcbf49", linewidth=1.8)
+        ax4.plot(epochs, history.get("val_sdr_4_0", []), label="SDR @ 4.0px", color="#003049", linewidth=1.8)
+        ax4.set_xlabel("Epoch")
+        ax4.set_ylabel("Successful Detection Rate (%)")
+        ax4.set_ylim(0, 105)
+        ax4.set_title("Validation Successful Detection Rates (SDR) Over Epochs", fontsize=12, fontweight="bold")
+        ax4.legend(loc="lower right")
+        ax4.grid(True, linestyle="--", alpha=0.5)
+        plt.tight_layout()
+        fig4.savefig(target_dir / "chart_val_sdr.png", bbox_inches="tight")
+        plt.close(fig4)
+
+        # 5. Learning Rate Chart
+        fig5, ax5 = plt.subplots(figsize=(8, 4.5), dpi=300)
+        ax5.plot(epochs, history.get("learning_rate", []), label="Learning Rate", color="#8338ec", linewidth=2)
+        ax5.set_xlabel("Epoch")
+        ax5.set_ylabel("Learning Rate")
+        ax5.set_yscale("log")
+        ax5.set_title("Learning Rate Schedule Over Epochs", fontsize=12, fontweight="bold")
+        ax5.legend(loc="upper right")
+        ax5.grid(True, linestyle="--", alpha=0.5)
+        plt.tight_layout()
+        fig5.savefig(target_dir / "chart_learning_rate.png", bbox_inches="tight")
+        plt.close(fig5)
+
+        # 6. Training Dashboard Grid (2x3)
+        fig6, axes = plt.subplots(2, 3, figsize=(18, 10), dpi=300)
+        axes[0, 0].plot(epochs, history.get("train_loss", []), label="Train Loss", color="#e76f51")
+        axes[0, 0].plot(epochs, history.get("val_loss", []), label="Val Loss", color="#2a9d8f", linestyle="--")
+        axes[0, 0].set_title("Loss Curves", fontweight="bold", fontsize=10)
+        axes[0, 0].set_xlabel("Epoch", fontsize=8)
+        axes[0, 0].legend(fontsize=8)
+        axes[0, 0].grid(True, linestyle="--", alpha=0.5)
+
+        axes[0, 1].plot(epochs, history.get("val_mae", []), label="Val MAE", color="#e63946")
+        axes[0, 1].set_title("Validation MAE (px)", fontweight="bold", fontsize=10)
+        axes[0, 1].set_xlabel("Epoch", fontsize=8)
+        axes[0, 1].grid(True, linestyle="--", alpha=0.5)
+
+        axes[0, 2].plot(epochs, history.get("val_rmse", []), label="Val RMSE", color="#457b9d")
+        axes[0, 2].set_title("Validation RMSE (px)", fontweight="bold", fontsize=10)
+        axes[0, 2].set_xlabel("Epoch", fontsize=8)
+        axes[0, 2].grid(True, linestyle="--", alpha=0.5)
+
+        axes[1, 0].plot(epochs, history.get("val_sdr_2_0", []), label="SDR 2.0px", color="#d62828")
+        axes[1, 0].plot(epochs, history.get("val_sdr_2_5", []), label="SDR 2.5px", color="#f77f00")
+        axes[1, 0].plot(epochs, history.get("val_sdr_3_0", []), label="SDR 3.0px", color="#fcbf49")
+        axes[1, 0].plot(epochs, history.get("val_sdr_4_0", []), label="SDR 4.0px", color="#003049")
+        axes[1, 0].set_title("Validation SDR (%)", fontweight="bold", fontsize=10)
+        axes[1, 0].set_xlabel("Epoch", fontsize=8)
+        axes[1, 0].legend(fontsize=8)
+        axes[1, 0].grid(True, linestyle="--", alpha=0.5)
+
+        axes[1, 1].plot(epochs, history.get("learning_rate", []), label="Learning Rate", color="#8338ec")
+        axes[1, 1].set_yscale("log")
+        axes[1, 1].set_title("Learning Rate Schedule", fontweight="bold", fontsize=10)
+        axes[1, 1].set_xlabel("Epoch", fontsize=8)
+        axes[1, 1].grid(True, linestyle="--", alpha=0.5)
+
+        axes[1, 2].plot(epochs, history.get("epoch_time_seconds", []), label="Epoch Time (s)", color="#3a86ff")
+        axes[1, 2].set_title("Epoch Duration (Seconds)", fontweight="bold", fontsize=10)
+        axes[1, 2].set_xlabel("Epoch", fontsize=8)
+        axes[1, 2].grid(True, linestyle="--", alpha=0.5)
+
+        plt.suptitle("TRAINING & VALIDATION METRIC CURVES DASHBOARD", fontsize=14, fontweight="bold")
+        plt.tight_layout()
+        fig6.savefig(target_dir / "chart_training_dashboard.png", bbox_inches="tight")
+        plt.close(fig6)
+
+        if log_to_mlflow:
+            try:
+                active_run = mlflow.active_run()
+                if active_run is not None:
+                    mlflow.log_artifacts(str(target_dir), artifact_path="training_metric_charts")
+                    print(f"--> Successfully logged training metric PNG charts to MLflow artifact path 'training_metric_charts'")
+            except Exception as ml_err:
+                print(f"⚠️ Warning: Could not log training charts to MLflow: {ml_err}")
+
+
 def main(
     epochs: int = EPOCHS,
     batch_size: int = BATCH_SIZE,
@@ -218,6 +358,20 @@ def main(
             }
         )
 
+        history = {
+            "epochs": [],
+            "train_loss": [],
+            "val_loss": [],
+            "val_mae": [],
+            "val_rmse": [],
+            "val_sdr_2_0": [],
+            "val_sdr_2_5": [],
+            "val_sdr_3_0": [],
+            "val_sdr_4_0": [],
+            "learning_rate": [],
+            "epoch_time_seconds": [],
+        }
+
         for epoch in range(epochs):
             start_time = time.time()
 
@@ -251,6 +405,19 @@ def main(
             current_lr = optimizer.param_groups[0]["lr"]
 
             scheduler.step(val_loss)
+
+            # Accumulate history metrics
+            history["epochs"].append(epoch + 1)
+            history["train_loss"].append(float(train_loss))
+            history["val_loss"].append(float(val_loss))
+            history["val_mae"].append(float(metrics["mae"]))
+            history["val_rmse"].append(float(metrics["rmse"]))
+            history["val_sdr_2_0"].append(float(metrics["sdr_2_0"]))
+            history["val_sdr_2_5"].append(float(metrics["sdr_2_5"]))
+            history["val_sdr_3_0"].append(float(metrics["sdr_3_0"]))
+            history["val_sdr_4_0"].append(float(metrics["sdr_4_0"]))
+            history["learning_rate"].append(float(current_lr))
+            history["epoch_time_seconds"].append(float(epoch_time))
 
             # Log per-epoch metrics to MLflow
             mlflow.log_metrics(
@@ -315,6 +482,10 @@ def main(
                 if patience_counter >= patience:
                     print(f"Early stopping triggered: Validation loss did not improve for {patience} consecutive epochs.")
                     break
+
+        # --- GENERATE & LOG TRAINING METRIC PNG CHARTS TO MLFLOW ---
+        print("\n--- Generating and Logging Training Metric PNG Charts to MLflow ---")
+        generate_and_log_training_charts(history, log_to_mlflow=True)
 
         # --- POST-TRAINING EVALUATION & MLFLOW LOGGING ---
         if not skip_eval and os.path.exists(SAVE_PATH):

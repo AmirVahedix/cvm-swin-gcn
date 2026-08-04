@@ -2,12 +2,17 @@ import os
 import sys
 import json
 import argparse
+import tempfile
 from datetime import datetime
 from pathlib import Path
 
 import cv2
 import numpy as np
 import torch
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import mlflow
 
 # Ensure project root is in sys.path
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -193,7 +198,7 @@ def compute_metrics(
             "sdr_4.0px": l_sdr4_0,
         })
 
-    return summary_metrics, landmark_metrics
+    return summary_metrics, landmark_metrics, valid_radial_errors
 
 
 def format_metrics_table(
@@ -261,6 +266,245 @@ def format_metrics_table(
     lines.append("+" + "-" * 4 + "+" + "-" * 12 + "+" + "-" * 10 + "+" + "-" * 11 + "+" + "-" * 10 + "+" + "-" * 11 + "+" + "-" * 11 + "+" + "-" * 11 + "+")
 
     return "\n".join(lines)
+
+
+def generate_evaluation_charts(
+    summary_metrics: dict,
+    landmark_metrics: list[dict],
+    valid_radial_errors: np.ndarray,
+    save_dir: Path | str | None = None,
+    log_to_mlflow: bool = True,
+) -> dict[str, str]:
+    """
+    Generates PNG diagram charts for all evaluation metrics and logs them as artifacts to MLflow.
+    """
+    use_temp = save_dir is None
+    temp_dir_obj = None
+    if use_temp:
+        temp_dir_obj = tempfile.TemporaryDirectory()
+        target_dir = Path(temp_dir_obj.name)
+    else:
+        target_dir = Path(save_dir)
+        target_dir.mkdir(parents=True, exist_ok=True)
+
+    generated_charts = {}
+
+    try:
+        plt.style.use("seaborn-v0_8-whitegrid" if "seaborn-v0_8-whitegrid" in plt.style.available else "default")
+        plt.rcParams.update({"font.sans-serif": "DejaVu Sans", "font.family": "sans-serif"})
+
+        group_colors = {"C2": "#e63946", "C3": "#2a9d8f", "C4": "#457b9d"}
+        lm_names = [lm["name"] for lm in landmark_metrics]
+        lm_indices = np.arange(len(landmark_metrics))
+        width = 0.25
+
+        # 1. Landmark Errors Bar Chart (MAE, RMSE, MRE)
+        fig1, ax1 = plt.subplots(figsize=(10, 5), dpi=300)
+        mre_vals = [lm["mre_px"] for lm in landmark_metrics]
+        mae_vals = [lm["mae_px"] for lm in landmark_metrics]
+        rmse_vals = [lm["rmse_px"] for lm in landmark_metrics]
+
+        ax1.bar(lm_indices - width, mre_vals, width, label="MRE (px)", color="#e76f51", alpha=0.9)
+        ax1.bar(lm_indices, mae_vals, width, label="MAE (px)", color="#2a9d8f", alpha=0.9)
+        ax1.bar(lm_indices + width, rmse_vals, width, label="RMSE (px)", color="#457b9d", alpha=0.9)
+
+        ax1.set_xticks(lm_indices)
+        ax1.set_xticklabels(lm_names, rotation=45, ha="right")
+        ax1.set_ylabel("Error (Pixels)")
+        ax1.set_title("Per-Landmark Errors Breakdown (MRE / MAE / RMSE)", fontsize=12, fontweight="bold")
+        ax1.legend(loc="upper right")
+        ax1.grid(True, linestyle="--", alpha=0.5)
+        plt.tight_layout()
+        p1 = target_dir / "chart_landmark_errors.png"
+        fig1.savefig(p1, bbox_inches="tight")
+        plt.close(fig1)
+        generated_charts["landmark_errors"] = str(p1)
+
+        # 2. Per-Landmark SDR Bar Chart (SDR@2.5px vs SDR@4.0px)
+        fig2, ax2 = plt.subplots(figsize=(10, 5), dpi=300)
+        sdr2_5 = [lm["sdr_2.5px"] for lm in landmark_metrics]
+        sdr4_0 = [lm["sdr_4.0px"] for lm in landmark_metrics]
+
+        ax2.bar(lm_indices - width / 2, sdr2_5, width, label="SDR @ 2.5px (%)", color="#3a86ff", alpha=0.9)
+        ax2.bar(lm_indices + width / 2, sdr4_0, width, label="SDR @ 4.0px (%)", color="#8338ec", alpha=0.9)
+
+        ax2.set_xticks(lm_indices)
+        ax2.set_xticklabels(lm_names, rotation=45, ha="right")
+        ax2.set_ylabel("Detection Rate (%)")
+        ax2.set_ylim(0, 105)
+        ax2.set_title("Per-Landmark SDR Comparison (SDR@2.5px vs SDR@4.0px)", fontsize=12, fontweight="bold")
+        ax2.legend(loc="lower right")
+        ax2.grid(True, linestyle="--", alpha=0.5)
+        plt.tight_layout()
+        p2 = target_dir / "chart_landmark_sdr.png"
+        fig2.savefig(p2, bbox_inches="tight")
+        plt.close(fig2)
+        generated_charts["landmark_sdr"] = str(p2)
+
+        # 3. SDR Threshold Curve (Cumulative Detection Rate)
+        fig3, ax3 = plt.subplots(figsize=(8, 5), dpi=300)
+        thresholds = [2.0, 2.5, 3.0, 4.0, 5.0, 10.0]
+        sdr_values = [summary_metrics.get(f"sdr_{th}px", 0.0) for th in thresholds]
+
+        ax3.plot(thresholds, sdr_values, marker="o", linewidth=2.5, color="#ff006e", markersize=8)
+        for th, val in zip(thresholds, sdr_values):
+            ax3.annotate(f"{val:.1f}%", (th, val), textcoords="offset points", xytext=(0, 8), ha="center", fontsize=9, fontweight="bold")
+
+        ax3.set_xlabel("Radius Threshold (Pixels)")
+        ax3.set_ylabel("Successful Detection Rate (%)")
+        ax3.set_ylim(0, 108)
+        ax3.set_title("Cumulative SDR Curve Across Distance Thresholds", fontsize=12, fontweight="bold")
+        ax3.grid(True, linestyle="--", alpha=0.5)
+        plt.tight_layout()
+        p3 = target_dir / "chart_sdr_thresholds.png"
+        fig3.savefig(p3, bbox_inches="tight")
+        plt.close(fig3)
+        generated_charts["sdr_thresholds"] = str(p3)
+
+        # 4. Confusion Matrix Heatmap
+        fig4, ax4 = plt.subplots(figsize=(6, 5), dpi=300)
+        cm = summary_metrics.get("confusion_matrix", {"TP": 0, "FP": 0, "FN": 0, "TN": 0})
+        cm_matrix = np.array([[cm["TP"], cm["FP"]], [cm["FN"], cm["TN"]]])
+
+        im = ax4.imshow(cm_matrix, cmap="Blues", interpolation="nearest")
+        ax4.set_xticks([0, 1])
+        ax4.set_yticks([0, 1])
+        ax4.set_xticklabels(["Positive", "Negative"])
+        ax4.set_yticklabels(["Positive", "Negative"])
+        ax4.set_xlabel("Predicted Class")
+        ax4.set_ylabel("Actual Class")
+        ax4.set_title(f"Detection Confusion Matrix (@ {summary_metrics.get('detection_threshold_px', 2.5)}px)", fontsize=11, fontweight="bold")
+
+        labels = [["TP", "FP"], ["FN", "TN"]]
+        for i in range(2):
+            for j in range(2):
+                val = cm_matrix[i, j]
+                ax4.text(j, i, f"{labels[i][j]}\n{val}", ha="center", va="center", color="white" if val > cm_matrix.max() / 2 else "black", fontweight="bold", fontsize=12)
+
+        plt.colorbar(im, ax=ax4)
+        plt.tight_layout()
+        p4 = target_dir / "chart_confusion_matrix.png"
+        fig4.savefig(p4, bbox_inches="tight")
+        plt.close(fig4)
+        generated_charts["confusion_matrix"] = str(p4)
+
+        # 5. Summary Evaluation Metrics Bar Chart
+        fig5, ax5 = plt.subplots(figsize=(8, 4.5), dpi=300)
+        eval_keys = ["accuracy", "precision", "recall_sensitivity", "specificity", "f1_score"]
+        eval_labels = ["Accuracy", "Precision", "Recall / Sens.", "Specificity", "F1-Score"]
+        eval_vals = [summary_metrics.get(k, 0.0) for k in eval_keys]
+        colors = ["#06d6a0", "#118ab2", "#ffd166", "#ef476f", "#073b4c"]
+
+        bars = ax5.barh(eval_labels, eval_vals, color=colors, height=0.55, alpha=0.9)
+        for bar, val in zip(bars, eval_vals):
+            ax5.text(val + 0.01, bar.get_y() + bar.get_height() / 2, f"{val:.4f}", va="center", fontweight="bold", fontsize=10)
+
+        ax5.set_xlim(0, 1.15)
+        ax5.set_xlabel("Score [0.0 - 1.0]")
+        ax5.set_title("Overall Summary Detection & Classification Metrics", fontsize=12, fontweight="bold")
+        ax5.grid(True, linestyle="--", alpha=0.5)
+        plt.tight_layout()
+        p5 = target_dir / "chart_evaluation_summary.png"
+        fig5.savefig(p5, bbox_inches="tight")
+        plt.close(fig5)
+        generated_charts["evaluation_summary"] = str(p5)
+
+        # 6. Radial Error Distribution Histogram
+        fig6, ax6 = plt.subplots(figsize=(8, 4.5), dpi=300)
+        ax6.hist(valid_radial_errors, bins=30, color="#fb8500", edgecolor="black", alpha=0.7, density=True, label="Radial Error (px)")
+
+        mean_err = summary_metrics.get("mre_pixels", np.mean(valid_radial_errors))
+        med_err = summary_metrics.get("medre_pixels", np.median(valid_radial_errors))
+
+        ax6.axvline(mean_err, color="red", linestyle="--", linewidth=2, label=f"Mean (MRE): {mean_err:.2f}px")
+        ax6.axvline(med_err, color="green", linestyle="-.", linewidth=2, label=f"Median (MedRE): {med_err:.2f}px")
+
+        ax6.set_xlabel("Radial Error (Pixels)")
+        ax6.set_ylabel("Density")
+        ax6.set_title("Radial Error Distribution Across All Test Samples", fontsize=12, fontweight="bold")
+        ax6.legend(loc="upper right")
+        ax6.grid(True, linestyle="--", alpha=0.5)
+        plt.tight_layout()
+        p6 = target_dir / "chart_radial_error_distribution.png"
+        fig6.savefig(p6, bbox_inches="tight")
+        plt.close(fig6)
+        generated_charts["radial_error_distribution"] = str(p6)
+
+        # 7. Evaluation Dashboard (2x3 Grid)
+        fig7, axes = plt.subplots(2, 3, figsize=(18, 10), dpi=300)
+
+        # Subplot (0,0): Landmark Errors
+        axes[0, 0].bar(lm_indices - width, mre_vals, width, label="MRE", color="#e76f51")
+        axes[0, 0].bar(lm_indices, mae_vals, width, label="MAE", color="#2a9d8f")
+        axes[0, 0].bar(lm_indices + width, rmse_vals, width, label="RMSE", color="#457b9d")
+        axes[0, 0].set_xticks(lm_indices)
+        axes[0, 0].set_xticklabels(lm_names, rotation=45, ha="right", fontsize=8)
+        axes[0, 0].set_title("Landmark Errors Breakdown", fontsize=10, fontweight="bold")
+        axes[0, 0].legend(fontsize=8)
+        axes[0, 0].grid(True, linestyle="--", alpha=0.5)
+
+        # Subplot (0,1): Per-Landmark SDR
+        axes[0, 1].bar(lm_indices - width / 2, sdr2_5, width, label="SDR@2.5px", color="#3a86ff")
+        axes[0, 1].bar(lm_indices + width / 2, sdr4_0, width, label="SDR@4.0px", color="#8338ec")
+        axes[0, 1].set_xticks(lm_indices)
+        axes[0, 1].set_xticklabels(lm_names, rotation=45, ha="right", fontsize=8)
+        axes[0, 1].set_title("Per-Landmark SDR", fontsize=10, fontweight="bold")
+        axes[0, 1].legend(fontsize=8)
+        axes[0, 1].grid(True, linestyle="--", alpha=0.5)
+
+        # Subplot (0,2): SDR Curve
+        axes[0, 2].plot(thresholds, sdr_values, marker="o", color="#ff006e", linewidth=2)
+        axes[0, 2].set_title("Cumulative SDR Curve", fontsize=10, fontweight="bold")
+        axes[0, 2].set_xlabel("Threshold (px)", fontsize=9)
+        axes[0, 2].set_ylabel("SDR (%)", fontsize=9)
+        axes[0, 2].grid(True, linestyle="--", alpha=0.5)
+
+        # Subplot (1,0): Confusion Matrix
+        axes[1, 0].imshow(cm_matrix, cmap="Blues", interpolation="nearest")
+        axes[1, 0].set_xticks([0, 1])
+        axes[1, 0].set_yticks([0, 1])
+        axes[1, 0].set_xticklabels(["Pos", "Neg"], fontsize=8)
+        axes[1, 0].set_yticklabels(["Pos", "Neg"], fontsize=8)
+        axes[1, 0].set_title("Confusion Matrix", fontsize=10, fontweight="bold")
+        for i in range(2):
+            for j in range(2):
+                axes[1, 0].text(j, i, f"{labels[i][j]}\n{cm_matrix[i, j]}", ha="center", va="center", fontweight="bold", fontsize=10)
+
+        # Subplot (1,1): Evaluation Summary
+        axes[1, 1].barh(eval_labels, eval_vals, color=colors, height=0.5, alpha=0.9)
+        axes[1, 1].set_xlim(0, 1.15)
+        axes[1, 1].set_title("Summary Metrics", fontsize=10, fontweight="bold")
+        axes[1, 1].grid(True, linestyle="--", alpha=0.5)
+
+        # Subplot (1,2): Error Distribution
+        axes[1, 2].hist(valid_radial_errors, bins=25, color="#fb8500", alpha=0.7, density=True)
+        axes[1, 2].axvline(mean_err, color="red", linestyle="--", label=f"MRE: {mean_err:.2f}")
+        axes[1, 2].set_title("Radial Error Distribution", fontsize=10, fontweight="bold")
+        axes[1, 2].legend(fontsize=8)
+        axes[1, 2].grid(True, linestyle="--", alpha=0.5)
+
+        plt.suptitle("SWIN-GCN EVALUATION METRICS DASHBOARD", fontsize=14, fontweight="bold")
+        plt.tight_layout()
+        p7 = target_dir / "chart_evaluation_dashboard.png"
+        fig7.savefig(p7, bbox_inches="tight")
+        plt.close(fig7)
+        generated_charts["evaluation_dashboard"] = str(p7)
+
+        # Log artifacts to MLflow if tracking is active
+        if log_to_mlflow:
+            try:
+                active_run = mlflow.active_run()
+                if active_run is not None:
+                    mlflow.log_artifacts(str(target_dir), artifact_path="evaluation/charts")
+                    print(f"--> Successfully logged evaluation metric PNG charts to MLflow artifact path 'evaluation/charts'")
+            except Exception as ml_err:
+                print(f"⚠️ Warning: Could not log evaluation charts to MLflow: {ml_err}")
+
+    finally:
+        if temp_dir_obj is not None:
+            temp_dir_obj.cleanup()
+
+    return generated_charts
 
 
 def draw_landmarks_on_image(
@@ -459,11 +703,20 @@ def run_evaluation(
     gt_array = np.concatenate(all_gts, axis=0)      # (N, 13, 2)
 
     # 4. Compute metrics
-    summary_metrics, landmark_metrics = compute_metrics(
+    summary_metrics, landmark_metrics, valid_radial_errors = compute_metrics(
         pred_coords=pred_array,
         gt_coords=gt_array,
         img_size=img_size,
         threshold_px=threshold_px,
+    )
+
+    # 4b. Generate & log metric PNG charts to MLflow
+    generate_evaluation_charts(
+        summary_metrics=summary_metrics,
+        landmark_metrics=landmark_metrics,
+        valid_radial_errors=valid_radial_errors,
+        save_dir=run_folder / "charts",
+        log_to_mlflow=True,
     )
 
     # 5. Format & print table
