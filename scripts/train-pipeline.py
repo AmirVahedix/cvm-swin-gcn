@@ -14,6 +14,7 @@ from src.data.preprocessing.generate_labels import generate_labels
 from src.data.preprocessing.split_dataset import split_dataset
 from src.train import main as train_main
 from src.eval import run_evaluation
+from scripts.test_mlflow import run_mlflow_test
 
 
 def main():
@@ -87,6 +88,29 @@ def main():
         action="store_true",
         help="Skip final model evaluation step after training.",
     )
+    parser.add_argument(
+        "--test-mlflow",
+        action="store_true",
+        help="Run MLflow connection test (upload test artifact & fake metrics) before pipeline execution.",
+    )
+    parser.add_argument(
+        "--mlflow-tracking-uri",
+        type=str,
+        default=None,
+        help="MLflow tracking URI (e.g., http://localhost:5000 or http://141.11.107.165:5000).",
+    )
+    parser.add_argument(
+        "--mlflow-experiment-name",
+        type=str,
+        default=None,
+        help="MLflow experiment name.",
+    )
+    parser.add_argument(
+        "--mlflow-run-name",
+        type=str,
+        default=None,
+        help="MLflow run name.",
+    )
 
     args = parser.parse_args()
 
@@ -94,6 +118,19 @@ def main():
     print(f"Training configured for {args.epochs} epochs.")
 
     try:
+        # Pre-flight MLflow Connection Test
+        if args.test_mlflow:
+            print("\n[MLflow Pre-Flight] Running MLflow connection test...")
+            success = run_mlflow_test(
+                tracking_uri=args.mlflow_tracking_uri,
+                experiment_name=args.mlflow_experiment_name,
+                run_name=f"preflight-{args.mlflow_run_name}" if args.mlflow_run_name else None,
+            )
+            if not success:
+                print("❌ MLflow connection test failed. Aborting pipeline.", file=sys.stderr)
+                sys.exit(1)
+            print("✅ MLflow connection test passed.\n" + "-" * 20)
+
         if not args.train_only:
             # Step 1: Download Images & Exports
             if not args.skip_download:
@@ -156,7 +193,14 @@ def main():
 
         # Step 5: Model Training
         print(f"\n[5/6] Executing: train_main() with {args.epochs} epochs, batch_size={args.batch_size}")
-        train_main(epochs=args.epochs, batch_size=args.batch_size)
+        train_main(
+            epochs=args.epochs,
+            batch_size=args.batch_size,
+            experiment_name=args.mlflow_experiment_name,
+            tracking_uri=args.mlflow_tracking_uri,
+            run_name=args.mlflow_run_name,
+            skip_eval=args.skip_eval,
+        )
         print("-" * 20)
 
         # Step 6: Model Evaluation
