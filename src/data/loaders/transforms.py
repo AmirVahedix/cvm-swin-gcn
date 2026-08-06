@@ -11,6 +11,7 @@ def get_transforms(img_size=640):
     """
     train_transform = A.Compose(
         [  # type: ignore[arg-type]
+            A.CLAHE(clip_limit=3.0, tile_grid_size=(8, 8), p=0.5),
             A.Affine(
                 translate_percent=0.05,
                 scale=(0.9, 1.1),

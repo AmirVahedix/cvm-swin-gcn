@@ -18,6 +18,7 @@ if str(ROOT_DIR) not in sys.path:
 
 from src.data import get_dataloaders, NUM_LANDMARKS
 from src.models.model import CephalometricSwinGCN
+from src.models.losses import AdaptiveWingLoss, WingLoss, AnatomicalGraphLoss
 from src.eval import run_evaluation
 
 TRAIN_IMG_DIR = "dataset/train/images"
@@ -31,18 +32,33 @@ EPOCHS = 100
 LR = 1e-4
 LAMBDA_HM = 1.0
 LAMBDA_CD = 10.0
+LAMBDA_GRAPH = 2.0
 EARLY_STOPPING_PATIENCE = 10
 SAVE_PATH = "./artifacts/best.pth"
+
+
+def get_landmark_weights(device: torch.device) -> torch.Tensor:
+    """
+    Constructs landmark loss weights prioritizing difficult lower-vertebral posterior landmarks.
+    """
+    weights = torch.ones(NUM_LANDMARKS, dtype=torch.float32, device=device)
+    weights[5] = 2.0   # C3_PI
+    weights[10] = 2.5  # C4_PI (worst performing landmark)
+    weights[12] = 2.0  # C4_AI
+    return weights
 
 
 def train_epoch(
     model,
     dataloader,
     optimizer,
-    mse_loss,
-    l1_loss,
+    awl_loss,
+    wing_loss,
+    graph_loss,
+    landmark_weights,
     lambda_hm,
     lambda_cd,
+    lambda_graph,
     device,
     epoch: int = 1,
     epochs: int = 1,
@@ -64,12 +80,14 @@ def train_epoch(
 
         pred_heatmaps, pred_coords = model(images)
 
-        loss_heatmap = mse_loss(pred_heatmaps, gt_heatmaps)
-        loss_coord = l1_loss(pred_coords, gt_coords)
+        loss_hm = awl_loss(pred_heatmaps, gt_heatmaps)
+        loss_cd = wing_loss(pred_coords, gt_coords, landmark_weights=landmark_weights)
+        loss_g = graph_loss(pred_coords, gt_coords)
 
-        total_loss = (lambda_hm * loss_heatmap) + (lambda_cd * loss_coord)
+        total_loss = (lambda_hm * loss_hm) + (lambda_cd * loss_cd) + (lambda_graph * loss_g)
 
         total_loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
 
         epoch_loss += total_loss.item()
@@ -81,10 +99,13 @@ def train_epoch(
 def validate_epoch(
     model,
     dataloader,
-    mse_loss,
-    l1_loss,
+    awl_loss,
+    wing_loss,
+    graph_loss,
+    landmark_weights,
     lambda_hm,
     lambda_cd,
+    lambda_graph,
     device,
     img_size=640,
     epoch: int = 1,
@@ -107,10 +128,11 @@ def validate_epoch(
 
             pred_heatmaps, pred_coords = model(images)
 
-            loss_heatmap = mse_loss(pred_heatmaps, gt_heatmaps)
-            loss_coord = l1_loss(pred_coords, gt_coords)
+            loss_hm = awl_loss(pred_heatmaps, gt_heatmaps)
+            loss_cd = wing_loss(pred_coords, gt_coords, landmark_weights=landmark_weights)
+            loss_g = graph_loss(pred_coords, gt_coords)
 
-            total_loss = (lambda_hm * loss_heatmap) + (lambda_cd * loss_coord)
+            total_loss = (lambda_hm * loss_hm) + (lambda_cd * loss_cd) + (lambda_graph * loss_g)
             epoch_loss += total_loss.item()
 
             # Radial errors (in pixels) across landmarks
@@ -331,8 +353,11 @@ def main(
         patience=5,
     )
 
-    mse_loss = nn.MSELoss()
-    l1_loss = nn.L1Loss()
+    # Losses & Landmark Weights
+    awl_loss = AdaptiveWingLoss().to(device)
+    wing_loss = WingLoss().to(device)
+    graph_loss = AnatomicalGraphLoss(model.adj_matrix).to(device)
+    landmark_weights = get_landmark_weights(device)
 
     best_val_loss = float("inf")
     patience_counter = 0
@@ -348,12 +373,16 @@ def main(
                 "learning_rate": lr,
                 "lambda_heatmap": LAMBDA_HM,
                 "lambda_coord": LAMBDA_CD,
+                "lambda_graph": LAMBDA_GRAPH,
                 "early_stopping_patience": patience,
                 "save_path": SAVE_PATH,
                 "img_size": 640,
                 "num_landmarks": NUM_LANDMARKS,
                 "optimizer": "AdamW",
                 "scheduler": "ReduceLROnPlateau",
+                "heatmap_loss": "AdaptiveWingLoss",
+                "coord_loss": "WingLoss",
+                "graph_loss": "AnatomicalGraphLoss",
                 "device": str(device),
             }
         )
@@ -379,10 +408,13 @@ def main(
                 model,
                 train_loader,
                 optimizer,
-                mse_loss,
-                l1_loss,
+                awl_loss,
+                wing_loss,
+                graph_loss,
+                landmark_weights,
                 LAMBDA_HM,
                 LAMBDA_CD,
+                LAMBDA_GRAPH,
                 device,
                 epoch=epoch + 1,
                 epochs=epochs,
@@ -391,10 +423,13 @@ def main(
             val_loss, metrics = validate_epoch(
                 model,
                 val_loader,
-                mse_loss,
-                l1_loss,
+                awl_loss,
+                wing_loss,
+                graph_loss,
+                landmark_weights,
                 LAMBDA_HM,
                 LAMBDA_CD,
+                LAMBDA_GRAPH,
                 device,
                 img_size=640,
                 epoch=epoch + 1,
