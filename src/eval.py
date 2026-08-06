@@ -189,11 +189,6 @@ def compute_metrics(
     min_err = float(np.min(valid_radial_errors))
     max_err = float(np.max(valid_radial_errors))
 
-    # Normalized variants
-    mae_norm = mae / img_size
-    rmse_norm = rmse / img_size
-    mre_norm = mre / img_size
-
     # 2. SDR (Successful Detection Rate) at various radial thresholds in pixels
     sdr_thresholds = [2.0, 2.5, 3.0, 4.0, 5.0, 10.0]
     sdr_dict = {}
@@ -201,18 +196,7 @@ def compute_metrics(
         sdr_val = float(np.mean(valid_radial_errors <= th) * 100.0)
         sdr_dict[f"sdr_{th}px"] = sdr_val
 
-    # 3. Detection / Classification Metrics at specified threshold_px
-    tp = int(np.sum(valid_radial_errors <= threshold_px))
-    fp = int(np.sum(valid_radial_errors > threshold_px))
-    fn = fp  # Missed positive targets
-    tn = 0   # Valid target landmarks dataset
-
     total_valid = len(valid_radial_errors)
-    precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
-    recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-    specificity = 1.0  # Given all evaluated target instances are valid ground truth targets
-    accuracy = tp / total_valid if total_valid > 0 else 0.0
-    f1_score = (2 * precision * recall) / (precision + recall) if (precision + recall) > 0 else 0.0
 
     summary_metrics = {
         "total_samples": int(pred_coords.shape[0]),
@@ -220,31 +204,16 @@ def compute_metrics(
         "mae_pixels": mae,
         "mae_x_pixels": mae_x,
         "mae_y_pixels": mae_y,
-        "mae_normalized": mae_norm,
         "rmse_pixels": rmse,
-        "rmse_normalized": rmse_norm,
         "mre_pixels": mre,
-        "mre_normalized": mre_norm,
         "medre_pixels": medre,
         "sdre_pixels": sdre,
         "min_error_pixels": min_err,
         "max_error_pixels": max_err,
         **sdr_dict,
-        "detection_threshold_px": threshold_px,
-        "precision": float(precision),
-        "recall_sensitivity": float(recall),
-        "specificity": float(specificity),
-        "accuracy": float(accuracy),
-        "f1_score": float(f1_score),
-        "confusion_matrix": {
-            "TP": tp,
-            "FP": fp,
-            "FN": fn,
-            "TN": tn,
-        },
     }
 
-    # 4. Per-landmark Breakdown
+    # 3. Per-landmark Breakdown
     landmark_metrics = []
     for i, name in enumerate(LANDMARK_CLASSES):
         l_mask = valid_mask[:, i]
@@ -297,7 +266,6 @@ def format_metrics_table(
     lines.append("=" * 80)
     lines.append(f"Checkpoint Weights: {weights_path}")
     lines.append(f"Total Test Images: {summary['total_samples']} | Total Valid Landmarks: {summary['total_valid_landmarks']}")
-    lines.append(f"Detection Threshold: {summary['detection_threshold_px']} pixels")
     lines.append("-" * 80)
 
     # 1. Overall Summary Table
@@ -307,9 +275,7 @@ def format_metrics_table(
     
     summary_rows = [
         ("MAE (Pixels)", f"{summary['mae_pixels']:.4f} px"),
-        ("MAE (Normalized)", f"{summary['mae_normalized']:.6f}"),
         ("RMSE (Pixels)", f"{summary['rmse_pixels']:.4f} px"),
-        ("RMSE (Normalized)", f"{summary['rmse_normalized']:.6f}"),
         ("MRE (Mean Radial Error)", f"{summary['mre_pixels']:.4f} px"),
         ("MedRE (Median Radial Error)", f"{summary['medre_pixels']:.4f} px"),
         ("SDRE (Std Dev Radial Error)", f"{summary['sdre_pixels']:.4f} px"),
@@ -321,12 +287,6 @@ def format_metrics_table(
         ("SDR @ 4.0 px", f"{summary['sdr_4.0px']:.2f} %"),
         ("SDR @ 5.0 px", f"{summary['sdr_5.0px']:.2f} %"),
         ("SDR @ 10.0 px", f"{summary['sdr_10.0px']:.2f} %"),
-        (f"Precision (@ {summary['detection_threshold_px']}px)", f"{summary['precision']:.4f}"),
-        (f"Recall / Sensitivity (@ {summary['detection_threshold_px']}px)", f"{summary['recall_sensitivity']:.4f}"),
-        ("Specificity", f"{summary['specificity']:.4f}"),
-        ("Accuracy", f"{summary['accuracy']:.4f}"),
-        ("F1-Score", f"{summary['f1_score']:.4f}"),
-        ("Confusion Matrix (TP / FP / FN / TN)", f"{summary['confusion_matrix']['TP']} / {summary['confusion_matrix']['FP']} / {summary['confusion_matrix']['FN']} / {summary['confusion_matrix']['TN']}"),
     ]
 
     for label, val in summary_rows:
@@ -442,77 +402,29 @@ def generate_evaluation_charts(
         plt.close(fig3)
         generated_charts["sdr_thresholds"] = str(p3)
 
-        # 4. Confusion Matrix Heatmap
-        fig4, ax4 = plt.subplots(figsize=(6, 5), dpi=300)
-        cm = summary_metrics.get("confusion_matrix", {"TP": 0, "FP": 0, "FN": 0, "TN": 0})
-        cm_matrix = np.array([[cm["TP"], cm["FP"]], [cm["FN"], cm["TN"]]])
-
-        im = ax4.imshow(cm_matrix, cmap="Blues", interpolation="nearest")
-        ax4.set_xticks([0, 1])
-        ax4.set_yticks([0, 1])
-        ax4.set_xticklabels(["Positive", "Negative"])
-        ax4.set_yticklabels(["Positive", "Negative"])
-        ax4.set_xlabel("Predicted Class")
-        ax4.set_ylabel("Actual Class")
-        ax4.set_title(f"Detection Confusion Matrix (@ {summary_metrics.get('detection_threshold_px', 2.5)}px)", fontsize=11, fontweight="bold")
-
-        labels = [["TP", "FP"], ["FN", "TN"]]
-        for i in range(2):
-            for j in range(2):
-                val = cm_matrix[i, j]
-                ax4.text(j, i, f"{labels[i][j]}\n{val}", ha="center", va="center", color="white" if val > cm_matrix.max() / 2 else "black", fontweight="bold", fontsize=12)
-
-        plt.colorbar(im, ax=ax4)
-        plt.tight_layout()
-        p4 = target_dir / "chart_confusion_matrix.png"
-        fig4.savefig(p4, bbox_inches="tight")
-        plt.close(fig4)
-        generated_charts["confusion_matrix"] = str(p4)
-
-        # 5. Summary Evaluation Metrics Bar Chart
-        fig5, ax5 = plt.subplots(figsize=(8, 4.5), dpi=300)
-        eval_keys = ["accuracy", "precision", "recall_sensitivity", "specificity", "f1_score"]
-        eval_labels = ["Accuracy", "Precision", "Recall / Sens.", "Specificity", "F1-Score"]
-        eval_vals = [summary_metrics.get(k, 0.0) for k in eval_keys]
-        colors = ["#06d6a0", "#118ab2", "#ffd166", "#ef476f", "#073b4c"]
-
-        bars = ax5.barh(eval_labels, eval_vals, color=colors, height=0.55, alpha=0.9)
-        for bar, val in zip(bars, eval_vals):
-            ax5.text(val + 0.01, bar.get_y() + bar.get_height() / 2, f"{val:.4f}", va="center", fontweight="bold", fontsize=10)
-
-        ax5.set_xlim(0, 1.15)
-        ax5.set_xlabel("Score [0.0 - 1.0]")
-        ax5.set_title("Overall Summary Detection & Classification Metrics", fontsize=12, fontweight="bold")
-        ax5.grid(True, linestyle="--", alpha=0.5)
-        plt.tight_layout()
-        p5 = target_dir / "chart_evaluation_summary.png"
-        fig5.savefig(p5, bbox_inches="tight")
-        plt.close(fig5)
-        generated_charts["evaluation_summary"] = str(p5)
-
-        # 6. Radial Error Distribution Histogram
-        fig6, ax6 = plt.subplots(figsize=(8, 4.5), dpi=300)
-        ax6.hist(valid_radial_errors, bins=30, color="#fb8500", edgecolor="black", alpha=0.7, density=True, label="Radial Error (px)")
+        # 4. Radial Error Distribution Histogram
+        fig4, ax4 = plt.subplots(figsize=(8, 4.5), dpi=300)
+        ax4.hist(valid_radial_errors, bins=30, color="#fb8500", edgecolor="black", alpha=0.7, density=True, label="Radial Error (px)")
 
         mean_err = summary_metrics.get("mre_pixels", np.mean(valid_radial_errors))
         med_err = summary_metrics.get("medre_pixels", np.median(valid_radial_errors))
 
-        ax6.axvline(mean_err, color="red", linestyle="--", linewidth=2, label=f"Mean (MRE): {mean_err:.2f}px")
-        ax6.axvline(med_err, color="green", linestyle="-.", linewidth=2, label=f"Median (MedRE): {med_err:.2f}px")
+        ax4.axvline(mean_err, color="red", linestyle="--", linewidth=2, label=f"Mean (MRE): {mean_err:.2f}px")
+        ax4.axvline(med_err, color="green", linestyle="-.", linewidth=2, label=f"Median (MedRE): {med_err:.2f}px")
 
-        ax6.set_xlabel("Radial Error (Pixels)")
-        ax6.set_ylabel("Density")
-        ax6.set_title("Radial Error Distribution Across All Test Samples", fontsize=12, fontweight="bold")
-        ax6.legend(loc="upper right")
-        ax6.grid(True, linestyle="--", alpha=0.5)
+        ax4.set_xlabel("Radial Error (Pixels)")
+        ax4.set_ylabel("Density")
+        ax4.set_title("Radial Error Distribution Across All Test Samples", fontsize=12, fontweight="bold")
+        ax4.legend(loc="upper right")
+        ax4.grid(True, linestyle="--", alpha=0.5)
         plt.tight_layout()
-        p6 = target_dir / "chart_radial_error_distribution.png"
-        fig6.savefig(p6, bbox_inches="tight")
-        plt.close(fig6)
-        generated_charts["radial_error_distribution"] = str(p6)
+        p4 = target_dir / "chart_radial_error_distribution.png"
+        fig4.savefig(p4, bbox_inches="tight")
+        plt.close(fig4)
+        generated_charts["radial_error_distribution"] = str(p4)
 
-        # 7. Evaluation Dashboard (2x3 Grid)
-        fig7, axes = plt.subplots(2, 3, figsize=(18, 10), dpi=300)
+        # 5. Evaluation Dashboard (2x2 Grid)
+        fig5, axes = plt.subplots(2, 2, figsize=(14, 10), dpi=300)
 
         # Subplot (0,0): Landmark Errors
         axes[0, 0].bar(lm_indices - width, mre_vals, width, label="MRE", color="#e76f51")
@@ -533,43 +445,26 @@ def generate_evaluation_charts(
         axes[0, 1].legend(fontsize=8)
         axes[0, 1].grid(True, linestyle="--", alpha=0.5)
 
-        # Subplot (0,2): SDR Curve
-        axes[0, 2].plot(thresholds, sdr_values, marker="o", color="#ff006e", linewidth=2)
-        axes[0, 2].set_title("Cumulative SDR Curve", fontsize=10, fontweight="bold")
-        axes[0, 2].set_xlabel("Threshold (px)", fontsize=9)
-        axes[0, 2].set_ylabel("SDR (%)", fontsize=9)
-        axes[0, 2].grid(True, linestyle="--", alpha=0.5)
+        # Subplot (1,0): SDR Curve
+        axes[1, 0].plot(thresholds, sdr_values, marker="o", color="#ff006e", linewidth=2)
+        axes[1, 0].set_title("Cumulative SDR Curve", fontsize=10, fontweight="bold")
+        axes[1, 0].set_xlabel("Threshold (px)", fontsize=9)
+        axes[1, 0].set_ylabel("SDR (%)", fontsize=9)
+        axes[1, 0].grid(True, linestyle="--", alpha=0.5)
 
-        # Subplot (1,0): Confusion Matrix
-        axes[1, 0].imshow(cm_matrix, cmap="Blues", interpolation="nearest")
-        axes[1, 0].set_xticks([0, 1])
-        axes[1, 0].set_yticks([0, 1])
-        axes[1, 0].set_xticklabels(["Pos", "Neg"], fontsize=8)
-        axes[1, 0].set_yticklabels(["Pos", "Neg"], fontsize=8)
-        axes[1, 0].set_title("Confusion Matrix", fontsize=10, fontweight="bold")
-        for i in range(2):
-            for j in range(2):
-                axes[1, 0].text(j, i, f"{labels[i][j]}\n{cm_matrix[i, j]}", ha="center", va="center", fontweight="bold", fontsize=10)
-
-        # Subplot (1,1): Evaluation Summary
-        axes[1, 1].barh(eval_labels, eval_vals, color=colors, height=0.5, alpha=0.9)
-        axes[1, 1].set_xlim(0, 1.15)
-        axes[1, 1].set_title("Summary Metrics", fontsize=10, fontweight="bold")
+        # Subplot (1,1): Error Distribution
+        axes[1, 1].hist(valid_radial_errors, bins=25, color="#fb8500", alpha=0.7, density=True)
+        axes[1, 1].axvline(mean_err, color="red", linestyle="--", label=f"MRE: {mean_err:.2f}")
+        axes[1, 1].set_title("Radial Error Distribution", fontsize=10, fontweight="bold")
+        axes[1, 1].legend(fontsize=8)
         axes[1, 1].grid(True, linestyle="--", alpha=0.5)
-
-        # Subplot (1,2): Error Distribution
-        axes[1, 2].hist(valid_radial_errors, bins=25, color="#fb8500", alpha=0.7, density=True)
-        axes[1, 2].axvline(mean_err, color="red", linestyle="--", label=f"MRE: {mean_err:.2f}")
-        axes[1, 2].set_title("Radial Error Distribution", fontsize=10, fontweight="bold")
-        axes[1, 2].legend(fontsize=8)
-        axes[1, 2].grid(True, linestyle="--", alpha=0.5)
 
         plt.suptitle("SWIN-GCN EVALUATION METRICS DASHBOARD", fontsize=14, fontweight="bold")
         plt.tight_layout()
-        p7 = target_dir / "chart_evaluation_dashboard.png"
-        fig7.savefig(p7, bbox_inches="tight")
-        plt.close(fig7)
-        generated_charts["evaluation_dashboard"] = str(p7)
+        p5 = target_dir / "chart_evaluation_dashboard.png"
+        fig5.savefig(p5, bbox_inches="tight")
+        plt.close(fig5)
+        generated_charts["evaluation_dashboard"] = str(p5)
 
         # Log artifacts to MLflow if tracking is active
         if log_to_mlflow:

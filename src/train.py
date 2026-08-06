@@ -516,9 +516,6 @@ def main(
                         if isinstance(v, (int, float)):
                             clean_k = f"test_{k}".replace("@", "").replace(".", "_").replace(" ", "_")
                             eval_metrics_to_log[clean_k] = float(v)
-                        elif k == "confusion_matrix" and isinstance(v, dict):
-                            for cm_k, cm_v in v.items():
-                                eval_metrics_to_log[f"test_cm_{cm_k}"] = float(cm_v)
 
                     mlflow.log_metrics(eval_metrics_to_log)
 
