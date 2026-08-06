@@ -23,11 +23,92 @@ from src.data import LANDMARK_CLASSES, NUM_LANDMARKS, get_test_dataloader
 from src.models.model import CephalometricSwinGCN
 
 
-GROUPS = [
-    {"range": range(0, 3), "color": (0, 0, 255), "mpl_color": "red", "label": "C2"},       # C2 (Red)
-    {"range": range(3, 8), "color": (0, 255, 0), "mpl_color": "lime", "label": "C3"},      # C3 (Lime/Green)
-    {"range": range(8, 13), "color": (255, 255, 0), "mpl_color": "cyan", "label": "C4"},   # C4 (Cyan/Blue)
+LANDMARK_COLORS_BGR = [
+    (0, 0, 255),      # 0: C2_PI - Red
+    (0, 140, 255),    # 1: C2_IC - Orange
+    (0, 215, 255),    # 2: C2_AI - Yellow
+    (0, 255, 128),    # 3: C3_PS - Spring Green
+    (0, 255, 0),      # 4: C3_AS - Green
+    (128, 255, 0),    # 5: C3_PI - Lime
+    (255, 255, 0),    # 6: C3_IC - Cyan
+    (255, 191, 0),    # 7: C3_AI - Azure
+    (255, 0, 0),      # 8: C4_PS - Blue
+    (255, 0, 128),    # 9: C4_AS - Violet
+    (255, 0, 255),    # 10: C4_PI - Magenta
+    (128, 0, 255),    # 11: C4_IC - Purple
+    (255, 255, 255),  # 12: C4_AI - White
 ]
+
+
+def draw_legend_box(vis_img: np.ndarray, num_landmarks: int):
+    """
+    Draws a clean, rectangular guide box in the top-right section of the image,
+    displaying each landmark's distinct color alongside its corresponding label.
+    """
+    h, w = vis_img.shape[:2]
+    total_landmarks = min(num_landmarks, len(LANDMARK_CLASSES))
+
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    font_scale = 0.38
+    thickness = 1
+    row_height = 18
+    padding_x = 10
+    padding_y = 8
+    dot_radius = 4
+
+    # Calculate max text width for tight guide box sizing
+    max_text_w = 0
+    for i in range(total_landmarks):
+        label_text = f"{i}:{LANDMARK_CLASSES[i]}"
+        (text_w, _), _ = cv2.getTextSize(label_text, font, font_scale, thickness)
+        if text_w > max_text_w:
+            max_text_w = text_w
+
+    box_w = padding_x * 2 + dot_radius * 2 + 8 + max_text_w
+    box_h = padding_y * 2 + total_landmarks * row_height
+
+    margin_right = 12
+    margin_top = 12
+
+    box_x2 = w - margin_right
+    box_x1 = max(0, box_x2 - box_w)
+    box_y1 = margin_top
+    box_y2 = min(h, box_y1 + box_h)
+
+    # Semi-transparent dark background for the guide box
+    sub_img = vis_img[box_y1:box_y2, box_x1:box_x2]
+    if sub_img.size > 0:
+        dark_rect = np.zeros_like(sub_img, dtype=np.uint8)
+        blended = cv2.addWeighted(sub_img, 0.2, dark_rect, 0.8, 0)
+        vis_img[box_y1:box_y2, box_x1:box_x2] = blended
+
+    # White outline border for the guide box
+    cv2.rectangle(vis_img, (box_x1, box_y1), (box_x2, box_y2), (220, 220, 220), 1)
+
+    # Render entries inside the guide box
+    for i in range(total_landmarks):
+        color_bgr = LANDMARK_COLORS_BGR[i % len(LANDMARK_COLORS_BGR)]
+        label_text = f"{i}:{LANDMARK_CLASSES[i]}"
+
+        center_y = box_y1 + padding_y + (i * row_height) + (row_height // 2)
+        dot_x = box_x1 + padding_x + dot_radius
+        text_x = dot_x + dot_radius + 6
+
+        # Draw colored dot
+        cv2.circle(vis_img, (dot_x, center_y), dot_radius, color_bgr, -1)
+        cv2.circle(vis_img, (dot_x, center_y), dot_radius + 1, (0, 0, 0), 1)
+
+        # Draw corresponding text label
+        cv2.putText(
+            vis_img,
+            label_text,
+            (text_x, center_y + 4),
+            font,
+            font_scale,
+            (255, 255, 255),
+            thickness,
+            cv2.LINE_AA,
+        )
 
 
 def load_model(weights_path: str, device: torch.device) -> torch.nn.Module:
@@ -511,11 +592,12 @@ def draw_landmarks_on_image(
     image: np.ndarray,
     pred_coords: np.ndarray,
     gt_coords: np.ndarray | None = None,
-    show_labels: bool = True,
     img_size: int = 640,
 ) -> np.ndarray:
     """
     Renders predicted landmarks (and optionally ground truth) onto an RGB image.
+    Each landmark is drawn in a distinct color, and a rectangular guide box (legend)
+    is rendered on the top right section of the image.
     """
     vis_img = image.copy()
     h, w = vis_img.shape[:2]
@@ -531,44 +613,22 @@ def draw_landmarks_on_image(
             cv2.circle(vis_img, (abs_x, abs_y), 6, (255, 255, 0), 1)  # Yellow outline circle
             cv2.drawMarker(vis_img, (abs_x, abs_y), (255, 255, 0), cv2.MARKER_CROSS, 8, 1)
 
-    # Draw Predicted landmarks per anatomical group
-    for group in GROUPS:
-        color_bgr = group["color"]
-        for i in group["range"]:
-            if i >= len(pred_coords):
-                continue
-            x_norm, y_norm = pred_coords[i]
-            abs_x = int(round(x_norm * w))
-            abs_y = int(round(y_norm * h))
+    # Draw Predicted landmarks with distinct colors
+    for i in range(len(pred_coords)):
+        x_norm, y_norm = pred_coords[i]
+        if x_norm < 0 or y_norm < 0:
+            continue
+        abs_x = int(round(x_norm * w))
+        abs_y = int(round(y_norm * h))
 
-            # Draw filled landmark circle
-            cv2.circle(vis_img, (abs_x, abs_y), 4, color_bgr, -1)
-            cv2.circle(vis_img, (abs_x, abs_y), 5, (0, 0, 0), 1)  # Black border
+        color_bgr = LANDMARK_COLORS_BGR[i % len(LANDMARK_COLORS_BGR)]
 
-            # Draw labels if enabled
-            if show_labels:
-                label_text = f"{i}:{LANDMARK_CLASSES[i]}" if i < len(LANDMARK_CLASSES) else str(i)
-                text_pos = (abs_x + 6, abs_y + 4)
-                
-                # Draw text background box for contrast
-                (text_w, text_h), baseline = cv2.getTextSize(label_text, cv2.FONT_HERSHEY_SIMPLEX, 0.4, 1)
-                cv2.rectangle(
-                    vis_img,
-                    (text_pos[0] - 2, text_pos[1] - text_h - 2),
-                    (text_pos[0] + text_w + 2, text_pos[1] + baseline),
-                    (0, 0, 0),
-                    -1,
-                )
-                cv2.putText(
-                    vis_img,
-                    label_text,
-                    text_pos,
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.4,
-                    (255, 255, 255),
-                    1,
-                    cv2.LINE_AA,
-                )
+        # Draw filled landmark circle with black border
+        cv2.circle(vis_img, (abs_x, abs_y), 4, color_bgr, -1)
+        cv2.circle(vis_img, (abs_x, abs_y), 5, (0, 0, 0), 1)
+
+    # Add rectangular guide box on top-right section
+    draw_legend_box(vis_img, len(pred_coords))
 
     return vis_img
 
@@ -579,7 +639,6 @@ def visualize_batch_and_save(
     device: torch.device,
     save_dir: Path,
     num_samples: int = 8,
-    show_labels: bool = True,
     img_size: int = 640,
     test_img_dir: str = "dataset/test/images",
 ):
@@ -620,7 +679,6 @@ def visualize_batch_and_save(
                     image=image_bgr,
                     pred_coords=pred_coords_batch[idx],
                     gt_coords=gt_coords_batch[idx],
-                    show_labels=show_labels,
                     img_size=img_size,
                 )
 
@@ -631,7 +689,7 @@ def visualize_batch_and_save(
             if saved_count >= num_samples:
                 break
 
-    print(f"--> Saved {saved_count} visualization PNGs to '{save_dir}' (Labels enabled: {show_labels})")
+    print(f"--> Saved {saved_count} visualization PNGs to '{save_dir}'")
 
 
 def run_evaluation(
@@ -643,7 +701,6 @@ def run_evaluation(
     batch_size: int = 8,
     img_size: int = 640,
     num_samples: int = 8,
-    show_labels: bool = True,
     threshold_px: float = 2.5,
     device_str: str | None = None,
 ) -> tuple[dict, str]:
@@ -754,7 +811,6 @@ def run_evaluation(
         device=device,
         save_dir=vis_folder,
         num_samples=num_samples,
-        show_labels=show_labels,
         img_size=img_size,
         test_img_dir=test_img_dir,
     )
@@ -820,11 +876,6 @@ def main():
         help="Number of test image visualizations to save as PNG.",
     )
     parser.add_argument(
-        "--no-labels",
-        action="store_true",
-        help="Disable drawing text labels on predicted landmarks in output PNGs.",
-    )
-    parser.add_argument(
         "--threshold-px",
         type=float,
         default=2.5,
@@ -842,7 +893,6 @@ def main():
         batch_size=args.batch_size,
         img_size=args.img_size,
         num_samples=args.num_samples,
-        show_labels=not args.no_labels,
         threshold_px=args.threshold_px,
     )
 

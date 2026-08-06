@@ -92,17 +92,6 @@ def visualize_gcn_coords(npz_dir, images_dir, num_samples=4):
                     markeredgecolor="black",
                 )
 
-                # Add text annotation for the landmark index (e.g., 0, 1, 2...)
-                axes[idx].text(
-                    abs_x + (w * 0.01),  # Slight offset based on image width
-                    abs_y + (h * 0.01),
-                    str(i),
-                    color=group["color"],
-                    fontsize=10,
-                    fontweight="bold",
-                    bbox=dict(facecolor="black", alpha=0.5, edgecolor="none", pad=1),
-                )
-
         axes[idx].set_title(f"GCN Coordinates: {base_name}")
         axes[idx].axis("off")
 

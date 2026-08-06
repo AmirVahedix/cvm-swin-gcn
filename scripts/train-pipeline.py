@@ -73,11 +73,7 @@ def main():
         default=8,
         help="Number of test image visualizations to save as PNG during evaluation.",
     )
-    parser.add_argument(
-        "--no-labels",
-        action="store_true",
-        help="Disable drawing text landmark labels on visualization PNGs.",
-    )
+
     parser.add_argument(
         "--threshold-px",
         type=float,
@@ -221,7 +217,6 @@ def main():
                 output_dir="evaluation",
                 img_size=args.target_size,
                 num_samples=args.eval_samples,
-                show_labels=not args.no_labels,
                 threshold_px=args.threshold_px,
             )
             print("-" * 20)
