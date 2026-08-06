@@ -54,19 +54,29 @@ class CephalometricSwinGCN(nn.Module):
 
     def _build_adjacency(self):
         adj = torch.eye(13)
-        # C2 (0,1,2)
+        # C2 (0: C2_PI, 1: C2_IC, 2: C2_AI)
         adj[0, 1] = adj[1, 0] = 1.0
         adj[1, 2] = adj[2, 1] = 1.0
-        # C3 (3,4,5,6,7)
-        adj[3, 4] = adj[4, 3] = 1.0
-        adj[4, 5] = adj[5, 4] = 1.0
-        adj[5, 6] = adj[6, 5] = 1.0
-        adj[6, 7] = adj[7, 6] = 1.0
-        # C4 (8,9,10,11,12)
-        adj[8, 9] = adj[9, 8] = 1.0
-        adj[9, 10] = adj[10, 9] = 1.0
-        adj[10, 11] = adj[11, 10] = 1.0
-        adj[11, 12] = adj[12, 11] = 1.0
+
+        # C3 (3: C3_PS, 4: C3_AS, 5: C3_PI, 6: C3_IC, 7: C3_AI)
+        adj[3, 4] = adj[4, 3] = 1.0  # Superior edge (PS <-> AS)
+        adj[4, 7] = adj[7, 4] = 1.0  # Anterior edge (AS <-> AI)
+        adj[5, 6] = adj[6, 5] = 1.0  # Inferior edge (PI <-> IC)
+        adj[6, 7] = adj[7, 6] = 1.0  # Inferior edge (IC <-> AI)
+        adj[3, 5] = adj[5, 3] = 1.0  # Posterior edge (PS <-> PI)
+
+        # C4 (8: C4_PS, 9: C4_AS, 10: C4_PI, 11: C4_IC, 12: C4_AI)
+        adj[8, 9] = adj[9, 8] = 1.0    # Superior edge (PS <-> AS)
+        adj[9, 12] = adj[12, 9] = 1.0  # Anterior edge (AS <-> AI)
+        adj[10, 11] = adj[11, 10] = 1.0 # Inferior edge (PI <-> IC)
+        adj[11, 12] = adj[12, 11] = 1.0 # Inferior edge (IC <-> AI)
+        adj[8, 10] = adj[10, 8] = 1.0  # Posterior edge (PS <-> PI)
+
+        # Inter-vertebral connections (Spinal column alignment)
+        adj[0, 3] = adj[3, 0] = 1.0  # Posterior spine: C2_PI <-> C3_PS
+        adj[5, 8] = adj[8, 5] = 1.0  # Posterior spine: C3_PI <-> C4_PS
+        adj[2, 4] = adj[4, 2] = 1.0  # Anterior spine: C2_AI <-> C3_AS
+        adj[7, 9] = adj[9, 7] = 1.0  # Anterior spine: C3_AI <-> C4_AS
 
         # Row normalize
         rowsum = adj.sum(dim=1, keepdim=True)
