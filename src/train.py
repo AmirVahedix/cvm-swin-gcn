@@ -315,11 +315,20 @@ def main(
     experiment_name: str | None = None,
     tracking_uri: str | None = None,
     run_name: str | None = None,
+    tracking_username: str | None = None,
+    tracking_password: str | None = None,
     skip_eval: bool = False,
 ):
     load_dotenv()
 
     # --- MLflow Setup ---
+    user = tracking_username or os.getenv("MLFLOW_TRACKING_USERNAME")
+    pwd = tracking_password or os.getenv("MLFLOW_TRACKING_PASSWORD")
+    if user:
+        os.environ["MLFLOW_TRACKING_USERNAME"] = user
+    if pwd:
+        os.environ["MLFLOW_TRACKING_PASSWORD"] = pwd
+
     tracking_uri = tracking_uri or os.getenv("MLFLOW_TRACKING_URI")
     if tracking_uri:
         mlflow.set_tracking_uri(tracking_uri)
@@ -574,6 +583,8 @@ if __name__ == "__main__":
     parser.add_argument("--lr", "-l", type=float, default=LR, help="Learning rate")
     parser.add_argument("--experiment-name", type=str, default=None, help="MLflow experiment name")
     parser.add_argument("--tracking-uri", type=str, default=None, help="MLflow tracking URI")
+    parser.add_argument("--tracking-username", "--mlflow-username", type=str, default=None, help="MLflow tracking username")
+    parser.add_argument("--tracking-password", "--mlflow-password", type=str, default=None, help="MLflow tracking password")
     parser.add_argument("--run-name", type=str, default=None, help="MLflow run name")
     parser.add_argument("--skip-eval", action="store_true", help="Skip post-training evaluation step")
 
@@ -586,5 +597,7 @@ if __name__ == "__main__":
         experiment_name=args.experiment_name,
         tracking_uri=args.tracking_uri,
         run_name=args.run_name,
+        tracking_username=args.tracking_username,
+        tracking_password=args.tracking_password,
         skip_eval=args.skip_eval,
     )

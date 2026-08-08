@@ -108,6 +108,18 @@ def main():
         default=None,
         help="MLflow run name.",
     )
+    parser.add_argument(
+        "--mlflow-username",
+        type=str,
+        default=None,
+        help="MLflow tracking username.",
+    )
+    parser.add_argument(
+        "--mlflow-password",
+        type=str,
+        default=None,
+        help="MLflow tracking password.",
+    )
 
     args = parser.parse_args()
 
@@ -124,6 +136,8 @@ def main():
                 run_name=f"preflight-{args.mlflow_run_name}"
                 if args.mlflow_run_name
                 else None,
+                tracking_username=args.mlflow_username,
+                tracking_password=args.mlflow_password,
             )
             if not success:
                 print(
@@ -203,6 +217,8 @@ def main():
             experiment_name=args.mlflow_experiment_name,
             tracking_uri=args.mlflow_tracking_uri,
             run_name=args.mlflow_run_name,
+            tracking_username=args.mlflow_username,
+            tracking_password=args.mlflow_password,
             skip_eval=args.skip_eval,
         )
         print("-" * 20)
@@ -218,6 +234,10 @@ def main():
                 img_size=args.target_size,
                 num_samples=args.eval_samples,
                 threshold_px=args.threshold_px,
+                tracking_uri=args.mlflow_tracking_uri,
+                experiment_name=args.mlflow_experiment_name,
+                tracking_username=args.mlflow_username,
+                tracking_password=args.mlflow_password,
             )
             print("-" * 20)
         else:

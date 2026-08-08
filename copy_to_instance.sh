@@ -49,7 +49,7 @@ if [ -z "$INSTANCE_PORT" ]; then
 fi
 
 # Remote destination directory (defaults to /root)
-REMOTE_DEST="${3:-/root}"
+REMOTE_DEST="${3:-/workspace}"
 
 echo -e "\n${BLUE}🚀 Uploading files to ${SSH_USER}@${INSTANCE_IP}:${INSTANCE_PORT} (${REMOTE_DEST}/)...${NC}"
 echo -e "   📄 .env             -> ${ENV_FILE}"

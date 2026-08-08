@@ -18,6 +18,8 @@ def run_mlflow_test(
     tracking_uri: str | None = None,
     experiment_name: str | None = None,
     run_name: str | None = None,
+    tracking_username: str | None = None,
+    tracking_password: str | None = None,
 ) -> bool:
     """
     Tests connectivity to MLflow by creating an experiment, starting a run,
@@ -28,6 +30,14 @@ def run_mlflow_test(
     """
     load_dotenv()
 
+    # Configure authentication environment variables
+    user = tracking_username or os.getenv("MLFLOW_TRACKING_USERNAME")
+    pwd = tracking_password or os.getenv("MLFLOW_TRACKING_PASSWORD")
+    if user:
+        os.environ["MLFLOW_TRACKING_USERNAME"] = user
+    if pwd:
+        os.environ["MLFLOW_TRACKING_PASSWORD"] = pwd
+
     uri = tracking_uri or os.getenv("MLFLOW_TRACKING_URI")
     if uri:
         mlflow.set_tracking_uri(uri)
@@ -35,6 +45,9 @@ def run_mlflow_test(
     else:
         current_uri = mlflow.get_tracking_uri()
         print(f"ℹ️  No tracking URI provided; using default MLflow URI: {current_uri}", flush=True)
+
+    if user:
+        print(f"🔐 Authenticating as MLflow user: '{user}'", flush=True)
 
     exp_name = experiment_name or os.getenv("MLFLOW_EXPERIMENT_NAME", "cvm-swin-gcn-test")
     mlflow.set_experiment(exp_name)
@@ -109,6 +122,8 @@ def main():
     parser.add_argument("--tracking-uri", type=str, default=None, help="MLflow tracking URI")
     parser.add_argument("--experiment-name", type=str, default=None, help="MLflow experiment name")
     parser.add_argument("--run-name", type=str, default=None, help="MLflow test run name")
+    parser.add_argument("--tracking-username", "--username", type=str, default=None, help="MLflow tracking username")
+    parser.add_argument("--tracking-password", "--password", type=str, default=None, help="MLflow tracking password")
 
     args = parser.parse_args()
 
@@ -116,6 +131,8 @@ def main():
         tracking_uri=args.tracking_uri,
         experiment_name=args.experiment_name,
         run_name=args.run_name,
+        tracking_username=args.tracking_username,
+        tracking_password=args.tracking_password,
     )
     if not success:
         sys.exit(1)

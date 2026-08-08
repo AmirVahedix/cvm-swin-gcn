@@ -12,6 +12,7 @@ import torch
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from dotenv import load_dotenv
 import mlflow
 
 # Ensure project root is in sys.path
@@ -598,6 +599,12 @@ def run_evaluation(
     num_samples: int = 8,
     threshold_px: float = 2.5,
     device_str: str | None = None,
+    log_to_mlflow: bool = True,
+    tracking_uri: str | None = None,
+    experiment_name: str | None = None,
+    tracking_username: str | None = None,
+    tracking_password: str | None = None,
+    mlflow_run_name: str | None = None,
 ) -> tuple[dict, str]:
     """
     Main programmatic evaluation routine.
@@ -606,6 +613,20 @@ def run_evaluation(
         summary_metrics: Dictionary of metric values.
         run_folder: Path string of the run subfolder.
     """
+    load_dotenv()
+
+    # Configure MLflow Authentication & URI if provided
+    user = tracking_username or os.getenv("MLFLOW_TRACKING_USERNAME")
+    pwd = tracking_password or os.getenv("MLFLOW_TRACKING_PASSWORD")
+    if user:
+        os.environ["MLFLOW_TRACKING_USERNAME"] = user
+    if pwd:
+        os.environ["MLFLOW_TRACKING_PASSWORD"] = pwd
+
+    uri = tracking_uri or os.getenv("MLFLOW_TRACKING_URI")
+    if uri:
+        mlflow.set_tracking_uri(uri)
+
     if device_str:
         device = torch.device(device_str)
     elif torch.cuda.is_available():
@@ -662,13 +683,13 @@ def run_evaluation(
         threshold_px=threshold_px,
     )
 
-    # 4b. Generate & log metric PNG charts to MLflow
+    # 4b. Generate metric PNG charts
     generate_evaluation_charts(
         summary_metrics=summary_metrics,
         landmark_metrics=landmark_metrics,
         valid_radial_errors=valid_radial_errors,
         save_dir=run_folder / "charts",
-        log_to_mlflow=True,
+        log_to_mlflow=False,  # We handle comprehensive MLflow logging below
     )
 
     # 5. Format & print table
@@ -709,6 +730,40 @@ def run_evaluation(
         img_size=img_size,
         test_img_dir=test_img_dir,
     )
+
+    # 8. MLflow Logging (Active Run or Standalone Run)
+    if log_to_mlflow:
+        clean_metrics = {
+            f"test_{k.replace('@', '').replace('.', '_').replace(' ', '_')}": float(v)
+            for k, v in summary_metrics.items()
+            if isinstance(v, (int, float))
+        }
+
+        active_run = mlflow.active_run()
+        if active_run is not None:
+            try:
+                mlflow.log_metrics(clean_metrics)
+                mlflow.log_artifacts(str(run_folder), artifact_path="evaluation")
+                print(f"--> Successfully logged evaluation metrics and artifacts to active MLflow run {active_run.info.run_id}.")
+            except Exception as ml_err:
+                print(f"⚠️ Warning: Could not log evaluation to active MLflow run: {ml_err}")
+        elif uri or os.getenv("MLFLOW_TRACKING_URI"):
+            try:
+                exp_name = experiment_name or os.getenv("MLFLOW_EXPERIMENT_NAME", "cvm-swin-gcn")
+                mlflow.set_experiment(exp_name)
+                eval_run_title = mlflow_run_name or f"eval_{run_name}"
+                with mlflow.start_run(run_name=eval_run_title) as standalone_run:
+                    mlflow.log_params({
+                        "eval_weights_path": weights_path,
+                        "eval_img_size": img_size,
+                        "eval_threshold_px": threshold_px,
+                        "eval_batch_size": batch_size,
+                    })
+                    mlflow.log_metrics(clean_metrics)
+                    mlflow.log_artifacts(str(run_folder), artifact_path="evaluation")
+                    print(f"--> Successfully logged standalone evaluation to MLflow experiment '{exp_name}' (Run ID: {standalone_run.info.run_id}).")
+            except Exception as ml_err:
+                print(f"⚠️ Warning: Could not log standalone evaluation to MLflow: {ml_err}")
 
     print(f"\nEvaluation run '{run_name}' completed successfully.")
     print(f"All artifacts saved in directory: '{run_folder}'\n" + "=" * 80)
@@ -776,6 +831,43 @@ def main():
         default=2.5,
         help="Radial error tolerance threshold in pixels for detection metrics.",
     )
+    parser.add_argument(
+        "--tracking-uri",
+        type=str,
+        default=None,
+        help="MLflow tracking URI.",
+    )
+    parser.add_argument(
+        "--experiment-name",
+        type=str,
+        default=None,
+        help="MLflow experiment name.",
+    )
+    parser.add_argument(
+        "--tracking-username",
+        "--mlflow-username",
+        type=str,
+        default=None,
+        help="MLflow tracking username.",
+    )
+    parser.add_argument(
+        "--tracking-password",
+        "--mlflow-password",
+        type=str,
+        default=None,
+        help="MLflow tracking password.",
+    )
+    parser.add_argument(
+        "--mlflow-run-name",
+        type=str,
+        default=None,
+        help="MLflow run name for evaluation.",
+    )
+    parser.add_argument(
+        "--no-mlflow",
+        action="store_true",
+        help="Disable MLflow logging during evaluation.",
+    )
 
     args = parser.parse_args()
 
@@ -789,6 +881,12 @@ def main():
         img_size=args.img_size,
         num_samples=args.num_samples,
         threshold_px=args.threshold_px,
+        log_to_mlflow=not args.no_mlflow,
+        tracking_uri=args.tracking_uri,
+        experiment_name=args.experiment_name,
+        tracking_username=args.tracking_username,
+        tracking_password=args.tracking_password,
+        mlflow_run_name=args.mlflow_run_name,
     )
 
 
