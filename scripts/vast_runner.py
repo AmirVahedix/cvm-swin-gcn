@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """
 Vast.ai Automation & Instance Management Runner
-Handles searching, formatting (by price, RAM, etc.), provisioning, provisioning setup,
-and executing training pipelines on Vast.ai GPU cloud instances.
+Handles searching, formatting (by price, RAM, etc.), provisioning, environment setup,
+executing training pipelines, dynamic INSTANCE_ID storage in .env, and auto-destroying
+on error/interrupt with a 30s timeout prompt.
 """
 
 import os
 import sys
 import json
 import time
+import select
 import shutil
 import argparse
 import subprocess
@@ -31,6 +33,18 @@ COLOR_CYAN = "\033[36m"
 COLOR_DIM = "\033[2m"
 
 
+def get_env_file_path() -> Path:
+    """Locate the primary .env file in the workspace or repo root."""
+    cwd = Path.cwd()
+    script_dir = Path(__file__).resolve().parent
+    repo_root = script_dir.parent
+
+    for candidate in [cwd / ".env", repo_root / ".env", script_dir / ".env"]:
+        if candidate.is_file():
+            return candidate
+    return cwd / ".env"
+
+
 def load_env_file(filepath: Path) -> Dict[str, str]:
     """Parse a .env file into a dictionary without external dependencies."""
     env_vars = {}
@@ -51,6 +65,64 @@ def load_env_file(filepath: Path) -> Dict[str, str]:
     return env_vars
 
 
+def update_env_variable(
+    key: str, value: str, env_path: Optional[Path] = None
+) -> None:
+    """Dynamically add, update, or clear a key-value pair in the .env file."""
+    path = env_path or get_env_file_path()
+    lines = []
+    found = False
+
+    if path.is_file():
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                for line in f:
+                    stripped = line.strip()
+                    if stripped.startswith(f"{key}=") or stripped.startswith(
+                        f"export {key}="
+                    ):
+                        if value:
+                            lines.append(f"{key}={value}\n")
+                        found = True
+                    else:
+                        lines.append(line)
+        except Exception:
+            pass
+
+    if not found and value:
+        if lines and not lines[-1].endswith("\n"):
+            lines.append("\n")
+        lines.append(f"{key}={value}\n")
+
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            f.writelines(lines)
+    except Exception as e:
+        print(
+            f"{COLOR_YELLOW}⚠️ Could not update {key} in {path}: {e}{COLOR_RESET}"
+        )
+
+
+def get_stored_instance_id(cli_id: Optional[int] = None) -> Optional[int]:
+    """Retrieve instance ID from CLI argument, environment, or stored INSTANCE_ID in .env."""
+    if cli_id is not None:
+        return int(cli_id)
+
+    # 1. Shell environment
+    for key in ["INSTANCE_ID", "VAST_INSTANCE_ID"]:
+        val = os.getenv(key)
+        if val and str(val).strip().isdigit():
+            return int(val.strip())
+
+    # 2. Check .env file
+    env_dict = load_env_file(get_env_file_path())
+    for key in ["INSTANCE_ID", "VAST_INSTANCE_ID", "instance_id"]:
+        if key in env_dict and str(env_dict[key]).strip().isdigit():
+            return int(env_dict[key].strip())
+
+    return None
+
+
 def get_api_key(cli_key: Optional[str] = None) -> str:
     """Resolve Vast.ai API Key from CLI arg, environment, or .env files."""
     if cli_key:
@@ -61,14 +133,9 @@ def get_api_key(cli_key: Optional[str] = None) -> str:
         return os.getenv("VAST_API_KEY").strip()
 
     # 2. Check local .env files
-    cwd = Path.cwd()
-    script_dir = Path(__file__).resolve().parent
-    repo_root = script_dir.parent
-
-    for candidate in [cwd / ".env", script_dir / ".env", repo_root / ".env"]:
-        env_dict = load_env_file(candidate)
-        if "VAST_API_KEY" in env_dict and env_dict["VAST_API_KEY"]:
-            return env_dict["VAST_API_KEY"].strip()
+    env_dict = load_env_file(get_env_file_path())
+    if "VAST_API_KEY" in env_dict and env_dict["VAST_API_KEY"]:
+        return env_dict["VAST_API_KEY"].strip()
 
     # 3. Check ~/.vast_api_key
     home_key = Path.home() / ".vast_api_key"
@@ -170,10 +237,8 @@ class VastAPIClient:
         if min_disk_gb is not None:
             query_dict["disk_space"] = {"gte": float(min_disk_gb)}
         if min_ram_gb is not None:
-            # Vast stores cpu_ram in MB
             query_dict["cpu_ram"] = {"gte": float(min_ram_gb) * 1024}
         if min_vram_gb is not None:
-            # Vast stores gpu_ram in MB
             query_dict["gpu_ram"] = {"gte": float(min_vram_gb) * 1024}
         if max_price is not None:
             query_dict["dph_total"] = {"lte": float(max_price)}
@@ -183,7 +248,6 @@ class VastAPIClient:
         res = self._request("bundles/", method="GET", params={"q": query_dict})
         offers = res.get("offers", []) if isinstance(res, dict) else []
 
-        # Filter by GPU name substring/case-insensitive if specified
         if gpu_name:
             gpu_query = gpu_name.lower().strip()
             offers = [
@@ -192,19 +256,17 @@ class VastAPIClient:
                 if gpu_query in str(o.get("gpu_name", "")).lower()
             ]
 
-        # Sorting
-        if order_by == "price" or order_by == "dph":
+        if order_by in ("price", "dph"):
             offers.sort(key=lambda o: o.get("dph_total", 999999))
         elif order_by == "ram":
             offers.sort(key=lambda o: o.get("cpu_ram", 0), reverse=True)
-        elif order_by == "vram" or order_by == "gpu_ram":
+        elif order_by in ("vram", "gpu_ram"):
             offers.sort(key=lambda o: o.get("gpu_ram", 0), reverse=True)
-        elif order_by == "score" or order_by == "dlperf":
+        elif order_by in ("score", "dlperf"):
             offers.sort(key=lambda o: o.get("dlperf", 0), reverse=True)
-        elif order_by == "speed" or order_by == "inet":
+        elif order_by in ("speed", "inet"):
             offers.sort(key=lambda o: o.get("inet_down", 0), reverse=True)
         else:
-            # Default Vast scoring
             offers.sort(
                 key=lambda o: (
                     -o.get("score", 0),
@@ -300,10 +362,9 @@ def format_offers_table(
         oid = str(o.get("id", "N/A"))
         num_gpus = o.get("num_gpus", 1)
         gpu_name = str(o.get("gpu_name", "Unknown"))
-        if num_gpus > 1:
-            gpu_display = f"{num_gpus}x {gpu_name}"[:21]
-        else:
-            gpu_display = gpu_name[:21]
+        gpu_display = (
+            f"{num_gpus}x {gpu_name}"[:21] if num_gpus > 1 else gpu_name[:21]
+        )
 
         vram_mb = o.get("gpu_ram", 0)
         vram_gb = f"{vram_mb / 1024:.1f} GB" if vram_mb else "N/A"
@@ -323,7 +384,6 @@ def format_offers_table(
 
         direct_ssh = "Yes" if o.get("direct_port_count", 0) > 0 else "Port-Fwd"
 
-        # Highlight price and RAM
         if sort_key in ("price", "dph"):
             price_str = f"{COLOR_GREEN}{price_str:<13}{COLOR_RESET}"
         elif sort_key == "ram":
@@ -381,7 +441,70 @@ def format_instances_table(instances: List[Dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-# --- Remote Operations Helpers ---
+# --- Prompt & Remote Helpers ---
+
+
+def prompt_destroy_with_timeout(
+    instance_id: int,
+    reason: str = "an error or interruption",
+    timeout_sec: int = 30,
+) -> bool:
+    """
+    Prompt user whether to destroy the instance when an error or interrupt occurs.
+    Displays a live 30-second countdown. Defaults to destroying the instance if timed out.
+    """
+    print(
+        f"\n{COLOR_YELLOW}⚠️ Instance {instance_id} was interrupted or encountered {reason}.{COLOR_RESET}"
+    )
+    print(
+        f"{COLOR_BOLD}Do you want to DESTROY instance {instance_id} to prevent unwanted cloud charges?{COLOR_RESET}"
+    )
+    print(
+        f"{COLOR_DIM}Press 'y' to destroy immediately, or 'n' to keep it alive for debugging.{COLOR_RESET}"
+    )
+    print(
+        f"{COLOR_YELLOW}⏳ Auto-destroying in {timeout_sec} seconds if no input is received...{COLOR_RESET}\n"
+    )
+
+    start_time = time.time()
+    try:
+        is_tty = sys.stdin.isatty()
+    except Exception:
+        is_tty = False
+
+    while True:
+        elapsed = time.time() - start_time
+        remaining = int(timeout_sec - elapsed)
+        if remaining <= 0:
+            print(
+                f"\n{COLOR_RED}⏰ Timeout reached ({timeout_sec}s). Automatically DESTROYING instance {instance_id}...{COLOR_RESET}"
+            )
+            return True
+
+        sys.stdout.write(
+            f"\r\033[KDestroy instance {instance_id}? [Y/n] ({remaining}s remaining): "
+        )
+        sys.stdout.flush()
+
+        if is_tty:
+            try:
+                rlist, _, _ = select.select([sys.stdin], [], [], 1.0)
+                if rlist:
+                    user_input = sys.stdin.readline().strip().lower()
+                    if user_input in ("n", "no"):
+                        print(
+                            f"\n{COLOR_CYAN}Keeping instance {instance_id} alive for debugging.{COLOR_RESET}"
+                        )
+                        return False
+                    else:
+                        print(
+                            f"\n{COLOR_YELLOW}Destroying instance {instance_id}...{COLOR_RESET}"
+                        )
+                        return True
+            except Exception:
+                time.sleep(1.0)
+        else:
+            time.sleep(1.0)
 
 
 def wait_for_instance_ready(
@@ -470,9 +593,10 @@ def upload_setup_files(
     remote_dest: str = "/workspace",
 ) -> None:
     """Upload .env and setup.sh to the remote instance."""
-    repo_root = Path(__file__).resolve().parent.parent
-    env_file = repo_root / ".env"
-    setup_script = repo_root / "scripts" / "setup.sh"
+    env_file = get_env_file_path()
+    setup_script = (
+        Path(__file__).resolve().parent.parent / "scripts" / "setup.sh"
+    )
 
     if not env_file.is_file():
         raise FileNotFoundError(
@@ -649,13 +773,15 @@ def cmd_run(args: argparse.Namespace, client: VastAPIClient) -> None:
     """Complete end-to-end automation: search/create, wait, upload, setup, train, and manage lifecycle."""
     instance_id = None
     created_new = False
+    has_error = False
+    error_reason = ""
 
     try:
-        # Check if an existing instance ID was specified
-        if args.instance_id:
-            instance_id = int(args.instance_id)
+        resolved_id = get_stored_instance_id(args.instance_id)
+        if resolved_id and args.instance_id is not None:
+            instance_id = resolved_id
             print(
-                f"{COLOR_BLUE}Using existing instance ID: {instance_id}{COLOR_RESET}"
+                f"{COLOR_BLUE}Using specified instance ID: {instance_id}{COLOR_RESET}"
             )
         else:
             print(
@@ -702,6 +828,12 @@ def cmd_run(args: argparse.Namespace, client: VastAPIClient) -> None:
                 f"{COLOR_GREEN}✅ Created contract. Instance ID: {instance_id}{COLOR_RESET}"
             )
 
+            # Store INSTANCE_ID dynamically in .env
+            update_env_variable("INSTANCE_ID", str(instance_id))
+            print(
+                f"{COLOR_CYAN}📝 Saved INSTANCE_ID={instance_id} in {get_env_file_path()}{COLOR_RESET}"
+            )
+
         # Wait for instance boot and SSH readiness
         inst = wait_for_instance_ready(client, instance_id)
         ssh_host = inst.get("ssh_host") or inst.get("public_ipaddr")
@@ -741,65 +873,121 @@ def cmd_run(args: argparse.Namespace, client: VastAPIClient) -> None:
             if args.download_artifacts:
                 download_artifacts(ssh_host, ssh_port)
         else:
+            has_error = True
+            error_reason = f"pipeline error (exit code {ret_code})"
             print(
                 f"\n{COLOR_RED}❌ Remote pipeline failed with exit code {ret_code}.{COLOR_RESET}"
             )
 
     except KeyboardInterrupt:
+        has_error = True
+        error_reason = "keyboard interrupt (Ctrl+C)"
         print(f"\n{COLOR_YELLOW}⚠️ Execution interrupted by user.{COLOR_RESET}")
     except Exception as e:
-        print(f"\n{COLOR_RED}❌ Error: {e}{COLOR_RESET}")
+        has_error = True
+        error_reason = f"an error: {e}"
+        print(f"\n{COLOR_RED}❌ Error during run: {e}{COLOR_RESET}")
     finally:
-        # Lifecycle cleanup
-        if instance_id and created_new:
-            if args.destroy_on_finish:
+        # Lifecycle management on completion, error, or interrupt
+        if instance_id:
+            if args.destroy_on_finish and not has_error:
                 print(
                     f"\n{COLOR_YELLOW}🗑️ Destroying instance {instance_id} as requested (--destroy-on-finish)...{COLOR_RESET}"
                 )
-                client.destroy_instance(instance_id)
-                print(f"{COLOR_GREEN}✅ Instance {instance_id} destroyed.")
-            elif args.stop_on_finish:
+                try:
+                    client.destroy_instance(instance_id)
+                    update_env_variable("INSTANCE_ID", "")
+                    print(f"{COLOR_GREEN}✅ Instance {instance_id} destroyed.")
+                except Exception as e:
+                    print(
+                        f"{COLOR_RED}❌ Failed to destroy instance: {e}{COLOR_RESET}"
+                    )
+            elif args.stop_on_finish and not has_error:
                 print(
                     f"\n{COLOR_YELLOW}⏸️ Stopping instance {instance_id} to save costs (--stop-on-finish)...{COLOR_RESET}"
                 )
-                client.stop_instance(instance_id)
-                print(f"{COLOR_GREEN}✅ Instance {instance_id} stopped.")
+                try:
+                    client.stop_instance(instance_id)
+                    print(f"{COLOR_GREEN}✅ Instance {instance_id} stopped.")
+                except Exception as e:
+                    print(
+                        f"{COLOR_RED}❌ Failed to stop instance: {e}{COLOR_RESET}"
+                    )
+            elif has_error:
+                should_destroy = prompt_destroy_with_timeout(
+                    instance_id=instance_id,
+                    reason=error_reason,
+                    timeout_sec=args.timeout_destroy,
+                )
+                if should_destroy:
+                    try:
+                        client.destroy_instance(instance_id)
+                        update_env_variable("INSTANCE_ID", "")
+                        print(
+                            f"{COLOR_GREEN}✅ Instance {instance_id} successfully destroyed.{COLOR_RESET}"
+                        )
+                    except Exception as e:
+                        print(
+                            f"{COLOR_RED}❌ Failed to destroy instance: {e}{COLOR_RESET}"
+                        )
+                else:
+                    print(
+                        f"\n{COLOR_CYAN}ℹ️ Instance {instance_id} preserved in .env. Manage it when done:{COLOR_RESET}"
+                    )
+                    print("   python3 scripts/vast_runner.py ssh")
+                    print("   python3 scripts/vast_runner.py destroy")
             else:
                 print(
-                    f"\n{COLOR_CYAN}ℹ️ Instance {instance_id} is still running. Stop or destroy it when done:{COLOR_RESET}"
+                    f"\n{COLOR_CYAN}ℹ️ Instance {instance_id} is still running (saved in .env). Manage it when done:{COLOR_RESET}"
                 )
-                print(
-                    f"   python3 scripts/vast_runner.py stop {instance_id}    # pause"
-                )
-                print(
-                    f"   python3 scripts/vast_runner.py destroy {instance_id} # delete"
-                )
+                print("   python3 scripts/vast_runner.py stop      # pause")
+                print("   python3 scripts/vast_runner.py destroy   # delete")
 
 
 def cmd_stop(args: argparse.Namespace, client: VastAPIClient) -> None:
-    """Stop an instance."""
-    client.stop_instance(args.instance_id)
+    """Stop an instance (uses CLI arg or stored INSTANCE_ID from .env)."""
+    instance_id = get_stored_instance_id(args.instance_id)
+    if not instance_id:
+        print(
+            f"{COLOR_RED}❌ No instance ID specified and none found in .env!{COLOR_RESET}"
+        )
+        sys.exit(1)
+    client.stop_instance(instance_id)
     print(
-        f"{COLOR_GREEN}✅ Stop command issued for instance {args.instance_id}.{COLOR_RESET}"
+        f"{COLOR_GREEN}✅ Stop command issued for instance {instance_id}.{COLOR_RESET}"
     )
 
 
 def cmd_destroy(args: argparse.Namespace, client: VastAPIClient) -> None:
-    """Destroy an instance."""
-    client.destroy_instance(args.instance_id)
+    """Destroy an instance (uses CLI arg or stored INSTANCE_ID from .env)."""
+    instance_id = get_stored_instance_id(args.instance_id)
+    if not instance_id:
+        print(
+            f"{COLOR_RED}❌ No instance ID specified and none found in .env!{COLOR_RESET}"
+        )
+        sys.exit(1)
+    client.destroy_instance(instance_id)
+    update_env_variable("INSTANCE_ID", "")
     print(
-        f"{COLOR_GREEN}✅ Destroy command issued for instance {args.instance_id}.{COLOR_RESET}"
+        f"{COLOR_GREEN}✅ Destroy command issued for instance {instance_id} (cleared from .env).{COLOR_RESET}"
     )
 
 
 def cmd_ssh(args: argparse.Namespace, client: VastAPIClient) -> None:
-    """SSH directly into an instance."""
-    inst = client.get_instance(args.instance_id)
+    """SSH directly into an instance (uses CLI arg or stored INSTANCE_ID from .env)."""
+    instance_id = get_stored_instance_id(args.instance_id)
+    if not instance_id:
+        print(
+            f"{COLOR_RED}❌ No instance ID specified and none found in .env!{COLOR_RESET}"
+        )
+        sys.exit(1)
+
+    inst = client.get_instance(instance_id)
     ssh_host = inst.get("ssh_host") or inst.get("public_ipaddr")
     ssh_port = inst.get("ssh_port")
     if not ssh_host or not ssh_port:
         print(
-            f"{COLOR_RED}❌ Instance {args.instance_id} does not have SSH host/port available yet.{COLOR_RESET}"
+            f"{COLOR_RED}❌ Instance {instance_id} does not have SSH host/port available yet.{COLOR_RESET}"
         )
         sys.exit(1)
 
@@ -819,13 +1007,20 @@ def cmd_ssh(args: argparse.Namespace, client: VastAPIClient) -> None:
 
 
 def cmd_download(args: argparse.Namespace, client: VastAPIClient) -> None:
-    """Download artifacts from a running instance."""
-    inst = client.get_instance(args.instance_id)
+    """Download artifacts from an instance (uses CLI arg or stored INSTANCE_ID from .env)."""
+    instance_id = get_stored_instance_id(args.instance_id)
+    if not instance_id:
+        print(
+            f"{COLOR_RED}❌ No instance ID specified and none found in .env!{COLOR_RESET}"
+        )
+        sys.exit(1)
+
+    inst = client.get_instance(instance_id)
     ssh_host = inst.get("ssh_host") or inst.get("public_ipaddr")
     ssh_port = inst.get("ssh_port")
     if not ssh_host or not ssh_port:
         print(
-            f"{COLOR_RED}❌ Instance {args.instance_id} does not have SSH host/port available.{COLOR_RESET}"
+            f"{COLOR_RED}❌ Instance {instance_id} does not have SSH host/port available.{COLOR_RESET}"
         )
         sys.exit(1)
 
@@ -939,7 +1134,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--instance-id",
         type=int,
         default=None,
-        help="Attach to existing instance ID instead of creating a new one",
+        help="Attach to existing instance ID (defaults to INSTANCE_ID in .env if set)",
     )
     run_p.add_argument(
         "--gpu",
@@ -1018,12 +1213,18 @@ def build_parser() -> argparse.ArgumentParser:
     run_p.add_argument(
         "--stop-on-finish",
         action="store_true",
-        help="Automatically stop the instance when pipeline finishes",
+        help="Automatically stop the instance when pipeline finishes successfully",
     )
     run_p.add_argument(
         "--destroy-on-finish",
         action="store_true",
-        help="Automatically destroy the instance when pipeline finishes",
+        help="Automatically destroy the instance when pipeline finishes successfully",
+    )
+    run_p.add_argument(
+        "--timeout-destroy",
+        type=int,
+        default=30,
+        help="Seconds before automatically destroying instance on error/interrupt (default: 30s)",
     )
     run_p.add_argument(
         "--download-artifacts",
@@ -1039,19 +1240,35 @@ def build_parser() -> argparse.ArgumentParser:
 
     # 4. Stop
     stop_p = subparsers.add_parser("stop", help="Stop an instance")
-    stop_p.add_argument("instance_id", type=int, help="Instance ID to stop")
+    stop_p.add_argument(
+        "instance_id",
+        type=int,
+        nargs="?",
+        default=None,
+        help="Instance ID to stop (defaults to INSTANCE_ID in .env)",
+    )
 
     # 5. Destroy
     destroy_p = subparsers.add_parser("destroy", help="Destroy an instance")
     destroy_p.add_argument(
-        "instance_id", type=int, help="Instance ID to destroy"
+        "instance_id",
+        type=int,
+        nargs="?",
+        default=None,
+        help="Instance ID to destroy (defaults to INSTANCE_ID in .env)",
     )
 
     # 6. SSH
     ssh_p = subparsers.add_parser(
         "ssh", help="Open an interactive SSH shell or run a command"
     )
-    ssh_p.add_argument("instance_id", type=int, help="Instance ID to SSH into")
+    ssh_p.add_argument(
+        "instance_id",
+        type=int,
+        nargs="?",
+        default=None,
+        help="Instance ID to SSH into (defaults to INSTANCE_ID in .env)",
+    )
     ssh_p.add_argument(
         "command",
         nargs="?",
@@ -1065,7 +1282,11 @@ def build_parser() -> argparse.ArgumentParser:
         "download", help="Download artifacts from a running instance"
     )
     download_p.add_argument(
-        "instance_id", type=int, help="Instance ID to download from"
+        "instance_id",
+        type=int,
+        nargs="?",
+        default=None,
+        help="Instance ID to download from (defaults to INSTANCE_ID in .env)",
     )
     download_p.add_argument(
         "--dest",
