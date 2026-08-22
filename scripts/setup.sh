@@ -3,15 +3,43 @@
 # Define colors for output
 GREEN='\033[0;32m'
 BLUE='\033[0;34m'
+YELLOW='\033[1;33m'
 RED='\033[0;31m'
 NC='\033[0m' # No Color
 
 # --- Command-line arguments parsing ---
 ONLY_PULL=false
-for arg in "$@"; do
-    case $arg in
+AUTO_CONFIRM=false
+RUN_PIPELINE=false
+PIPELINE_ARGS=()
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
         --only-pull)
             ONLY_PULL=true
+            shift
+            ;;
+        -y|--yes|--force)
+            AUTO_CONFIRM=true
+            shift
+            ;;
+        --run-pipeline)
+            RUN_PIPELINE=true
+            shift
+            ;;
+        --)
+            shift
+            while [[ $# -gt 0 ]]; do
+                PIPELINE_ARGS+=("$1")
+                shift
+            done
+            break
+            ;;
+        *)
+            if [ "$RUN_PIPELINE" = true ]; then
+                PIPELINE_ARGS+=("$1")
+            fi
+            shift
             ;;
     esac
 done
@@ -22,17 +50,31 @@ WORKSPACE="/workspace"
 REPO_NAME="cvm-swin-gcn"
 PROJECT_DIR="${WORKSPACE}/${REPO_NAME}"
 
-# --- Load .env file ---
-# Looks for .env in the same directory as this script
+# --- Locate and Load .env file ---
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ENV_FILE="${SCRIPT_DIR}/.env"
+ENV_FILE=""
 
-if [ -f "$ENV_FILE" ]; then
-    echo -e "${BLUE}ℹ️ Loading environment variables from .env...${NC}"
-    # Export variables, ignoring comments and blank lines
-    export $(grep -v '^#' "$ENV_FILE" | xargs)
+for candidate in "${SCRIPT_DIR}/.env" "${WORKSPACE}/.env" "${PROJECT_DIR}/.env" "$(pwd)/.env"; do
+    if [ -f "$candidate" ]; then
+        ENV_FILE="$candidate"
+        break
+    fi
+done
+
+if [ -n "$ENV_FILE" ]; then
+    echo -e "${BLUE}ℹ️ Loading environment variables from ${ENV_FILE}...${NC}"
+    set -a
+    # shellcheck disable=SC1090
+    source "$ENV_FILE" 2>/dev/null || {
+        while IFS= read -r line || [ -n "$line" ]; do
+            [[ "$line" =~ ^[[:space:]]*# ]] && continue
+            [[ -z "${line// }" ]] && continue
+            export "$line" 2>/dev/null || true
+        done < "$ENV_FILE"
+    }
+    set +a
 else
-    echo -e "${RED}⚠️ .env file not found at $ENV_FILE. Relying on system env vars...${NC}"
+    echo -e "${YELLOW}⚠️ .env file not found. Relying on system env vars...${NC}"
 fi
 # ----------------------
 
@@ -64,23 +106,28 @@ if [ "$ONLY_PULL" = true ]; then
         fi
         echo -e "${GREEN}✅ Successfully cloned repository.${NC}"
     fi
+
+    if [ -n "$ENV_FILE" ] && [ -f "$ENV_FILE" ] && [ "$ENV_FILE" != "${TARGET_DIR}/.env" ]; then
+        cp "$ENV_FILE" "${TARGET_DIR}/.env" 2>/dev/null || true
+    fi
+
     exit 0
 fi
 
-# 1. Check if repository already exists and prompt for update
+# 1. Check if repository already exists
 if [ -d "$PROJECT_DIR" ]; then
-    echo -e "${GREEN}✅ Repository already cloned.${NC}"
-    read -p "Force update repository and reinstall dependencies? [y/N]: " -n 1 -r
-    echo "" # Move to a new line
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        echo -e "${BLUE}⏭️ Skipping setup.${NC}"
-        exit 0
+    echo -e "${GREEN}✅ Repository already exists at ${PROJECT_DIR}.${NC}"
+    if [ "$AUTO_CONFIRM" = false ]; then
+        read -p "Force update repository and reinstall dependencies? [y/N]: " -n 1 -r
+        echo "" # Move to a new line
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            echo -e "${BLUE}⏭️ Skipping repo update & base install.${NC}"
+        fi
     fi
 fi
 
 # 2. Install base dependencies
 echo -e "${BLUE}⚙️ Installing base dependencies...${NC}"
-# Removed -qq to show apt-get output
 apt-get update && apt-get install -y sshpass zip unzip pv curl git
 
 cd "$WORKSPACE" || exit
@@ -103,13 +150,16 @@ if [ -d "$PROJECT_DIR" ]; then
     git fetch origin && git reset --hard origin/main && git clean -fd
 else
     echo -e "${BLUE}📥 Cloning repository...${NC}"
-    # Removed /dev/null redirection to show output. 
-    # Piped through sed to safely mask the token in the terminal logs.
     if ! git clone "$REPO_URL" "$PROJECT_DIR" 2>&1 | sed "s|${GITHUB_TOKEN}|***HIDDEN_TOKEN***|g"; then
         echo -e "${RED}❌ Failed to clone repository. Check your token and permissions.${NC}"
         exit 1
     fi
     cd "$PROJECT_DIR" || exit
+fi
+
+# Ensure .env is placed inside the project root for scripts
+if [ -n "$ENV_FILE" ] && [ -f "$ENV_FILE" ]; then
+    cp "$ENV_FILE" "${PROJECT_DIR}/.env" 2>/dev/null || true
 fi
 
 # Clean up any cloned .python-version or strict requires-python that force uv to switch Python runtimes
@@ -123,8 +173,9 @@ fi
 echo -e "\n${BLUE}📦 Setting up UV and PyTorch environment...${NC}"
 curl -LSf https://astral.sh/uv/install.sh | sh
 
-# Ensure the cargo bin directory is in PATH for current script execution
+# Ensure the cargo bin directory is in PATH
 export PATH="$HOME/.cargo/bin:$PATH"
+grep -qxF 'export PATH="$HOME/.cargo/bin:$PATH"' "$HOME/.bashrc" 2>/dev/null || echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> "$HOME/.bashrc" 2>/dev/null || true
 
 # --- Locate Python Executable ---
 PYTHON_BIN=""
@@ -171,7 +222,7 @@ if [ -n "$CUDA_VERSION" ]; then
         CUDA_TAG="cpu"
     fi
 else
-    echo -e "${RED}⚠️ No NVIDIA GPU / CUDA detected. Falling back to CPU PyTorch index.${NC}"
+    echo -e "${YELLOW}⚠️ No NVIDIA GPU / CUDA detected. Falling back to CPU PyTorch index.${NC}"
     CUDA_TAG="cpu"
 fi
 
@@ -181,14 +232,14 @@ echo -e "${BLUE}🎯 Selected PyTorch Index: ${PYTORCH_INDEX_URL}${NC}"
 # Pre-install CUDA-matched PyTorch & torchvision into detected Python environment
 echo -e "${BLUE}⬇️ Installing PyTorch and torchvision (${CUDA_TAG})...${NC}"
 if ! uv pip install --system --python "$PYTHON_BIN" --no-python-downloads --break-system-packages torch torchvision torchaudio --index-url "${PYTORCH_INDEX_URL}"; then
-    echo -e "${RED}⚠️ uv pip install failed, attempting fallback via $PYTHON_BIN -m pip...${NC}"
+    echo -e "${YELLOW}⚠️ uv pip install failed, attempting fallback via $PYTHON_BIN -m pip...${NC}"
     "$PYTHON_BIN" -m pip install --break-system-packages torch torchvision torchaudio --index-url "${PYTORCH_INDEX_URL}"
 fi
 
 # Install project dependencies using extra index url
 echo -e "${BLUE}📦 Syncing remaining project dependencies...${NC}"
 if ! uv pip install --system --python "$PYTHON_BIN" --no-python-downloads --break-system-packages --extra-index-url "${PYTORCH_INDEX_URL}" .; then
-    echo -e "${RED}⚠️ uv pip install . failed, attempting fallback via $PYTHON_BIN -m pip...${NC}"
+    echo -e "${YELLOW}⚠️ uv pip install . failed, attempting fallback via $PYTHON_BIN -m pip...${NC}"
     "$PYTHON_BIN" -m pip install --break-system-packages --extra-index-url "${PYTORCH_INDEX_URL}" .
 fi
 
@@ -206,3 +257,21 @@ else:
 '
 
 echo -e "\n${GREEN}✅ Setup Complete!${NC}"
+
+# --- Optional Pipeline Execution ---
+if [ "$RUN_PIPELINE" = true ]; then
+    echo -e "\n${BLUE}==========================================${NC}"
+    echo -e "${BLUE}🚀 Auto-launching Training Pipeline...${NC}"
+    echo -e "${BLUE}==========================================${NC}\n"
+    cd "$PROJECT_DIR" || exit 1
+
+    echo -e "${BLUE}Running: ${PYTHON_BIN} scripts/train-pipeline.py ${PIPELINE_ARGS[*]}${NC}\n"
+    "$PYTHON_BIN" scripts/train-pipeline.py "${PIPELINE_ARGS[@]}"
+    EXIT_CODE=$?
+    if [ $EXIT_CODE -eq 0 ]; then
+        echo -e "\n${GREEN}🎉 Training pipeline finished successfully!${NC}"
+    else
+        echo -e "\n${RED}❌ Training pipeline exited with code ${EXIT_CODE}.${NC}"
+        exit $EXIT_CODE
+    fi
+fi
