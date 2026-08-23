@@ -17,6 +17,7 @@ import subprocess
 import urllib.request
 import urllib.parse
 import urllib.error
+import ssl
 from pathlib import Path
 from typing import Dict, List, Any, Optional
 
@@ -167,7 +168,7 @@ class VastAPIClient:
         method: str = "GET",
         data: Optional[Dict[str, Any]] = None,
         params: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
+    ) -> Any:
         params = params or {}
         params["api_key"] = self.api_key
         url = f"{VAST_API_BASE}/{endpoint.lstrip('/')}"
@@ -190,7 +191,10 @@ class VastAPIClient:
             url, data=req_data, headers=headers, method=method
         )
         try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            with urllib.request.urlopen(req, timeout=30, context=ctx) as resp:
                 body = resp.read().decode("utf-8")
                 return json.loads(body) if body else {}
         except urllib.error.HTTPError as e:
@@ -211,7 +215,8 @@ class VastAPIClient:
 
     def get_user(self) -> Dict[str, Any]:
         """Fetch current user account and balance information."""
-        return self._request("users/current/")
+        res = self._request("users/current/")
+        return res if isinstance(res, dict) else {}
 
     def search_offers(
         self,
@@ -222,18 +227,20 @@ class VastAPIClient:
         min_vram_gb: Optional[float] = None,
         min_disk_gb: Optional[float] = None,
         min_cuda: Optional[float] = None,
-        verified_only: bool = True,
+        min_reliability: Optional[float] = None,
+        verified_only: bool = False,
         order_by: Optional[str] = None,
         limit: int = 20,
     ) -> List[Dict[str, Any]]:
         """Search available machine offers with flexible criteria."""
         query_dict: Dict[str, Any] = {
-            "verified": {"eq": verified_only},
             "external": {"eq": False},
             "rentable": {"eq": True},
             "num_gpus": {"eq": num_gpus},
         }
 
+        if verified_only:
+            query_dict["verified"] = {"eq": True}
         if min_disk_gb is not None:
             query_dict["disk_space"] = {"gte": float(min_disk_gb)}
         if min_ram_gb is not None:
@@ -244,6 +251,11 @@ class VastAPIClient:
             query_dict["dph_total"] = {"lte": float(max_price)}
         if min_cuda is not None:
             query_dict["cuda_max_good"] = {"gte": float(min_cuda)}
+        if min_reliability is not None:
+            rel = float(min_reliability)
+            if rel > 1.0:
+                rel = rel / 100.0
+            query_dict["reliability2"] = {"gte": rel}
 
         res = self._request("bundles/", method="GET", params={"q": query_dict})
         offers = res.get("offers", []) if isinstance(res, dict) else []
@@ -258,15 +270,20 @@ class VastAPIClient:
 
         if order_by in ("price", "dph"):
             offers.sort(key=lambda o: o.get("dph_total", 999999))
+        elif order_by in ("dlperf", "performance"):
+            offers.sort(key=lambda o: o.get("dlperf", 0) or 0, reverse=True)
+        elif order_by == "value":
+            offers.sort(
+                key=lambda o: (o.get("dlperf", 0) or 0) / max(o.get("dph_total", 0.001), 0.001),
+                reverse=True,
+            )
         elif order_by == "ram":
             offers.sort(key=lambda o: o.get("cpu_ram", 0), reverse=True)
         elif order_by in ("vram", "gpu_ram"):
             offers.sort(key=lambda o: o.get("gpu_ram", 0), reverse=True)
-        elif order_by in ("score", "dlperf"):
-            offers.sort(key=lambda o: o.get("dlperf", 0), reverse=True)
         elif order_by in ("speed", "inet"):
             offers.sort(key=lambda o: o.get("inet_down", 0), reverse=True)
-        else:
+        else:  # score / default
             offers.sort(
                 key=lambda o: (
                     -o.get("score", 0),
@@ -312,13 +329,14 @@ class VastAPIClient:
         return res if isinstance(res, list) else []
 
     def get_instance(self, instance_id: int) -> Dict[str, Any]:
-        """Fetch instance status and connection information."""
-        res = self._request(f"instances/{instance_id}/", method="GET")
-        if isinstance(res, dict) and "instances" in res:
-            for inst in res["instances"]:
-                if inst.get("id") == instance_id:
-                    return inst
-        return res if isinstance(res, dict) else {}
+        """Fetch instance status and connection information safely."""
+        instances = self.list_instances()
+        for inst in instances:
+            if isinstance(inst, dict) and str(inst.get("id")) == str(
+                instance_id
+            ):
+                return inst
+        return {}
 
     def stop_instance(self, instance_id: int) -> Dict[str, Any]:
         """Stop a running instance to preserve disk without paying GPU runtime."""
@@ -451,7 +469,8 @@ def prompt_destroy_with_timeout(
 ) -> bool:
     """
     Prompt user whether to destroy the instance when an error or interrupt occurs.
-    Displays a live 30-second countdown. Defaults to destroying the instance if timed out.
+    Displays a live 30-second countdown. Defaults to destroying the instance if timed out
+    or if user presses Ctrl+C.
     """
     print(
         f"\n{COLOR_YELLOW}⚠️ Instance {instance_id} was interrupted or encountered {reason}.{COLOR_RESET}"
@@ -486,8 +505,8 @@ def prompt_destroy_with_timeout(
         )
         sys.stdout.flush()
 
-        if is_tty:
-            try:
+        try:
+            if is_tty:
                 rlist, _, _ = select.select([sys.stdin], [], [], 1.0)
                 if rlist:
                     user_input = sys.stdin.readline().strip().lower()
@@ -501,9 +520,14 @@ def prompt_destroy_with_timeout(
                             f"\n{COLOR_YELLOW}Destroying instance {instance_id}...{COLOR_RESET}"
                         )
                         return True
-            except Exception:
+            else:
                 time.sleep(1.0)
-        else:
+        except KeyboardInterrupt:
+            print(
+                f"\n{COLOR_RED}Interrupted by user (Ctrl+C). Auto-destroying instance {instance_id}...{COLOR_RESET}"
+            )
+            return True
+        except Exception:
             time.sleep(1.0)
 
 
@@ -518,6 +542,8 @@ def wait_for_instance_ready(
 
     while time.time() - start_time < timeout_sec:
         inst = client.get_instance(instance_id)
+        if not isinstance(inst, dict):
+            inst = {}
         status = inst.get("actual_status") or inst.get("cur_state") or "starting"
         status_msg = inst.get("status_msg") or ""
         ssh_host = inst.get("ssh_host") or inst.get("public_ipaddr")
@@ -742,7 +768,8 @@ def cmd_search(args: argparse.Namespace, client: VastAPIClient) -> None:
         min_vram_gb=args.min_vram,
         min_disk_gb=args.disk,
         min_cuda=args.min_cuda,
-        verified_only=not args.unverified,
+        min_reliability=args.min_reliability,
+        verified_only=args.verified_only,
         order_by=args.sort,
         limit=args.limit,
     )
@@ -755,7 +782,7 @@ def cmd_search(args: argparse.Namespace, client: VastAPIClient) -> None:
         )
         print(format_offers_table(offers, sort_key=args.sort))
         print(
-            f"\nFound {len(offers)} matching offers. Use --sort price|ram|vram|score to change sorting."
+            f"\nFound {len(offers)} matching offers. Use --sort score|dlperf|value|price|ram|vram to change sorting."
         )
 
 
@@ -795,7 +822,8 @@ def cmd_run(args: argparse.Namespace, client: VastAPIClient) -> None:
                 min_vram_gb=args.min_vram,
                 min_disk_gb=args.disk,
                 min_cuda=args.min_cuda,
-                verified_only=not args.unverified,
+                min_reliability=args.min_reliability,
+                verified_only=args.verified_only,
                 order_by=args.sort,
                 limit=5,
             )
@@ -914,11 +942,19 @@ def cmd_run(args: argparse.Namespace, client: VastAPIClient) -> None:
                         f"{COLOR_RED}❌ Failed to stop instance: {e}{COLOR_RESET}"
                     )
             elif has_error:
-                should_destroy = prompt_destroy_with_timeout(
-                    instance_id=instance_id,
-                    reason=error_reason,
-                    timeout_sec=args.timeout_destroy,
-                )
+                should_destroy = False
+                try:
+                    should_destroy = prompt_destroy_with_timeout(
+                        instance_id=instance_id,
+                        reason=error_reason,
+                        timeout_sec=args.timeout_destroy,
+                    )
+                except KeyboardInterrupt:
+                    print(
+                        f"\n{COLOR_RED}Interrupted by user (Ctrl+C). Auto-destroying instance {instance_id}...{COLOR_RESET}"
+                    )
+                    should_destroy = True
+
                 if should_destroy:
                     try:
                         client.destroy_instance(instance_id)
@@ -1055,7 +1091,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--gpu",
         type=str,
         default=None,
-        help="GPU model filter (e.g., 'RTX 4090', 'RTX 3090', 'A4000')",
+        help="GPU model filter (e.g., 'RTX 4090', '3090', 'A4000')",
     )
     search_p.add_argument(
         "--num-gpus", type=int, default=1, help="Number of GPUs (default: 1)"
@@ -1091,11 +1127,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Minimum CUDA version (default: 12.0)",
     )
     search_p.add_argument(
+        "--min-reliability",
+        type=float,
+        default=0.90,
+        help="Minimum host reliability score (default: 0.90 or 90%%)",
+    )
+    search_p.add_argument(
         "--sort",
         type=str,
-        default="price",
-        choices=["price", "ram", "vram", "score", "speed"],
-        help="Sort offers by: price, ram, vram, score (dlperf), speed (default: price)",
+        default="score",
+        choices=["score", "dlperf", "value", "price", "ram", "vram", "speed"],
+        help="Sort offers by: score (Auto Sort), dlperf (raw speed), value (speed/$), price (cheapest), ram, vram, speed (default: score)",
     )
     search_p.add_argument(
         "--limit",
@@ -1104,9 +1146,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Maximum offers to show (default: 15)",
     )
     search_p.add_argument(
-        "--unverified",
+        "--verified-only",
         action="store_true",
-        help="Include unverified community hosts",
+        help="Filter to only verified datacenter hosts (default: False)",
     )
     search_p.add_argument(
         "--format",
@@ -1139,8 +1181,8 @@ def build_parser() -> argparse.ArgumentParser:
     run_p.add_argument(
         "--gpu",
         type=str,
-        default="RTX 4090",
-        help="GPU model preference (default: 'RTX 4090')",
+        default=None,
+        help="GPU model filter (e.g. '3090', '4090', default: any GPU matching price/criteria)",
     )
     run_p.add_argument(
         "--num-gpus", type=int, default=1, help="Number of GPUs (default: 1)"
@@ -1154,14 +1196,14 @@ def build_parser() -> argparse.ArgumentParser:
     run_p.add_argument(
         "--min-ram",
         type=float,
-        default=24.0,
-        help="Minimum system RAM in GB (default: 24)",
+        default=16.0,
+        help="Minimum system RAM in GB (default: 16)",
     )
     run_p.add_argument(
         "--min-vram",
         type=float,
-        default=16.0,
-        help="Minimum GPU VRAM in GB (default: 16)",
+        default=10.0,
+        help="Minimum GPU VRAM in GB (default: 10)",
     )
     run_p.add_argument(
         "--disk",
@@ -1176,11 +1218,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Minimum CUDA version (default: 12.0)",
     )
     run_p.add_argument(
+        "--min-reliability",
+        type=float,
+        default=0.90,
+        help="Minimum host reliability score (default: 0.90 or 90%%)",
+    )
+    run_p.add_argument(
         "--sort",
         type=str,
-        default="price",
-        choices=["price", "ram", "vram", "score", "speed"],
-        help="Sort offers by: price, ram, vram, score (default: price)",
+        default="score",
+        choices=["score", "dlperf", "value", "price", "ram", "vram", "speed"],
+        help="Sort offers by: score (Auto Sort), dlperf (raw speed), value (speed/$), price (cheapest), ram, vram, speed (default: score)",
     )
     run_p.add_argument(
         "--image",
@@ -1189,9 +1237,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Docker image to run",
     )
     run_p.add_argument(
-        "--unverified",
+        "--verified-only",
         action="store_true",
-        help="Include unverified community hosts",
+        help="Filter to only verified datacenter hosts (default: False)",
     )
     run_p.add_argument(
         "--epochs", "-e", type=int, default=100, help="Number of training epochs"

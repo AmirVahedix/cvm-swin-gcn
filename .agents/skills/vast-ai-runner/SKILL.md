@@ -26,7 +26,8 @@ Ensure `VAST_API_KEY` is available via one of the following:
   - When an instance is launched, its ID is automatically stored in `.env` (`INSTANCE_ID=<id>`).
   - Subsequent commands (`stop`, `destroy`, `ssh`, `download`, `run`) automatically read `INSTANCE_ID` from `.env`—no need to type or copy instance IDs manually!
   - When an instance is destroyed, `INSTANCE_ID` is automatically cleared from `.env`.
-- **Dynamic Formatting & Sorting**: Sort available offers by lowest price (`--sort price`), highest system RAM (`--sort ram`), GPU VRAM (`--sort vram`), or DLPerf benchmark score (`--sort score`).
+- **Dynamic Formatting & Sorting**: Sort available offers by Auto Sort score (`--sort score`, default), raw GPU speed (`--sort dlperf`), performance per dollar (`--sort value`), lowest price (`--sort price`), highest system RAM (`--sort ram`), or GPU VRAM (`--sort vram`).
+- **Host Reliability Filtering**: Filter out unreliable hosts using `--min-reliability 0.90` (default 90% reliability threshold).
 - **One-Command Auto-Execution (`run`)**: Search, provision, wait for SSH, upload `.env` + `setup.sh`, execute training with live log streaming, and download checkpoints (`artifacts/`, `evaluation/`).
 - **Automated Cost Protection & 30-Second Auto-Destroy**:
   - Whenever an error occurs, the training pipeline exits with an error code, or execution is interrupted (Ctrl+C), a **30-second countdown prompt** is presented asking if the instance should be destroyed.
@@ -50,6 +51,18 @@ python3 scripts/vast_runner.py --help
 Search available GPU machines with custom filters and table formatting:
 
 ```bash
+# Default search (Auto Sort by score & performance under host reliability >= 90%)
+python3 scripts/vast_runner.py search --max-price 0.15
+
+# Sort by raw GPU performance (DLPerf TFLOPS)
+python3 scripts/vast_runner.py search --max-price 0.15 --sort dlperf
+
+# Sort by performance per dollar (DLPerf / price)
+python3 scripts/vast_runner.py search --max-price 0.15 --sort value
+
+# Filter specifically by RTX 3090 under $0.15/hr
+python3 scripts/vast_runner.py search --gpu "3090" --max-price 0.15
+
 # Sort by lowest price ($/hr)
 python3 scripts/vast_runner.py search --sort price
 
@@ -58,9 +71,6 @@ python3 scripts/vast_runner.py search --sort ram
 
 # Sort by highest GPU VRAM (GB)
 python3 scripts/vast_runner.py search --sort vram
-
-# Filter by specific GPU model, price limit, and minimum RAM
-python3 scripts/vast_runner.py search --gpu "RTX 4090" --max-price 0.65 --min-ram 32 --sort price
 
 # Output as JSON for programmatic inspection
 python3 scripts/vast_runner.py search --gpu "RTX 3090" --format json
