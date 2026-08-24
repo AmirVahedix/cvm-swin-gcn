@@ -902,6 +902,10 @@ def cmd_run(args: argparse.Namespace, client: VastAPIClient) -> None:
                 print(
                     f"\n{COLOR_BLUE}🔍 Finding optimal offer matching criteria (Sorted by: {args.sort})...{COLOR_RESET}"
                 )
+                min_cuda_req = args.min_cuda
+                if args.gpu and "5090" in args.gpu.lower() and min_cuda_req is None:
+                    min_cuda_req = 12.6
+
                 offers = client.search_offers(
                     gpu_name=args.gpu,
                     num_gpus=args.num_gpus,
@@ -909,7 +913,7 @@ def cmd_run(args: argparse.Namespace, client: VastAPIClient) -> None:
                     min_ram_gb=args.min_ram,
                     min_vram_gb=args.min_vram,
                     min_disk_gb=args.disk,
-                    min_cuda=args.min_cuda,
+                    min_cuda=min_cuda_req,
                     min_reliability=args.min_reliability,
                     verified_only=args.verified_only,
                     order_by=args.sort,

@@ -194,8 +194,10 @@ echo -e "${BLUE}🐍 Using Python binary: ${PYTHON_BIN} (${PYTHON_VERSION})${NC}
 # --- Automatic CUDA & GPU Detection ---
 echo -e "${BLUE}🔍 Detecting GPU and CUDA version...${NC}"
 
+GPU_MODEL=""
 CUDA_VERSION=""
 if command -v nvidia-smi &> /dev/null; then
+    GPU_MODEL=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -n 1)
     CUDA_VERSION=$(nvidia-smi 2>/dev/null | grep -i "CUDA Version" | sed -E 's/.*CUDA Version:[[:space:]]*([0-9]+\.[0-9]+).*/\1/' | head -n 1)
 fi
 
@@ -203,13 +205,18 @@ if [ -z "$CUDA_VERSION" ] && command -v nvcc &> /dev/null; then
     CUDA_VERSION=$(nvcc --version 2>/dev/null | grep -i "release" | sed -E 's/.*release ([0-9]+\.[0-9]+).*/\1/' | head -n 1)
 fi
 
-if [ -n "$CUDA_VERSION" ]; then
+if [[ "$GPU_MODEL" =~ "5090" ]] || [[ "$GPU_MODEL" =~ "RTX 50" ]]; then
+    echo -e "${GREEN}⚡ Detected NVIDIA RTX 50-series GPU: ${GPU_MODEL} (Blackwell / sm_120)${NC}"
+    CUDA_TAG="cu128"
+elif [ -n "$CUDA_VERSION" ]; then
     CUDA_MAJOR=$(echo "$CUDA_VERSION" | cut -d'.' -f1)
     CUDA_MINOR=$(echo "$CUDA_VERSION" | cut -d'.' -f2)
-    echo -e "${GREEN}✅ Detected host CUDA version: ${CUDA_VERSION}${NC}"
+    echo -e "${GREEN}✅ Detected GPU: ${GPU_MODEL:-Unknown} | Host CUDA: ${CUDA_VERSION}${NC}"
 
     if [ "$CUDA_MAJOR" -ge 12 ]; then
-        if [ "$CUDA_MINOR" -ge 6 ]; then
+        if [ "$CUDA_MINOR" -ge 8 ]; then
+            CUDA_TAG="cu128"
+        elif [ "$CUDA_MINOR" -ge 6 ]; then
             CUDA_TAG="cu126"
         elif [ "$CUDA_MINOR" -ge 4 ]; then
             CUDA_TAG="cu124"
@@ -231,31 +238,76 @@ echo -e "${BLUE}🎯 Selected PyTorch Index: ${PYTORCH_INDEX_URL}${NC}"
 
 # Pre-install CUDA-matched PyTorch & torchvision into detected Python environment
 echo -e "${BLUE}⬇️ Installing PyTorch and torchvision (${CUDA_TAG})...${NC}"
-if ! uv pip install --system --python "$PYTHON_BIN" --no-python-downloads --break-system-packages torch torchvision torchaudio "numpy<2" --index-url "${PYTORCH_INDEX_URL}"; then
-    echo -e "${YELLOW}⚠️ uv pip install failed, attempting fallback via $PYTHON_BIN -m pip...${NC}"
-    "$PYTHON_BIN" -m pip install --break-system-packages torch torchvision torchaudio "numpy<2" --index-url "${PYTORCH_INDEX_URL}"
+if [ "$CUDA_TAG" = "cu128" ]; then
+    echo -e "${BLUE}ℹ️ CUDA 12.8 detected. Attempting PyTorch nightly install with cu128 support (for Blackwell / sm_120 GPUs like RTX 5090)...${NC}"
+    if ! uv pip install --system --python "$PYTHON_BIN" --no-python-downloads --break-system-packages --pre torch torchvision torchaudio "numpy<2" --index-url "https://download.pytorch.org/whl/nightly/cu128"; then
+        echo -e "${YELLOW}⚠️ Nightly cu128 failed, falling back to stable cu126...${NC}"
+        CUDA_TAG="cu126"
+        PYTORCH_INDEX_URL="https://download.pytorch.org/whl/cu126"
+        uv pip install --system --python "$PYTHON_BIN" --no-python-downloads --break-system-packages torch torchvision torchaudio "numpy<2" --index-url "${PYTORCH_INDEX_URL}"
+    fi
+else
+    if ! uv pip install --system --python "$PYTHON_BIN" --no-python-downloads --break-system-packages torch torchvision torchaudio "numpy<2" --index-url "${PYTORCH_INDEX_URL}"; then
+        echo -e "${YELLOW}⚠️ Failed with ${PYTORCH_INDEX_URL}, retrying with cu126 index...${NC}"
+        if ! uv pip install --system --python "$PYTHON_BIN" --no-python-downloads --break-system-packages torch torchvision torchaudio "numpy<2" --index-url "https://download.pytorch.org/whl/cu126"; then
+            echo -e "${YELLOW}⚠️ Fallback to standard PyPI for PyTorch...${NC}"
+            "$PYTHON_BIN" -m pip install --break-system-packages torch torchvision torchaudio "numpy<2"
+        fi
+    fi
 fi
 
 # Install project dependencies using extra index url
 echo -e "${BLUE}📦 Syncing remaining project dependencies...${NC}"
-if ! uv pip install --system --python "$PYTHON_BIN" --no-python-downloads --break-system-packages --extra-index-url "${PYTORCH_INDEX_URL}" .; then
+if ! uv pip install --system --python "$PYTHON_BIN" --no-python-downloads --break-system-packages --extra-index-url "${PYTORCH_INDEX_URL}" --extra-index-url "https://download.pytorch.org/whl/cu126" --extra-index-url "https://download.pytorch.org/whl/nightly/cu128" .; then
     echo -e "${YELLOW}⚠️ uv pip install . failed, attempting fallback via $PYTHON_BIN -m pip...${NC}"
-    "$PYTHON_BIN" -m pip install --break-system-packages --extra-index-url "${PYTORCH_INDEX_URL}" .
+    "$PYTHON_BIN" -m pip install --break-system-packages --extra-index-url "${PYTORCH_INDEX_URL}" --extra-index-url "https://download.pytorch.org/whl/cu126" --extra-index-url "https://download.pytorch.org/whl/nightly/cu128" .
 fi
 
-# --- Verify PyTorch & CUDA installation ---
-echo -e "\n${BLUE}🧪 Verifying PyTorch GPU / CUDA installation...${NC}"
-"$PYTHON_BIN" -c '
+# --- Step 5: GPU Pre-Flight CUDA Test ---
+echo -e "\n${BLUE}🧪 Running GPU Pre-Flight CUDA Kernel Execution Test...${NC}"
+
+PREFLIGHT_OUTPUT=$("$PYTHON_BIN" -c '
+import sys
 import torch
+
 print(f"  - PyTorch version: {torch.__version__}")
 print(f"  - CUDA Available:  {torch.cuda.is_available()}")
-if torch.cuda.is_available():
-    print(f"  - Device Count:    {torch.cuda.device_count()}")
-    print(f"  - Device Name:     {torch.cuda.get_device_name(0)}")
-else:
-    print("  - WARNING: CUDA is NOT available to PyTorch! Training will use CPU.")
-'
 
+if not torch.cuda.is_available():
+    print("❌ ERROR: CUDA is NOT available to PyTorch.")
+    sys.exit(1)
+
+dev_name = torch.cuda.get_device_name(0)
+cap = torch.cuda.get_device_capability(0)
+arch = f"sm_{cap[0]}{cap[1]}"
+print(f"  - Device Count:    {torch.cuda.device_count()}")
+print(f"  - Device Name:     {dev_name} (compute capability {arch})")
+
+arch_list = torch.cuda.get_arch_list() if hasattr(torch.cuda, "get_arch_list") else []
+if arch_list:
+    print(f"  - PyTorch Archs:   {\" \".join(arch_list)}")
+
+# Execute an actual CUDA kernel operation on GPU to verify kernel compilation & driver support
+try:
+    a = torch.randn(128, 128, device="cuda")
+    b = torch.randn(128, 128, device="cuda")
+    c = torch.matmul(a, b)
+    torch.cuda.synchronize()
+    print("  - CUDA Kernel Exec: SUCCESS (Tensor matrix multiplication verified on GPU)")
+except Exception as e:
+    print(f"❌ PRE-FLIGHT TEST FAILED: CUDA kernel execution error on {dev_name} ({arch}): {e}")
+    sys.exit(1)
+' 2>&1)
+
+PREFLIGHT_EXIT=$?
+echo "$PREFLIGHT_OUTPUT"
+
+if [ $PREFLIGHT_EXIT -ne 0 ]; then
+    echo -e "\n${RED}❌ Pre-flight GPU CUDA test failed! Aborting before downloading data or launching training pipeline.${NC}"
+    exit 1
+fi
+
+echo -e "\n${GREEN}✅ Pre-flight GPU test passed! GPU and CUDA execution environment verified.${NC}"
 echo -e "\n${GREEN}✅ Setup Complete!${NC}"
 
 # --- Optional Pipeline Execution ---
