@@ -263,7 +263,7 @@ fi
 echo -e "${BLUE}📦 Syncing remaining project dependencies...${NC}"
 if ! uv pip install --system --python "$PYTHON_BIN" --no-python-downloads --break-system-packages --extra-index-url "${PYTORCH_INDEX_URL}" --extra-index-url "https://download.pytorch.org/whl/cu126" --extra-index-url "https://download.pytorch.org/whl/nightly/cu128" .; then
     echo -e "${YELLOW}⚠️ uv pip install . failed, attempting fallback via $PYTHON_BIN -m pip...${NC}"
-    "$PYTHON_BIN" -m pip install --break-system-packages --extra-index-url "${PYTORCH_INDEX_URL}" --extra-index-url "https://download.pytorch.org/whl/cu126" --extra-index-url "https://download.pytorch.org/whl/nightly/cu128" .
+    "$PYTHON_BIN" -m pip install --break-system-packages --ignore-installed --extra-index-url "${PYTORCH_INDEX_URL}" --extra-index-url "https://download.pytorch.org/whl/cu126" --extra-index-url "https://download.pytorch.org/whl/nightly/cu128" .
 fi
 
 # --- Step 5: GPU Pre-Flight CUDA Test ---
@@ -288,7 +288,8 @@ print(f"  - Device Name:     {dev_name} (compute capability {arch})")
 
 arch_list = torch.cuda.get_arch_list() if hasattr(torch.cuda, "get_arch_list") else []
 if arch_list:
-    print(f"  - PyTorch Archs:   {\" \".join(arch_list)}")
+    arch_str = " ".join(arch_list)
+    print(f"  - PyTorch Archs:   {arch_str}")
 
 # Execute an actual CUDA kernel operation on GPU to verify kernel compilation & driver support
 try:
