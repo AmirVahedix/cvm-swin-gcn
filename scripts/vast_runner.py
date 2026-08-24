@@ -532,7 +532,7 @@ def prompt_destroy_with_timeout(
 
 
 def wait_for_instance_ready(
-    client: VastAPIClient, instance_id: int, timeout_sec: int = 360
+    client: VastAPIClient, instance_id: int, timeout_sec: int = 600
 ) -> Dict[str, Any]:
     """Poll Vast API until instance is in running state and has SSH host/port."""
     print(
@@ -574,7 +574,7 @@ def wait_for_instance_ready(
 
 
 def wait_for_ssh_ready(
-    ssh_host: str, ssh_port: int, user: str = "root", timeout_sec: int = 180
+    ssh_host: str, ssh_port: int, user: str = "root", timeout_sec: int = 600
 ) -> bool:
     """Poll SSH port with strict host checking disabled until SSH command executes."""
     print(
@@ -910,11 +910,16 @@ def cmd_run(args: argparse.Namespace, client: VastAPIClient) -> None:
                 )
 
             # Wait for instance boot and SSH readiness
-            inst = wait_for_instance_ready(client, instance_id)
+            timeout_boot = getattr(args, "timeout_boot", 600)
+            timeout_ssh = getattr(args, "timeout_ssh", 600)
+            inst = wait_for_instance_ready(
+                client, instance_id, timeout_sec=timeout_boot
+            )
             ssh_host = inst.get("ssh_host") or inst.get("public_ipaddr")
             ssh_port = int(inst["ssh_port"])
 
-        wait_for_ssh_ready(ssh_host, ssh_port)
+        timeout_ssh = getattr(args, "timeout_ssh", 600)
+        wait_for_ssh_ready(ssh_host, ssh_port, timeout_sec=timeout_ssh)
 
         # Upload .env and setup.sh
         upload_setup_files(ssh_host, ssh_port)
@@ -1336,6 +1341,18 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=30,
         help="Seconds before automatically destroying instance on error/interrupt (default: 30s)",
+    )
+    run_p.add_argument(
+        "--timeout-boot",
+        type=int,
+        default=600,
+        help="Seconds to wait for instance state to reach running state (default: 600s / 10m)",
+    )
+    run_p.add_argument(
+        "--timeout-ssh",
+        type=int,
+        default=600,
+        help="Seconds to wait for SSH daemon to respond after boot (default: 600s / 10m)",
     )
     run_p.add_argument(
         "--download-artifacts",

@@ -34,6 +34,9 @@ Ensure `VAST_API_KEY` is available via one of the following:
   - If the user confirms or if the 30-second timer elapses with no input, the instance is **automatically destroyed** to prevent accidental cloud charges!
   - Users can press `n` during the countdown to keep the instance alive for debugging.
   - Set custom countdown duration with `--timeout-destroy <SECONDS>` (default: 30).
+- **Extended Boot & SSH Connection Wait Timeouts**:
+  - Boot initialization and SSH readiness probe defaults are set to **10 minutes (600s)** to accommodate slow container image downloads and host startup (~5 minutes).
+  - Customize timeouts via `--timeout-boot <SECONDS>` and `--timeout-ssh <SECONDS>`.
 
 ---
 
