@@ -94,6 +94,13 @@ python3 scripts/vast_runner.py run --train-only --epochs 50 --batch-size 16
 
 # Attach to an already running instance (or uses INSTANCE_ID from .env)
 python3 scripts/vast_runner.py run --epochs 100
+
+# Manual Attach Mode (Interactive prompt for Instance ID, SSH Host, and SSH Port)
+# Deploys code/setup, streams training, downloads artifacts, and auto-destroys on finish
+python3 scripts/vast_runner.py run --manual
+
+# Manual Attach Mode with CLI flags (non-interactive)
+python3 scripts/vast_runner.py run --instance-id 12345 --host 74.50.x.x --port 12345
 ```
 
 ---

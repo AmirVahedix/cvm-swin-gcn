@@ -797,75 +797,122 @@ def cmd_list(args: argparse.Namespace, client: VastAPIClient) -> None:
 
 
 def cmd_run(args: argparse.Namespace, client: VastAPIClient) -> None:
-    """Complete end-to-end automation: search/create, wait, upload, setup, train, and manage lifecycle."""
+    """Complete end-to-end automation: search/create or attach manually, setup, train, and manage lifecycle."""
     instance_id = None
     created_new = False
     has_error = False
     error_reason = ""
+    ssh_host = getattr(args, "ssh_host", None) or getattr(args, "host", None)
+    ssh_port = getattr(args, "ssh_port", None) or getattr(args, "port", None)
 
     try:
-        resolved_id = get_stored_instance_id(args.instance_id)
-        if resolved_id and args.instance_id is not None:
-            instance_id = resolved_id
-            print(
-                f"{COLOR_BLUE}Using specified instance ID: {instance_id}{COLOR_RESET}"
-            )
-        else:
-            print(
-                f"\n{COLOR_BLUE}🔍 Finding optimal offer matching criteria (Sorted by: {args.sort})...{COLOR_RESET}"
-            )
-            offers = client.search_offers(
-                gpu_name=args.gpu,
-                num_gpus=args.num_gpus,
-                max_price=args.max_price,
-                min_ram_gb=args.min_ram,
-                min_vram_gb=args.min_vram,
-                min_disk_gb=args.disk,
-                min_cuda=args.min_cuda,
-                min_reliability=args.min_reliability,
-                verified_only=args.verified_only,
-                order_by=args.sort,
-                limit=5,
-            )
+        manual_mode = getattr(args, "manual", False) or (ssh_host is not None and ssh_port is not None)
 
-            if not offers:
-                print(
-                    f"{COLOR_RED}❌ No matching offers found. Try relaxing price, RAM, or GPU filters.{COLOR_RESET}"
+        if manual_mode:
+            print(f"\n{COLOR_BOLD}=== Manual Instance Attach Mode ==={COLOR_RESET}")
+
+            # 1. Resolve Instance ID
+            if args.instance_id is not None:
+                instance_id = int(args.instance_id)
+            else:
+                stored_id = get_stored_instance_id(None)
+                prompt_label = (
+                    f"{COLOR_CYAN}Enter Vast Instance ID [press Enter for stored {stored_id}]: {COLOR_RESET}"
+                    if stored_id
+                    else f"{COLOR_CYAN}Enter Vast Instance ID: {COLOR_RESET}"
                 )
+                raw_id = input(prompt_label).strip()
+                if not raw_id and stored_id:
+                    instance_id = stored_id
+                elif raw_id.isdigit():
+                    instance_id = int(raw_id)
+                else:
+                    print(f"{COLOR_RED}❌ Invalid Instance ID.{COLOR_RESET}")
+                    sys.exit(1)
+
+            # 2. Resolve SSH Host
+            if not ssh_host:
+                ssh_host = input(f"{COLOR_CYAN}Enter SSH Host (IP / Domain, e.g., 74.50.x.x or ssh4.vast.ai): {COLOR_RESET}").strip()
+            if not ssh_host:
+                print(f"{COLOR_RED}❌ SSH Host cannot be empty.{COLOR_RESET}")
                 sys.exit(1)
 
-            selected_offer = offers[0]
-            offer_id = selected_offer["id"]
-            gpu_name = selected_offer.get("gpu_name")
-            dph = selected_offer.get("dph_total", 0.0)
-            ram_gb = selected_offer.get("cpu_ram", 0) / 1024
+            # 3. Resolve SSH Port
+            if not ssh_port:
+                raw_port = input(f"{COLOR_CYAN}Enter SSH Port (e.g., 12345): {COLOR_RESET}").strip()
+                if not str(raw_port).isdigit():
+                    print(f"{COLOR_RED}❌ Invalid SSH Port.{COLOR_RESET}")
+                    sys.exit(1)
+                ssh_port = int(raw_port)
+            else:
+                ssh_port = int(ssh_port)
+
+            # Automatically destroy instance on finish unless stop-on-finish was specified
+            if not getattr(args, "stop_on_finish", False):
+                args.destroy_on_finish = True
 
             print(
-                f"Selected Offer #{offer_id}: {COLOR_BOLD}{gpu_name}{COLOR_RESET} | "
-                f"{ram_gb:.1f} GB RAM | ${dph:.3f}/hr"
+                f"{COLOR_GREEN}✅ Manual connection target set: ID #{instance_id} ({ssh_host}:{ssh_port}) "
+                f"[Will auto-destroy when finished]{COLOR_RESET}"
             )
 
-            print(
-                f"\n{COLOR_BLUE}🚀 Launching new Vast.ai instance (Image: {args.image}, Disk: {args.disk}GB)...{COLOR_RESET}"
-            )
-            instance_id = client.create_instance(
-                offer_id=offer_id, image=args.image, disk_gb=args.disk
-            )
-            created_new = True
-            print(
-                f"{COLOR_GREEN}✅ Created contract. Instance ID: {instance_id}{COLOR_RESET}"
-            )
+        else:
+            resolved_id = get_stored_instance_id(args.instance_id)
+            if resolved_id and args.instance_id is not None:
+                instance_id = resolved_id
+                print(
+                    f"{COLOR_BLUE}Using specified instance ID: {instance_id}{COLOR_RESET}"
+                )
+            else:
+                print(
+                    f"\n{COLOR_BLUE}🔍 Finding optimal offer matching criteria (Sorted by: {args.sort})...{COLOR_RESET}"
+                )
+                offers = client.search_offers(
+                    gpu_name=args.gpu,
+                    num_gpus=args.num_gpus,
+                    max_price=args.max_price,
+                    min_ram_gb=args.min_ram,
+                    min_vram_gb=args.min_vram,
+                    min_disk_gb=args.disk,
+                    min_cuda=args.min_cuda,
+                    min_reliability=args.min_reliability,
+                    verified_only=args.verified_only,
+                    order_by=args.sort,
+                    limit=5,
+                )
 
-            # Store INSTANCE_ID dynamically in .env
-            update_env_variable("INSTANCE_ID", str(instance_id))
-            print(
-                f"{COLOR_CYAN}📝 Saved INSTANCE_ID={instance_id} in {get_env_file_path()}{COLOR_RESET}"
-            )
+                if not offers:
+                    print(
+                        f"{COLOR_RED}❌ No matching offers found. Try relaxing price, RAM, or GPU filters.{COLOR_RESET}"
+                    )
+                    sys.exit(1)
 
-        # Wait for instance boot and SSH readiness
-        inst = wait_for_instance_ready(client, instance_id)
-        ssh_host = inst.get("ssh_host") or inst.get("public_ipaddr")
-        ssh_port = int(inst["ssh_port"])
+                selected_offer = offers[0]
+                offer_id = selected_offer["id"]
+                gpu_name = selected_offer.get("gpu_name")
+                dph = selected_offer.get("dph_total", 0.0)
+                ram_gb = selected_offer.get("cpu_ram", 0) / 1024
+
+                print(
+                    f"Selected Offer #{offer_id}: {COLOR_BOLD}{gpu_name}{COLOR_RESET} | "
+                    f"{ram_gb:.1f} GB RAM | ${dph:.3f}/hr"
+                )
+
+                print(
+                    f"\n{COLOR_BLUE}🚀 Launching new Vast.ai instance (Image: {args.image}, Disk: {args.disk}GB)...{COLOR_RESET}"
+                )
+                instance_id = client.create_instance(
+                    offer_id=offer_id, image=args.image, disk_gb=args.disk
+                )
+                created_new = True
+                print(
+                    f"{COLOR_GREEN}✅ Created contract. Instance ID: {instance_id}{COLOR_RESET}"
+                )
+
+            # Wait for instance boot and SSH readiness
+            inst = wait_for_instance_ready(client, instance_id)
+            ssh_host = inst.get("ssh_host") or inst.get("public_ipaddr")
+            ssh_port = int(inst["ssh_port"])
 
         wait_for_ssh_ready(ssh_host, ssh_port)
 
@@ -924,7 +971,6 @@ def cmd_run(args: argparse.Namespace, client: VastAPIClient) -> None:
                 )
                 try:
                     client.destroy_instance(instance_id)
-                    update_env_variable("INSTANCE_ID", "")
                     print(f"{COLOR_GREEN}✅ Instance {instance_id} destroyed.")
                 except Exception as e:
                     print(
@@ -958,7 +1004,6 @@ def cmd_run(args: argparse.Namespace, client: VastAPIClient) -> None:
                 if should_destroy:
                     try:
                         client.destroy_instance(instance_id)
-                        update_env_variable("INSTANCE_ID", "")
                         print(
                             f"{COLOR_GREEN}✅ Instance {instance_id} successfully destroyed.{COLOR_RESET}"
                         )
@@ -968,24 +1013,24 @@ def cmd_run(args: argparse.Namespace, client: VastAPIClient) -> None:
                         )
                 else:
                     print(
-                        f"\n{COLOR_CYAN}ℹ️ Instance {instance_id} preserved in .env. Manage it when done:{COLOR_RESET}"
+                        f"\n{COLOR_CYAN}ℹ️ Instance {instance_id} preserved. Manage it when done:{COLOR_RESET}"
                     )
                     print("   python3 scripts/vast_runner.py ssh")
                     print("   python3 scripts/vast_runner.py destroy")
             else:
                 print(
-                    f"\n{COLOR_CYAN}ℹ️ Instance {instance_id} is still running (saved in .env). Manage it when done:{COLOR_RESET}"
+                    f"\n{COLOR_CYAN}ℹ️ Instance {instance_id} is still running. Manage it when done:{COLOR_RESET}"
                 )
                 print("   python3 scripts/vast_runner.py stop      # pause")
                 print("   python3 scripts/vast_runner.py destroy   # delete")
 
 
 def cmd_stop(args: argparse.Namespace, client: VastAPIClient) -> None:
-    """Stop an instance (uses CLI arg or stored INSTANCE_ID from .env)."""
+    """Stop an instance (uses CLI arg or environment)."""
     instance_id = get_stored_instance_id(args.instance_id)
     if not instance_id:
         print(
-            f"{COLOR_RED}❌ No instance ID specified and none found in .env!{COLOR_RESET}"
+            f"{COLOR_RED}❌ No instance ID specified!{COLOR_RESET}"
         )
         sys.exit(1)
     client.stop_instance(instance_id)
@@ -995,17 +1040,16 @@ def cmd_stop(args: argparse.Namespace, client: VastAPIClient) -> None:
 
 
 def cmd_destroy(args: argparse.Namespace, client: VastAPIClient) -> None:
-    """Destroy an instance (uses CLI arg or stored INSTANCE_ID from .env)."""
+    """Destroy an instance (uses CLI arg or environment)."""
     instance_id = get_stored_instance_id(args.instance_id)
     if not instance_id:
         print(
-            f"{COLOR_RED}❌ No instance ID specified and none found in .env!{COLOR_RESET}"
+            f"{COLOR_RED}❌ No instance ID specified!{COLOR_RESET}"
         )
         sys.exit(1)
     client.destroy_instance(instance_id)
-    update_env_variable("INSTANCE_ID", "")
     print(
-        f"{COLOR_GREEN}✅ Destroy command issued for instance {instance_id} (cleared from .env).{COLOR_RESET}"
+        f"{COLOR_GREEN}✅ Destroy command issued for instance {instance_id}.{COLOR_RESET}"
     )
 
 
@@ -1177,6 +1221,25 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help="Attach to existing instance ID (defaults to INSTANCE_ID in .env if set)",
+    )
+    run_p.add_argument(
+        "--ssh-host",
+        "--host",
+        type=str,
+        default=None,
+        help="Manual SSH host IP or domain for an already rented instance",
+    )
+    run_p.add_argument(
+        "--ssh-port",
+        "--port",
+        type=int,
+        default=None,
+        help="Manual SSH port for an already rented instance",
+    )
+    run_p.add_argument(
+        "--manual",
+        action="store_true",
+        help="Enable manual entry prompt for Instance ID, SSH Host, and SSH Port",
     )
     run_p.add_argument(
         "--gpu",
