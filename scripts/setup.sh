@@ -128,7 +128,7 @@ fi
 
 # 2. Install base dependencies
 echo -e "${BLUE}⚙️ Installing base dependencies...${NC}"
-apt-get update && apt-get install -y sshpass zip unzip pv curl git
+apt-get update && apt-get install -y sshpass zip unzip pv curl git libgl1-mesa-glx libglib2.0-0 libsm6 libxrender1 libxext6 libxcb1 libx11-xcb1 2>/dev/null || apt-get install -y sshpass zip unzip pv curl git libgl1 libglib2.0-0 libsm6 libxrender1 libxext6 libxcb1 libx11-xcb1
 
 cd "$WORKSPACE" || exit
 

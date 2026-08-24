@@ -292,10 +292,6 @@ class VastAPIClient:
 
         if order_by in ("price", "dph"):
             offers.sort(key=lambda o: o.get("_computed_price", 999999))
-        elif order_by in ("dlperf", "performance"):
-            offers.sort(
-                key=lambda o: o.get("_computed_dlperf", 0.0), reverse=True
-            )
         elif order_by in ("value", "dlperf_per_dollar"):
             offers.sort(
                 key=lambda o: (
@@ -310,12 +306,22 @@ class VastAPIClient:
             offers.sort(key=lambda o: o.get("gpu_ram", 0), reverse=True)
         elif order_by in ("speed", "inet"):
             offers.sort(key=lambda o: o.get("inet_down", 0), reverse=True)
-        else:  # score / default: DLPerf descending
+        elif order_by == "score":
             offers.sort(
                 key=lambda o: (
-                    -o.get("score", 0),
-                    o.get("_computed_price", 999999),
-                )
+                    o.get("score", 0),
+                    o.get("_computed_dlperf", 0.0),
+                ),
+                reverse=True,
+            )
+        else:  # "dlperf" / "performance" / default: Highest performance TFLOPS first under max price!
+            offers.sort(
+                key=lambda o: (
+                    o.get("_computed_dlperf", 0.0),
+                    o.get("cpu_ram", 0),
+                    o.get("_computed_price", 0.0),
+                ),
+                reverse=True,
             )
 
         return offers[:limit]
@@ -1213,9 +1219,9 @@ def build_parser() -> argparse.ArgumentParser:
     search_p.add_argument(
         "--sort",
         type=str,
-        default="score",
-        choices=["score", "dlperf", "value", "price", "ram", "vram", "speed"],
-        help="Sort offers by: score (Auto Sort), dlperf (raw speed), value (speed/$), price (cheapest), ram, vram, speed (default: score)",
+        default="dlperf",
+        choices=["dlperf", "score", "value", "price", "ram", "vram", "speed"],
+        help="Sort offers by: dlperf (highest speed TFLOPS, default), value (speed/$), price (cheapest), ram, vram, speed",
     )
     search_p.add_argument(
         "--limit",
@@ -1224,9 +1230,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Maximum offers to show (default: 15)",
     )
     search_p.add_argument(
-        "--verified-only",
-        action="store_true",
-        help="Filter to only verified datacenter hosts (default: False)",
+        "--no-verified",
+        dest="verified_only",
+        action="store_false",
+        default=True,
+        help="Allow unverified hosts (default: False, verified datacenter hosts only)",
     )
     search_p.add_argument(
         "--format",
@@ -1323,9 +1331,9 @@ def build_parser() -> argparse.ArgumentParser:
     run_p.add_argument(
         "--sort",
         type=str,
-        default="score",
-        choices=["score", "dlperf", "value", "price", "ram", "vram", "speed"],
-        help="Sort offers by: score (Auto Sort), dlperf (raw speed), value (speed/$), price (cheapest), ram, vram, speed (default: score)",
+        default="dlperf",
+        choices=["dlperf", "score", "value", "price", "ram", "vram", "speed"],
+        help="Sort offers by: dlperf (highest speed TFLOPS, default), value (speed/$), price (cheapest), ram, vram, speed",
     )
     run_p.add_argument(
         "--image",
@@ -1334,9 +1342,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Docker image to run (default: pytorch/pytorch:latest)",
     )
     run_p.add_argument(
-        "--verified-only",
-        action="store_true",
-        help="Filter to only verified datacenter hosts (default: False)",
+        "--no-verified",
+        dest="verified_only",
+        action="store_false",
+        default=True,
+        help="Allow unverified hosts (default: False, verified datacenter hosts only)",
     )
     run_p.add_argument(
         "--epochs", "-e", type=int, default=100, help="Number of training epochs"
