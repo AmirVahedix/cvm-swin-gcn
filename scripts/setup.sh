@@ -239,19 +239,22 @@ echo -e "${BLUE}🎯 Selected PyTorch Index: ${PYTORCH_INDEX_URL}${NC}"
 # Pre-install CUDA-matched PyTorch & torchvision into detected Python environment
 echo -e "${BLUE}⬇️ Installing PyTorch and torchvision (${CUDA_TAG})...${NC}"
 if [ "$CUDA_TAG" = "cu128" ]; then
-    echo -e "${BLUE}ℹ️ CUDA 12.8 detected. Attempting PyTorch nightly install with cu128 support (for Blackwell / sm_120 GPUs like RTX 5090)...${NC}"
-    if ! uv pip install --system --python "$PYTHON_BIN" --no-python-downloads --break-system-packages --pre torch torchvision torchaudio "numpy<2" --index-url "https://download.pytorch.org/whl/nightly/cu128"; then
-        echo -e "${YELLOW}⚠️ Nightly cu128 failed, falling back to stable cu126...${NC}"
-        CUDA_TAG="cu126"
-        PYTORCH_INDEX_URL="https://download.pytorch.org/whl/cu126"
-        uv pip install --system --python "$PYTHON_BIN" --no-python-downloads --break-system-packages torch torchvision torchaudio "numpy<2" --index-url "${PYTORCH_INDEX_URL}"
+    echo -e "${BLUE}ℹ️ CUDA 12.8 / RTX 5090 detected. Installing PyTorch nightly with cu128 support (for Blackwell / sm_120)...${NC}"
+    if ! uv pip install --system --python "$PYTHON_BIN" --no-python-downloads --break-system-packages --pre torch torchvision "numpy<2" --index-url "https://download.pytorch.org/whl/nightly/cu128" --extra-index-url "https://pypi.org/simple"; then
+        echo -e "${YELLOW}⚠️ uv pip install nightly cu128 failed, retrying with python -m pip...${NC}"
+        if ! "$PYTHON_BIN" -m pip install --break-system-packages --pre torch torchvision "numpy<2" --index-url "https://download.pytorch.org/whl/nightly/cu128" --extra-index-url "https://pypi.org/simple"; then
+            echo -e "${YELLOW}⚠️ Nightly cu128 pip install failed, falling back to stable cu126...${NC}"
+            CUDA_TAG="cu126"
+            PYTORCH_INDEX_URL="https://download.pytorch.org/whl/cu126"
+            uv pip install --system --python "$PYTHON_BIN" --no-python-downloads --break-system-packages torch torchvision "numpy<2" --index-url "${PYTORCH_INDEX_URL}"
+        fi
     fi
 else
-    if ! uv pip install --system --python "$PYTHON_BIN" --no-python-downloads --break-system-packages torch torchvision torchaudio "numpy<2" --index-url "${PYTORCH_INDEX_URL}"; then
+    if ! uv pip install --system --python "$PYTHON_BIN" --no-python-downloads --break-system-packages torch torchvision "numpy<2" --index-url "${PYTORCH_INDEX_URL}"; then
         echo -e "${YELLOW}⚠️ Failed with ${PYTORCH_INDEX_URL}, retrying with cu126 index...${NC}"
-        if ! uv pip install --system --python "$PYTHON_BIN" --no-python-downloads --break-system-packages torch torchvision torchaudio "numpy<2" --index-url "https://download.pytorch.org/whl/cu126"; then
+        if ! uv pip install --system --python "$PYTHON_BIN" --no-python-downloads --break-system-packages torch torchvision "numpy<2" --index-url "https://download.pytorch.org/whl/cu126"; then
             echo -e "${YELLOW}⚠️ Fallback to standard PyPI for PyTorch...${NC}"
-            "$PYTHON_BIN" -m pip install --break-system-packages torch torchvision torchaudio "numpy<2"
+            "$PYTHON_BIN" -m pip install --break-system-packages torch torchvision "numpy<2"
         fi
     fi
 fi
