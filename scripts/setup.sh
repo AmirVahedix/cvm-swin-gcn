@@ -231,9 +231,9 @@ echo -e "${BLUE}🎯 Selected PyTorch Index: ${PYTORCH_INDEX_URL}${NC}"
 
 # Pre-install CUDA-matched PyTorch & torchvision into detected Python environment
 echo -e "${BLUE}⬇️ Installing PyTorch and torchvision (${CUDA_TAG})...${NC}"
-if ! uv pip install --system --python "$PYTHON_BIN" --no-python-downloads --break-system-packages torch torchvision torchaudio --index-url "${PYTORCH_INDEX_URL}"; then
+if ! uv pip install --system --python "$PYTHON_BIN" --no-python-downloads --break-system-packages torch torchvision torchaudio "numpy<2" --index-url "${PYTORCH_INDEX_URL}"; then
     echo -e "${YELLOW}⚠️ uv pip install failed, attempting fallback via $PYTHON_BIN -m pip...${NC}"
-    "$PYTHON_BIN" -m pip install --break-system-packages torch torchvision torchaudio --index-url "${PYTORCH_INDEX_URL}"
+    "$PYTHON_BIN" -m pip install --break-system-packages torch torchvision torchaudio "numpy<2" --index-url "${PYTORCH_INDEX_URL}"
 fi
 
 # Install project dependencies using extra index url
