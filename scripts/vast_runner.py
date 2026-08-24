@@ -151,6 +151,13 @@ def get_api_key(cli_key: Optional[str] = None) -> str:
     return ""
 
 
+def is_verified_offer(offer: dict) -> bool:
+    """Returns True if GPU host is strictly verified and not deverified/unverified."""
+    ver = str(offer.get("verification", "")).lower()
+    dever = offer.get("deverified")
+    return ver == "verified" and not dever
+
+
 class VastAPIClient:
     """Lightweight Vast.ai REST API client with zero third-party dependencies."""
 
@@ -227,38 +234,53 @@ class VastAPIClient:
         min_vram_gb: Optional[float] = None,
         min_disk_gb: Optional[float] = None,
         min_cuda: Optional[float] = None,
-        min_reliability: Optional[float] = None,
-        verified_only: bool = False,
+        min_reliability: Optional[float] = 0.95,
+        verified_only: bool = True,
         order_by: Optional[str] = None,
         limit: int = 20,
     ) -> List[Dict[str, Any]]:
-        """Search available machine offers with flexible criteria."""
+        """Search available machine offers with exact POST /bundles/ query criteria from reference config."""
         query_dict: Dict[str, Any] = {
-            "external": {"eq": False},
             "rentable": {"eq": True},
-            "num_gpus": {"eq": num_gpus},
+            "type": "on-demand",
         }
-
         if verified_only:
             query_dict["verified"] = {"eq": True}
-        if min_disk_gb is not None:
-            query_dict["disk_space"] = {"gte": float(min_disk_gb)}
-        if min_ram_gb is not None:
-            query_dict["cpu_ram"] = {"gte": float(min_ram_gb) * 1024}
+        if num_gpus:
+            query_dict["num_gpus"] = {"eq": num_gpus}
         if min_vram_gb is not None:
             query_dict["gpu_ram"] = {"gte": float(min_vram_gb) * 1024}
+        if min_ram_gb is not None:
+            query_dict["cpu_ram"] = {"gte": float(min_ram_gb) * 1024}
         if max_price is not None:
             query_dict["dph_total"] = {"lte": float(max_price)}
+        if min_disk_gb is not None:
+            query_dict["disk_space"] = {"gte": float(min_disk_gb)}
         if min_cuda is not None:
             query_dict["cuda_max_good"] = {"gte": float(min_cuda)}
         if min_reliability is not None:
             rel = float(min_reliability)
             if rel > 1.0:
                 rel = rel / 100.0
-            query_dict["reliability2"] = {"gte": rel}
+            query_dict["reliability"] = {"gte": rel}
 
-        res = self._request("bundles/", method="GET", params={"q": query_dict})
-        offers = res.get("offers", []) if isinstance(res, dict) else []
+        res = self._request("bundles/", method="POST", data=query_dict)
+        raw_offers = res.get("offers", []) if isinstance(res, dict) else []
+
+        offers = []
+        for offer in raw_offers:
+            price = (
+                offer.get("dph_total")
+                or offer.get("dph_base")
+                or offer.get("dph")
+                or 0.0
+            )
+            if price > 0.0 and (not verified_only or is_verified_offer(offer)):
+                offer["_computed_price"] = float(price)
+                offer["_computed_dlperf"] = float(
+                    offer.get("dlperf", 0.0) or 0.0
+                )
+                offers.append(offer)
 
         if gpu_name:
             gpu_query = gpu_name.lower().strip()
@@ -269,12 +291,17 @@ class VastAPIClient:
             ]
 
         if order_by in ("price", "dph"):
-            offers.sort(key=lambda o: o.get("dph_total", 999999))
+            offers.sort(key=lambda o: o.get("_computed_price", 999999))
         elif order_by in ("dlperf", "performance"):
-            offers.sort(key=lambda o: o.get("dlperf", 0) or 0, reverse=True)
-        elif order_by == "value":
             offers.sort(
-                key=lambda o: (o.get("dlperf", 0) or 0) / max(o.get("dph_total", 0.001), 0.001),
+                key=lambda o: o.get("_computed_dlperf", 0.0), reverse=True
+            )
+        elif order_by in ("value", "dlperf_per_dollar"):
+            offers.sort(
+                key=lambda o: (
+                    o.get("_computed_dlperf", 0.0)
+                    / max(o.get("_computed_price", 1.0), 0.001)
+                ),
                 reverse=True,
             )
         elif order_by == "ram":
@@ -283,11 +310,11 @@ class VastAPIClient:
             offers.sort(key=lambda o: o.get("gpu_ram", 0), reverse=True)
         elif order_by in ("speed", "inet"):
             offers.sort(key=lambda o: o.get("inet_down", 0), reverse=True)
-        else:  # score / default
+        else:  # score / default: DLPerf descending
             offers.sort(
                 key=lambda o: (
                     -o.get("score", 0),
-                    o.get("dph_total", 999999),
+                    o.get("_computed_price", 999999),
                 )
             )
 
@@ -296,20 +323,22 @@ class VastAPIClient:
     def create_instance(
         self,
         offer_id: int,
-        image: str = "pytorch/pytorch:2.1.2-cuda12.1-cudnn8-runtime",
+        image: str = "pytorch/pytorch:latest",
         disk_gb: float = 40.0,
+        label: str = "swin-gcn-network",
         onstart_cmd: Optional[str] = None,
     ) -> int:
-        """Create and start a new instance from an offer ID."""
+        """Create and start a new instance from an offer ID with exact uploaded project config."""
         payload: Dict[str, Any] = {
             "client_id": "me",
             "image": image,
             "disk": float(disk_gb),
             "runtype": "ssh",
-            "ssh": True,
+            "label": label,
+            "python_utf8": True,
+            "lang_utf8": True,
+            "onstart": onstart_cmd or "mkdir -p /workspace",
         }
-        if onstart_cmd:
-            payload["onstart"] = onstart_cmd
 
         res = self._request(f"asks/{offer_id}/", method="PUT", data=payload)
         instance_id = (
@@ -1301,8 +1330,8 @@ def build_parser() -> argparse.ArgumentParser:
     run_p.add_argument(
         "--image",
         type=str,
-        default="pytorch/pytorch:2.1.2-cuda12.1-cudnn8-runtime",
-        help="Docker image to run",
+        default="pytorch/pytorch:latest",
+        help="Docker image to run (default: pytorch/pytorch:latest)",
     )
     run_p.add_argument(
         "--verified-only",
