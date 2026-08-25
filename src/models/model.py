@@ -19,12 +19,14 @@ class GraphConvolution(nn.Module):
 
 class SoftArgmax2D(nn.Module):
     """
-    Differentiable Soft-Argmax 2D coordinate extraction.
-    Computes spatial expectation of peak locations in normalized [0, 1] range.
+    Differentiable Soft-Argmax 2D coordinate extraction with learnable
+    per-landmark temperature scaling for sharp sub-pixel localization.
     """
-    def __init__(self, temperature: float = 1.0):
+    def __init__(self, num_landmarks: int = 13, init_temperature: float = 0.1):
         super().__init__()
-        self.temperature = temperature
+        import math
+        init_log_temp = torch.full((1, num_landmarks, 1, 1), math.log(init_temperature))
+        self.log_temperature = nn.Parameter(init_log_temp)
 
     def forward(self, heatmaps: torch.Tensor) -> torch.Tensor:
         """
@@ -34,8 +36,12 @@ class SoftArgmax2D(nn.Module):
             coords: Tensor of shape [B, N, 2] in normalized scale [0, 1]
         """
         B, N, H, W = heatmaps.shape
-        flat_hm = heatmaps.view(B, N, -1)
-        softmax_hm = F.softmax(flat_hm / self.temperature, dim=-1).view(B, N, H, W)
+        # Clamp temperature to range [0.001, 1.0] for numerical stability
+        temperature = torch.exp(self.log_temperature).clamp(min=1e-3, max=1.0)
+
+        scaled_hm = heatmaps / temperature
+        flat_hm = scaled_hm.view(B, N, -1)
+        softmax_hm = F.softmax(flat_hm, dim=-1).view(B, N, H, W)
 
         device = heatmaps.device
         grid_y, grid_x = torch.meshgrid(
@@ -50,6 +56,7 @@ class SoftArgmax2D(nn.Module):
         exp_y = torch.sum(softmax_hm * grid_y, dim=(-2, -1))
 
         return torch.stack([exp_x, exp_y], dim=-1)  # [B, N, 2]
+
 
 
 class UNetUpBlock(nn.Module):
@@ -110,8 +117,8 @@ class CephalometricSwinGCN(nn.Module):
             nn.Conv2d(32, num_landmarks, kernel_size=1),
         )
 
-        # Soft-Argmax layer
-        self.soft_argmax = SoftArgmax2D(temperature=1.0)
+        # Soft-Argmax layer with learnable per-landmark temperature
+        self.soft_argmax = SoftArgmax2D(num_landmarks=num_landmarks, init_temperature=0.1)
 
         # GCN Structural Residual Refinement Head
         self.gcn1 = GraphConvolution(128, 128)
