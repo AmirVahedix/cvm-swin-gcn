@@ -30,6 +30,7 @@ VAL_NPZ_DIR = "dataset/val/labels"
 BATCH_SIZE = 32
 EPOCHS = 100
 LR = 1e-4
+LLRD_DECAY_RATE = 0.8
 LAMBDA_HM = 1.0
 LAMBDA_CD = 10.0
 LAMBDA_GRAPH = 2.0
@@ -37,7 +38,56 @@ EARLY_STOPPING_PATIENCE = 30
 SAVE_PATH = "./artifacts/best.pth"
 
 
+def get_llrd_param_groups(
+    model: torch.nn.Module,
+    base_lr: float = 1e-4,
+    weight_decay: float = 1e-4,
+    decay_rate: float = 0.8,
+) -> list[dict]:
+    """
+    Constructs parameter groups for Layer-wise Learning Rate Decay (LLRD).
+    - Task heads, U-Net decoder, GCN layers, and Soft-Argmax receive base_lr (1.0x).
+    - Swin backbone stages receive progressively decayed learning rates (lr * decay_rate^(num_stages - stage_idx)).
+    - 1D tensors (biases, norm parameters, log_temperature) have weight_decay=0.0.
+    """
+    param_groups = []
+    num_stages = 4  # Swin backbone has 4 feature stages (0, 1, 2, 3)
+
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+
+        # Exclude 1D tensors (biases, norm scales/shifts, log_temperature) from weight decay
+        curr_weight_decay = 0.0 if (param.ndim <= 1 or "bias" in name or "norm" in name or "log_temperature" in name) else weight_decay
+
+        # Compute layer-wise learning rate decay factor
+        if "backbone" in name:
+            if "patch_embed" in name or "absolute_pos_embed" in name:
+                scale = decay_rate ** (num_stages + 1)
+            else:
+                scale = decay_rate ** num_stages
+                for i in range(num_stages):
+                    if f"layers.{i}" in name or f"stages.{i}" in name:
+                        scale = decay_rate ** (num_stages - i)
+                        break
+        else:
+            # U-Net decoder, GCN heads, Soft-Argmax temperature -> Base LR (1.0x)
+            scale = 1.0
+
+        group_lr = base_lr * scale
+        param_groups.append(
+            {
+                "params": [param],
+                "lr": group_lr,
+                "weight_decay": curr_weight_decay,
+            }
+        )
+
+    return param_groups
+
+
 def get_landmark_weights(device: torch.device) -> torch.Tensor:
+
     """
     Constructs landmark loss weights prioritizing difficult lower-vertebral posterior landmarks.
     """
@@ -312,6 +362,7 @@ def main(
     batch_size: int = BATCH_SIZE,
     patience: int = EARLY_STOPPING_PATIENCE,
     lr: float = LR,
+    llrd_decay_rate: float = LLRD_DECAY_RATE,
     experiment_name: str | None = None,
     tracking_uri: str | None = None,
     run_name: str | None = None,
@@ -354,7 +405,16 @@ def main(
 
     model = CephalometricSwinGCN(num_landmarks=NUM_LANDMARKS).to(device)
 
-    optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
+    # Layer-wise Learning Rate Decay (LLRD) Parameter Grouping
+    param_groups = get_llrd_param_groups(
+        model,
+        base_lr=lr,
+        weight_decay=1e-4,
+        decay_rate=llrd_decay_rate,
+    )
+    optimizer = optim.AdamW(param_groups)
+    print(f"--> Initialized AdamW optimizer with LLRD (base LR: {lr}, decay rate: {llrd_decay_rate}, {len(param_groups)} param groups)")
+
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
         optimizer,
         mode="min",
@@ -380,6 +440,7 @@ def main(
                 "epochs": epochs,
                 "batch_size": batch_size,
                 "learning_rate": lr,
+                "llrd_decay_rate": llrd_decay_rate,
                 "lambda_heatmap": LAMBDA_HM,
                 "lambda_coord": LAMBDA_CD,
                 "lambda_graph": LAMBDA_GRAPH,
@@ -387,7 +448,7 @@ def main(
                 "save_path": SAVE_PATH,
                 "img_size": 640,
                 "num_landmarks": NUM_LANDMARKS,
-                "optimizer": "AdamW",
+                "optimizer": "AdamW-LLRD",
                 "scheduler": "ReduceLROnPlateau",
                 "heatmap_loss": "AdaptiveWingLoss",
                 "coord_loss": "WingLoss",
@@ -395,6 +456,7 @@ def main(
                 "device": str(device),
             }
         )
+
 
         history = {
             "epochs": [],
@@ -581,6 +643,7 @@ if __name__ == "__main__":
     parser.add_argument("--batch-size", "-b", type=int, default=BATCH_SIZE, help="Batch size for training")
     parser.add_argument("--patience", "-p", type=int, default=EARLY_STOPPING_PATIENCE, help="Early stopping patience (epochs)")
     parser.add_argument("--lr", "-l", type=float, default=LR, help="Learning rate")
+    parser.add_argument("--llrd-decay-rate", type=float, default=LLRD_DECAY_RATE, help="Layer-wise Learning Rate Decay factor (default: 0.8)")
     parser.add_argument("--experiment-name", type=str, default=None, help="MLflow experiment name")
     parser.add_argument("--tracking-uri", type=str, default=None, help="MLflow tracking URI")
     parser.add_argument("--tracking-username", "--mlflow-username", type=str, default=None, help="MLflow tracking username")
@@ -594,6 +657,7 @@ if __name__ == "__main__":
         batch_size=args.batch_size,
         patience=args.patience,
         lr=args.lr,
+        llrd_decay_rate=args.llrd_decay_rate,
         experiment_name=args.experiment_name,
         tracking_uri=args.tracking_uri,
         run_name=args.run_name,
@@ -601,3 +665,4 @@ if __name__ == "__main__":
         tracking_password=args.tracking_password,
         skip_eval=args.skip_eval,
     )
+
