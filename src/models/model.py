@@ -4,17 +4,73 @@ import torch.nn.functional as F
 import timm
 
 
-class GraphConvolution(nn.Module):
+class GraphAttentionLayer(nn.Module):
     """
-    Standard Graph Convolutional layer.
+    Multi-Head Graph Attention Network (GAT) layer.
+    Computes dynamic feature-dependent pairwise attention coefficients alpha_ij
+    between connected anatomical landmarks.
     """
-    def __init__(self, in_features: int, out_features: int):
+    def __init__(self, in_features: int, out_features: int, heads: int = 4, concat: bool = True, dropout: float = 0.1):
         super().__init__()
-        self.linear = nn.Linear(in_features, out_features)
+        self.in_features = in_features
+        self.out_features = out_features
+        self.heads = heads
+        self.concat = concat
+
+        if concat:
+            assert out_features % heads == 0, "out_features must be divisible by heads when concat=True"
+            self.head_dim = out_features // heads
+        else:
+            self.head_dim = out_features
+
+        self.linear = nn.Linear(in_features, self.head_dim * heads, bias=False)
+        self.attn_src = nn.Parameter(torch.zeros(1, heads, 1, self.head_dim))
+        self.attn_dst = nn.Parameter(torch.zeros(1, heads, 1, self.head_dim))
+        self.leaky_relu = nn.LeakyReLU(0.2)
+        self.dropout = nn.Dropout(dropout)
+
+        nn.init.xavier_uniform_(self.linear.weight.data, gain=1.414)
+        nn.init.xavier_uniform_(self.attn_src.data, gain=1.414)
+        nn.init.xavier_uniform_(self.attn_dst.data, gain=1.414)
 
     def forward(self, x: torch.Tensor, adj: torch.Tensor) -> torch.Tensor:
-        support = self.linear(x)
-        return torch.matmul(adj, support)
+        """
+        Args:
+            x: Tensor of shape [B, N, in_features]
+            adj: Adjacency structure mask [N, N] (1.0 for connected, 0.0 for disconnected)
+        Returns:
+            out: Tensor of shape [B, N, out_features]
+        """
+        B, N, _ = x.shape
+        # Linear projection: [B, N, heads * head_dim] -> [B, heads, N, head_dim]
+        h = self.linear(x).view(B, N, self.heads, self.head_dim).permute(0, 2, 1, 3)
+
+        # Compute attention scores for source and target nodes
+        attn_src = torch.matmul(h, self.attn_src.transpose(-1, -2))  # [B, heads, N, 1]
+        attn_dst = torch.matmul(h, self.attn_dst.transpose(-1, -2))  # [B, heads, N, 1]
+
+        # Pairwise attention scores e_ij: [B, heads, N, N]
+        e = self.leaky_relu(attn_src + attn_dst.transpose(-1, -2))
+
+        # Mask out non-connected pairs (where adj == 0) with a large negative value
+        mask = (adj == 0).unsqueeze(0).unsqueeze(0)  # [1, 1, N, N]
+        e = e.masked_fill(mask, -1e9)
+
+        # Softmax over neighborhood
+        alpha = F.softmax(e, dim=-1)  # [B, heads, N, N]
+        alpha = self.dropout(alpha)
+
+        # Aggregate neighbor features weighted by dynamic attention alpha: [B, heads, N, head_dim]
+        out = torch.matmul(alpha, h)
+
+        if self.concat:
+            # Concatenate heads: [B, N, heads * head_dim] = [B, N, out_features]
+            out = out.permute(0, 2, 1, 3).contiguous().view(B, N, self.heads * self.head_dim)
+        else:
+            # Average heads: [B, N, head_dim]
+            out = out.mean(dim=1)
+
+        return out
 
 
 class SoftArgmax2D(nn.Module):
@@ -58,7 +114,6 @@ class SoftArgmax2D(nn.Module):
         return torch.stack([exp_x, exp_y], dim=-1)  # [B, N, 2]
 
 
-
 class UNetUpBlock(nn.Module):
     """
     U-Net Decoder Upsampling Block with Skip Connections.
@@ -87,11 +142,11 @@ class UNetUpBlock(nn.Module):
 
 class CephalometricSwinGCN(nn.Module):
     """
-    Upgraded Cephalometric Swin-GCN Network featuring:
+    Upgraded Cephalometric Swin-GAT Network featuring:
     1. Multi-scale Swin Backbone with U-Net feature pyramid skip-connections.
-    2. Continuous Soft-Argmax heatmap coordinate extraction.
-    3. High-resolution landmark feature attention pooling for GCN structural modeling.
-    4. GCN structural residual offset head for anatomical graph alignment.
+    2. Continuous Soft-Argmax heatmap coordinate extraction with learnable per-landmark temperature.
+    3. High-resolution landmark feature attention pooling for graph structural modeling.
+    4. Dynamic Multi-Head Graph Attention (GAT) residual offset head for anatomical graph alignment.
     """
     def __init__(self, num_landmarks: int = 13, pretrained: bool = True):
         super().__init__()
@@ -120,9 +175,9 @@ class CephalometricSwinGCN(nn.Module):
         # Soft-Argmax layer with learnable per-landmark temperature
         self.soft_argmax = SoftArgmax2D(num_landmarks=num_landmarks, init_temperature=0.1)
 
-        # GCN Structural Residual Refinement Head
-        self.gcn1 = GraphConvolution(128, 128)
-        self.gcn2 = GraphConvolution(128, 64)
+        # Dynamic Multi-Head Graph Attention (GAT) Structural Residual Refinement Head
+        self.gat1 = GraphAttentionLayer(128, 128, heads=4, concat=True)
+        self.gat2 = GraphAttentionLayer(128, 64, heads=4, concat=True)
         self.offset_head = nn.Linear(64, 2)
 
         self.register_buffer("adj_matrix", self._build_adjacency())
@@ -153,9 +208,6 @@ class CephalometricSwinGCN(nn.Module):
         adj[2, 4] = adj[4, 2] = 1.0  # Anterior spine: C2_AI <-> C3_AS
         adj[7, 9] = adj[9, 7] = 1.0  # Anterior spine: C3_AI <-> C4_AS
 
-        # Row normalize
-        rowsum = adj.sum(dim=1, keepdim=True)
-        adj = adj / rowsum
         return adj
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -185,12 +237,13 @@ class CephalometricSwinGCN(nn.Module):
 
         node_features = torch.einsum("bnij,bcij->bnc", attn_160, d1)  # [B, 13, 128]
 
-        # 3. GCN Graph Residual Coordinate Offset Prediction
-        gcn_feat = F.relu(self.gcn1(node_features, self.adj_matrix))
-        gcn_feat = F.relu(self.gcn2(gcn_feat, self.adj_matrix))
-        coord_offset = 0.05 * torch.tanh(self.offset_head(gcn_feat))  # Bounded offset [-0.05, 0.05]
+        # 3. Dynamic GAT Graph Residual Coordinate Offset Prediction
+        gat_feat = F.elu(self.gat1(node_features, self.adj_matrix))
+        gat_feat = F.elu(self.gat2(gat_feat, self.adj_matrix))
+        coord_offset = 0.05 * torch.tanh(self.offset_head(gat_feat))  # Bounded offset [-0.05, 0.05]
 
         # Final Refined Coordinates
         coords = torch.clamp(soft_coords + coord_offset, 0.0, 1.0)
 
         return heatmaps, coords
+
