@@ -20,6 +20,7 @@ from src.data import get_dataloaders, NUM_LANDMARKS
 from src.models.model import CephalometricSwinGCN
 from src.models.losses import AdaptiveWingLoss, WingLoss, AnatomicalGraphLoss
 from src.eval import run_evaluation
+from src.utils.ftp_utils import upload_files_to_ftp
 
 TRAIN_IMG_DIR = "dataset/train/images"
 TRAIN_NPZ_DIR = "dataset/train/labels"
@@ -369,6 +370,13 @@ def main(
     tracking_username: str | None = None,
     tracking_password: str | None = None,
     skip_eval: bool = False,
+    ftp_host: str | None = None,
+    ftp_port: int | str | None = None,
+    ftp_user: str | None = None,
+    ftp_password: str | None = None,
+    ftp_remote_dir: str | None = None,
+    ftp_tls: bool | None = None,
+    skip_ftp: bool = False,
 ):
     load_dotenv()
 
@@ -602,6 +610,7 @@ def main(
                 print(f"⚠️ Warning: Could not log checkpoint artifact to MLflow: {ml_err}")
 
         # --- POST-TRAINING EVALUATION & MLFLOW LOGGING ---
+        eval_metrics_json_path = None
         if not skip_eval and os.path.exists(SAVE_PATH):
             test_img_dir = "dataset/test/images"
             test_npz_dir = "dataset/test/labels"
@@ -629,10 +638,51 @@ def main(
                     if os.path.exists(eval_run_folder):
                         mlflow.log_artifacts(eval_run_folder, artifact_path="evaluation")
                         print(f"--> Successfully logged evaluation artifacts from '{eval_run_folder}' to MLflow.")
+
+                        candidate_json = Path(eval_run_folder) / "metrics.json"
+                        if candidate_json.exists():
+                            eval_metrics_json_path = str(candidate_json)
                 except Exception as e:
                     print(f"❌ Warning: Post-training evaluation failed: {e}")
             else:
                 print("⚠️ Test dataset directories not found; skipping post-training evaluation.")
+
+        # --- UPLOAD FINAL MODEL AND METRICS JSON TO FTP HOST ---
+        if not skip_ftp:
+            print("\n--- Uploading Final Model and Metrics JSON to FTP Host ---")
+            ftp_files = []
+            if os.path.exists(SAVE_PATH):
+                ftp_files.append(SAVE_PATH)
+
+            if eval_metrics_json_path and os.path.exists(eval_metrics_json_path):
+                ftp_files.append(eval_metrics_json_path)
+            else:
+                # Fallback: check if any recent metrics.json exists in evaluation/
+                eval_base = Path("evaluation")
+                if eval_base.exists():
+                    found_jsons = sorted(
+                        eval_base.glob("**/metrics.json"),
+                        key=lambda p: p.stat().st_mtime,
+                        reverse=True,
+                    )
+                    if found_jsons:
+                        ftp_files.append(str(found_jsons[0]))
+
+            if ftp_files:
+                try:
+                    upload_files_to_ftp(
+                        files=ftp_files,
+                        ftp_host=ftp_host,
+                        ftp_port=ftp_port,
+                        ftp_user=ftp_user,
+                        ftp_password=ftp_password,
+                        remote_dir=ftp_remote_dir,
+                        use_tls=ftp_tls,
+                    )
+                except Exception as ftp_err:
+                    print(f"⚠️ Warning: FTP upload encountered an error: {ftp_err}")
+            else:
+                print("ℹ️ No model checkpoint or metrics.json found to upload to FTP.")
 
 
 if __name__ == "__main__":
@@ -650,6 +700,13 @@ if __name__ == "__main__":
     parser.add_argument("--tracking-password", "--mlflow-password", type=str, default=None, help="MLflow tracking password")
     parser.add_argument("--run-name", type=str, default=None, help="MLflow run name")
     parser.add_argument("--skip-eval", action="store_true", help="Skip post-training evaluation step")
+    parser.add_argument("--ftp-host", type=str, default=None, help="FTP host (e.g. ftp.example.com or IP)")
+    parser.add_argument("--ftp-port", type=str, default=None, help="FTP port (default: 21)")
+    parser.add_argument("--ftp-user", "--ftp-username", type=str, default=None, help="FTP username")
+    parser.add_argument("--ftp-password", "--ftp-pass", type=str, default=None, help="FTP password")
+    parser.add_argument("--ftp-remote-dir", "--ftp-dir", type=str, default=None, help="Remote directory path on FTP server")
+    parser.add_argument("--ftp-tls", action="store_true", help="Use FTPS / TLS encryption for FTP upload")
+    parser.add_argument("--skip-ftp", action="store_true", help="Skip uploading model and metrics to FTP server")
 
     args = parser.parse_args()
     main(
@@ -664,5 +721,12 @@ if __name__ == "__main__":
         tracking_username=args.tracking_username,
         tracking_password=args.tracking_password,
         skip_eval=args.skip_eval,
+        ftp_host=args.ftp_host,
+        ftp_port=args.ftp_port,
+        ftp_user=args.ftp_user,
+        ftp_password=args.ftp_password,
+        ftp_remote_dir=args.ftp_remote_dir,
+        ftp_tls=args.ftp_tls if args.ftp_tls else None,
+        skip_ftp=args.skip_ftp,
     )
 

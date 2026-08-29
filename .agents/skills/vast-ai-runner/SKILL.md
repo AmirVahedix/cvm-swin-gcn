@@ -3,7 +3,7 @@ name: vast-ai-runner
 description: >-
   Search, filter, provision, and manage Vast.ai GPU cloud instances to automate training pipelines,
   remote model execution, setup scripts, and artifact synchronization. Supports formatting and sorting
-  offers by price ($/hr), system RAM, GPU VRAM, DLPerf score, or network speed, with 30s auto-destroy on error.
+  offers by price ($/hr), system RAM, GPU VRAM, DLPerf score, or network speed, with tmux detached execution and auto-destroy on finish/error.
 ---
 
 # Vast.ai GPU Cloud Runner & Pipeline Automation
@@ -22,21 +22,26 @@ Ensure `VAST_API_KEY` is available via one of the following:
 
 ## Key Features & Safety Mechanisms
 
+- **Decoupled `tmux` Background Execution & Laptop-Closing Safety**:
+  - Remote training runs inside a persistent `tmux` session named `train`.
+  - Closing your laptop, losing Wi-Fi, or disconnecting SSH will **never** stop or interrupt GPU training!
+  - Real-time output is streamed to your terminal when connected.
+  - Re-attach anytime with `python3 scripts/vast_runner.py attach` or stream logs with `python3 scripts/vast_runner.py logs -f`.
+- **Automatic Remote Self-Destruction on Completion**:
+  - Once training finishes and artifacts are logged/uploaded to MLflow/MinIO, the remote instance **automatically deletes itself** via the Vast.ai REST API.
+  - Cloud billing stops immediately even if your laptop was offline when training completed!
+  - Local sync occurs automatically before destruction if the laptop is connected.
+  - Override with `--no-destroy` / `--keep-alive` or `--stop-on-finish`.
 - **Dynamic `INSTANCE_ID` Tracking in `.env`**:
   - When an instance is launched, its ID is automatically stored in `.env` (`INSTANCE_ID=<id>`).
-  - Subsequent commands (`stop`, `destroy`, `ssh`, `download`, `run`) automatically read `INSTANCE_ID` from `.env`—no need to type or copy instance IDs manually!
+  - Subsequent commands (`attach`, `logs`, `stop`, `destroy`, `ssh`, `download`, `run`) automatically read `INSTANCE_ID` from `.env`—no need to type or copy instance IDs manually!
   - When an instance is destroyed, `INSTANCE_ID` is automatically cleared from `.env`.
 - **Dynamic Formatting & Sorting**: Sort available offers by Auto Sort score (`--sort score`, default), raw GPU speed (`--sort dlperf`), performance per dollar (`--sort value`), lowest price (`--sort price`), highest system RAM (`--sort ram`), or GPU VRAM (`--sort vram`).
 - **Host Reliability Filtering**: Filter out unreliable hosts using `--min-reliability 0.90` (default 90% reliability threshold).
-- **One-Command Auto-Execution (`run`)**: Search, provision, wait for SSH, upload `.env` + `setup.sh`, execute training with live log streaming, and download checkpoints (`artifacts/`, `evaluation/`).
-- **Automated Cost Protection & 30-Second Auto-Destroy**:
-  - Whenever an error occurs, the training pipeline exits with an error code, or execution is interrupted (Ctrl+C), a **30-second countdown prompt** is presented asking if the instance should be destroyed.
+- **Automated Cost Protection & 30-Second Auto-Destroy on Errors**:
+  - If an error occurs during launch/setup, a **30-second countdown prompt** is presented asking if the instance should be destroyed.
   - If the user confirms or if the 30-second timer elapses with no input, the instance is **automatically destroyed** to prevent accidental cloud charges!
   - Users can press `n` during the countdown to keep the instance alive for debugging.
-  - Set custom countdown duration with `--timeout-destroy <SECONDS>` (default: 30).
-- **Extended Boot & SSH Connection Wait Timeouts**:
-  - Boot initialization and SSH readiness probe defaults are set to **10 minutes (600s)** to accommodate slow container image downloads and host startup (~5 minutes).
-  - Customize timeouts via `--timeout-boot <SECONDS>` and `--timeout-ssh <SECONDS>`.
 
 ---
 
@@ -83,23 +88,25 @@ python3 scripts/vast_runner.py search --gpu "RTX 3090" --format json
 
 ### 2. End-to-End Automated Training (`run`)
 
-Automatically finds the best matching offer, rents the instance, saves `INSTANCE_ID` in `.env`, waits for boot & SSH readiness, uploads `.env` and `setup.sh`, configures dependencies, runs `train-pipeline.py`, streams logs, and downloads artifacts:
+Automatically finds the best matching offer, rents the instance, saves `INSTANCE_ID` in `.env`, waits for boot & SSH readiness, uploads `.env` and `setup.sh`, configures dependencies, runs `train-pipeline.py` inside `tmux`, streams logs, and auto-destroys on completion:
 
 ```bash
-# Basic run with RTX 4090, 50 epochs, sorting by lowest price
+# Basic run with RTX 4090, 50 epochs, sorting by lowest price (runs in tmux, auto-destroys on finish)
 python3 scripts/vast_runner.py run --gpu "RTX 4090" --max-price 0.70 --sort price --epochs 50
 
-# Run with minimum 32GB system RAM, auto-stop instance when done
-python3 scripts/vast_runner.py run --min-ram 32 --max-price 0.80 --stop-on-finish --epochs 100
+# Run in detached mode (starts remote tmux pipeline and exits CLI immediately)
+python3 scripts/vast_runner.py run --gpu "RTX 3090" --max-price 0.20 --detach
 
 # Run training only (skip preprocessing steps 1-4)
 python3 scripts/vast_runner.py run --train-only --epochs 50 --batch-size 16
 
-# Attach to an already running instance (or uses INSTANCE_ID from .env)
-python3 scripts/vast_runner.py run --epochs 100
+# Run and keep instance alive after training (do not auto-destroy)
+python3 scripts/vast_runner.py run --epochs 50 --no-destroy
+
+# Run and auto-stop (pause) instance after training instead of destroying
+python3 scripts/vast_runner.py run --epochs 50 --stop-on-finish
 
 # Manual Attach Mode (Interactive prompt for Instance ID, SSH Host, and SSH Port)
-# Deploys code/setup, streams training, downloads artifacts, and auto-destroys on finish
 python3 scripts/vast_runner.py run --manual
 
 # Manual Attach Mode with CLI flags (non-interactive)
@@ -108,7 +115,7 @@ python3 scripts/vast_runner.py run --instance-id 12345 --host 74.50.x.x --port 1
 
 ---
 
-### 3. Instance Lifecycle Management
+### 3. Monitoring & Instance Management
 
 All commands automatically use the `INSTANCE_ID` stored in `.env` if no ID is passed:
 
@@ -116,9 +123,18 @@ All commands automatically use the `INSTANCE_ID` stored in `.env` if no ID is pa
 # List all active and stopped user instances
 python3 scripts/vast_runner.py list
 
-# Open interactive SSH or run a remote command (uses INSTANCE_ID from .env)
+# Interactively attach to the remote tmux training session
+python3 scripts/vast_runner.py attach
+
+# Stream or view live remote pipeline logs
+python3 scripts/vast_runner.py logs -f
+
+# View last 100 log lines
+python3 scripts/vast_runner.py logs -n 100
+
+# Open interactive SSH shell (or SSH into tmux)
 python3 scripts/vast_runner.py ssh
-python3 scripts/vast_runner.py ssh "nvidia-smi"
+python3 scripts/vast_runner.py ssh --tmux
 
 # Download artifacts & evaluation results from instance
 python3 scripts/vast_runner.py download
@@ -141,12 +157,13 @@ When requested by the user to train or run workloads on Vast.ai:
    - Run `python3 scripts/vast_runner.py search --sort price` (or `--sort ram` if high memory is requested).
    - Verify that offers meet the required GPU, VRAM, RAM, and price constraints.
 3. **Trigger Execution**:
-   - Run `python3 scripts/vast_runner.py run ...` with the user's requested parameters (e.g., `--epochs`, `--batch-size`, `--stop-on-finish`).
+   - Run `python3 scripts/vast_runner.py run ...` with the user's requested parameters (e.g., `--epochs`, `--batch-size`).
+   - The job will automatically execute in `tmux` and auto-destroy upon completion.
 4. **Monitor & Report**:
-   - Monitor the command output for setup completion and training progress.
-   - Once completed, confirm artifact synchronization (`./artifacts/best.pth`, `./evaluation/`).
+   - Live stream logs or use `python3 scripts/vast_runner.py logs -f` / `attach`.
+   - Confirm artifact synchronization (`./artifacts/best.pth`, `./evaluation/`) and MLflow tracking.
 5. **Cost Optimization**:
-   - Remind the user if an instance is still active, or stop/destroy it using `python3 scripts/vast_runner.py destroy`.
+   - If the instance was kept alive with `--no-destroy` or `--stop-on-finish`, remind the user to stop or destroy it when done.
 
 ---
 

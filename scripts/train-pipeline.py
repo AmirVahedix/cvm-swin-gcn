@@ -16,6 +16,7 @@ from src.data.preprocessing.split_dataset import split_dataset
 from src.train import main as train_main
 from src.eval import run_evaluation
 from src.utils.test_mlflow import run_mlflow_test
+from src.utils.ftp_utils import test_ftp_connection
 
 
 def main():
@@ -120,6 +121,54 @@ def main():
         default=None,
         help="MLflow tracking password.",
     )
+    parser.add_argument(
+        "--test-ftp",
+        action="store_true",
+        help="Run FTP connection test before pipeline execution.",
+    )
+    parser.add_argument(
+        "--ftp-host",
+        type=str,
+        default=None,
+        help="FTP host (e.g., ftp.example.com or IP).",
+    )
+    parser.add_argument(
+        "--ftp-port",
+        type=str,
+        default=None,
+        help="FTP port (default: 21).",
+    )
+    parser.add_argument(
+        "--ftp-user",
+        "--ftp-username",
+        type=str,
+        default=None,
+        help="FTP username.",
+    )
+    parser.add_argument(
+        "--ftp-password",
+        "--ftp-pass",
+        type=str,
+        default=None,
+        help="FTP password.",
+    )
+    parser.add_argument(
+        "--ftp-remote-dir",
+        "--ftp-dir",
+        type=str,
+        default=None,
+        help="Remote directory path on FTP server.",
+    )
+    parser.add_argument(
+        "--ftp-tls",
+        action="store_true",
+        help="Use FTPS / TLS encryption for FTP connection.",
+    )
+    parser.add_argument(
+        "--skip-ftp",
+        action="store_true",
+        help="Skip uploading final model and metrics JSON to FTP server.",
+    )
 
     args = parser.parse_args()
 
@@ -146,6 +195,25 @@ def main():
                 )
                 sys.exit(1)
             print("✅ MLflow connection test passed.\n" + "-" * 20)
+
+        # Pre-flight FTP Connection Test
+        if args.test_ftp:
+            print("\n[FTP Pre-Flight] Running FTP connection test...")
+            ftp_ok = test_ftp_connection(
+                ftp_host=args.ftp_host,
+                ftp_port=args.ftp_port,
+                ftp_user=args.ftp_user,
+                ftp_password=args.ftp_password,
+                remote_dir=args.ftp_remote_dir,
+                use_tls=args.ftp_tls if args.ftp_tls else None,
+            )
+            if not ftp_ok:
+                print(
+                    "❌ FTP connection test failed. Aborting pipeline.",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            print("✅ FTP connection test passed.\n" + "-" * 20)
 
         if not args.train_only:
             # Step 1: Download Images & Exports
@@ -220,6 +288,13 @@ def main():
             tracking_username=args.mlflow_username,
             tracking_password=args.mlflow_password,
             skip_eval=args.skip_eval,
+            ftp_host=args.ftp_host,
+            ftp_port=args.ftp_port,
+            ftp_user=args.ftp_user,
+            ftp_password=args.ftp_password,
+            ftp_remote_dir=args.ftp_remote_dir,
+            ftp_tls=args.ftp_tls if args.ftp_tls else None,
+            skip_ftp=args.skip_ftp,
         )
         print("-" * 20)
 
