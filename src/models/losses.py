@@ -24,7 +24,7 @@ class AdaptiveWingLoss(nn.Module):
             pred: Predicted heatmaps of shape [B, N, H, W]
             target: Ground truth heatmaps of shape [B, N, H, W]
         """
-        delta = (target - pred).abs()
+        delta = (target - pred).abs().clamp(min=1e-8)
 
         # Non-linear AWL calculation
         A = self.omega * (1.0 / (1.0 + torch.pow(self.theta / self.epsilon, self.alpha - target))) * (self.alpha - target) * torch.pow(self.theta / self.epsilon, self.alpha - target - 1.0) * (1.0 / self.epsilon)
@@ -58,7 +58,7 @@ class WingLoss(nn.Module):
             target: Ground truth coordinates of shape [B, N, 2] in normalized scale [0, 1]
             landmark_weights: Optional per-landmark weights of shape [N] or [1, N]
         """
-        delta = (pred - target).abs()
+        delta = (pred - target).abs().clamp(min=1e-8)
         mask_small = delta < self.omega
         mask_large = ~mask_small
         
@@ -108,9 +108,12 @@ class AnatomicalGraphLoss(nn.Module):
         i_idx = connected_pairs[:, 0]
         j_idx = connected_pairs[:, 1]
 
-        # Compute pairwise vectors: [B, E, 2]
-        pred_dist = torch.norm(pred_coords[:, i_idx, :] - pred_coords[:, j_idx, :], dim=-1)
-        gt_dist = torch.norm(gt_coords[:, i_idx, :] - gt_coords[:, j_idx, :], dim=-1)
+        # Compute pairwise vectors with stable sqrt to prevent NaN gradients: [B, E]
+        pred_diff_sq = torch.sum((pred_coords[:, i_idx, :] - pred_coords[:, j_idx, :]) ** 2, dim=-1)
+        gt_diff_sq = torch.sum((gt_coords[:, i_idx, :] - gt_coords[:, j_idx, :]) ** 2, dim=-1)
+
+        pred_dist = torch.sqrt(pred_diff_sq + 1e-8)
+        gt_dist = torch.sqrt(gt_diff_sq + 1e-8)
 
         # Valid mask for both nodes in pair
         valid_i = (gt_coords[:, i_idx, 0] >= 0) & (gt_coords[:, i_idx, 1] >= 0)

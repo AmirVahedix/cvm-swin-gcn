@@ -73,16 +73,30 @@ class GraphAttentionLayer(nn.Module):
         return out
 
 
-class SoftArgmax2D(nn.Module):
+class LocalWindowSoftArgmax2D(nn.Module):
     """
-    Differentiable Soft-Argmax 2D coordinate extraction with learnable
-    per-landmark temperature scaling for sharp sub-pixel localization.
+    Differentiable Local-Window Soft-Argmax 2D coordinate extraction.
+    Computes spatial argmax to locate the integer peak, extracts a localized
+    (2R+1) x (2R+1) neighborhood window around the peak, and performs temperature-scaled
+    expectation within the window.
+    
+    This eliminates 100% of global background noise/bias on large spatial heatmaps (640x640)
+    while providing high-precision sub-pixel differentiability.
     """
-    def __init__(self, num_landmarks: int = 13, init_temperature: float = 0.1):
+    def __init__(self, num_landmarks: int = 13, radius: int = 7, init_temperature: float = 0.1):
         super().__init__()
         import math
+        self.num_landmarks = num_landmarks
+        self.radius = radius
         init_log_temp = torch.full((1, num_landmarks, 1, 1), math.log(init_temperature))
         self.log_temperature = nn.Parameter(init_log_temp)
+
+        # Coordinate grid offsets relative to the window center [-R, R]
+        dy = torch.arange(-radius, radius + 1, dtype=torch.float32)
+        dx = torch.arange(-radius, radius + 1, dtype=torch.float32)
+        grid_y, grid_x = torch.meshgrid(dy, dx, indexing="ij")
+        self.register_buffer("grid_x", grid_x.unsqueeze(0).unsqueeze(0))  # [1, 1, 2R+1, 2R+1]
+        self.register_buffer("grid_y", grid_y.unsqueeze(0).unsqueeze(0))  # [1, 1, 2R+1, 2R+1]
 
     def forward(self, heatmaps: torch.Tensor) -> torch.Tensor:
         """
@@ -92,26 +106,43 @@ class SoftArgmax2D(nn.Module):
             coords: Tensor of shape [B, N, 2] in normalized scale [0, 1]
         """
         B, N, H, W = heatmaps.shape
-        # Clamp temperature to range [0.001, 1.0] for numerical stability
+        R = self.radius
+
+        # 1. Integer Peak Location via Spatial Argmax
+        flat_hm = heatmaps.view(B, N, -1)
+        max_idx = torch.argmax(flat_hm, dim=-1)  # [B, N]
+        py = max_idx // W                        # [B, N]
+        px = max_idx % W                         # [B, N]
+
+        # 2. Extract localized patches with replicate padding to safely handle image boundaries
+        padded = F.pad(heatmaps, (R, R, R, R), mode="replicate")  # [B, N, H + 2R, W + 2R]
+        W_pad = W + 2 * R
+
+        cy = py + R  # Center Y in padded coordinate system
+        cx = px + R  # Center X in padded coordinate system
+
+        # Build absolute index grid for gathering local patches across [B, N, 2R+1, 2R+1]
+        sample_y = cy.unsqueeze(-1).unsqueeze(-1) + self.grid_y.long()  # [B, N, 2R+1, 2R+1]
+        sample_x = cx.unsqueeze(-1).unsqueeze(-1) + self.grid_x.long()  # [B, N, 2R+1, 2R+1]
+        flat_patch_idx = (sample_y * W_pad + sample_x).view(B, N, -1)  # [B, N, (2R+1)^2]
+
+        flat_padded = padded.view(B, N, -1)
+        patches = torch.gather(flat_padded, dim=2, index=flat_patch_idx).view(B, N, 2 * R + 1, 2 * R + 1)
+
+        # 3. Temperature-scaled softmax expectation within local patch
         temperature = torch.exp(self.log_temperature).clamp(min=1e-3, max=1.0)
+        scaled_patches = patches / temperature
+        patch_softmax = F.softmax(scaled_patches.view(B, N, -1), dim=-1).view(B, N, 2 * R + 1, 2 * R + 1)
 
-        scaled_hm = heatmaps / temperature
-        flat_hm = scaled_hm.view(B, N, -1)
-        softmax_hm = F.softmax(flat_hm, dim=-1).view(B, N, H, W)
+        # Sub-pixel coordinate offsets in [-R, R]
+        delta_x = torch.sum(patch_softmax * self.grid_x, dim=(-2, -1))  # [B, N]
+        delta_y = torch.sum(patch_softmax * self.grid_y, dim=(-2, -1))  # [B, N]
 
-        device = heatmaps.device
-        grid_y, grid_x = torch.meshgrid(
-            torch.linspace(0.0, 1.0, H, device=device),
-            torch.linspace(0.0, 1.0, W, device=device),
-            indexing="ij",
-        )
-        grid_x = grid_x.unsqueeze(0).unsqueeze(0)  # [1, 1, H, W]
-        grid_y = grid_y.unsqueeze(0).unsqueeze(0)  # [1, 1, H, W]
+        # Continuous sub-pixel coordinates in [0, 1] normalized space
+        coord_x = (px.float() + delta_x) / float(W)
+        coord_y = (py.float() + delta_y) / float(H)
 
-        exp_x = torch.sum(softmax_hm * grid_x, dim=(-2, -1))
-        exp_y = torch.sum(softmax_hm * grid_y, dim=(-2, -1))
-
-        return torch.stack([exp_x, exp_y], dim=-1)  # [B, N, 2]
+        return torch.stack([coord_x, coord_y], dim=-1).clamp(0.0, 1.0)  # [B, N, 2]
 
 
 class UNetUpBlock(nn.Module):
@@ -144,11 +175,11 @@ class CephalometricSwinGCN(nn.Module):
     """
     Upgraded Cephalometric Swin-GAT Network featuring:
     1. Multi-scale Swin Backbone with U-Net feature pyramid skip-connections.
-    2. Continuous Soft-Argmax heatmap coordinate extraction with learnable per-landmark temperature.
-    3. High-resolution landmark feature attention pooling for graph structural modeling.
+    2. Local Windowed Soft-Argmax heatmap coordinate extraction (zero background bias, sharp sub-pixel precision).
+    3. Continuous landmark feature sampling via bilinear grid_sample on 160x160 pyramid features.
     4. Dynamic Multi-Head Graph Attention (GAT) residual offset head for anatomical graph alignment.
     """
-    def __init__(self, num_landmarks: int = 13, pretrained: bool = True):
+    def __init__(self, num_landmarks: int = 13, pretrained: bool = True, window_radius: int = 7):
         super().__init__()
         self.num_landmarks = num_landmarks
 
@@ -172,8 +203,10 @@ class CephalometricSwinGCN(nn.Module):
             nn.Conv2d(32, num_landmarks, kernel_size=1),
         )
 
-        # Soft-Argmax layer with learnable per-landmark temperature
-        self.soft_argmax = SoftArgmax2D(num_landmarks=num_landmarks, init_temperature=0.1)
+        # Local-Window Soft-Argmax layer with learnable per-landmark temperature
+        self.soft_argmax = LocalWindowSoftArgmax2D(
+            num_landmarks=num_landmarks, radius=window_radius, init_temperature=0.1
+        )
 
         # Dynamic Multi-Head Graph Attention (GAT) Structural Residual Refinement Head
         self.gat1 = GraphAttentionLayer(128, 128, heads=4, concat=True)
@@ -225,25 +258,26 @@ class CephalometricSwinGCN(nn.Module):
         d0 = self.up0(d1, None)  # 64, 320x320
         heatmaps = self.up_final(d0)  # 13, 640x640
 
-        # 1. Soft-Argmax Differentiable Base Coordinate Extraction
-        soft_coords = self.soft_argmax(heatmaps)  # [B, 13, 2]
+        # 1. Local-Window Soft-Argmax Sub-Pixel Base Coordinates
+        base_coords = self.soft_argmax(heatmaps)  # [B, 13, 2]
 
-        # 2. Extract High-Resolution Landmark Features (from 160x160 feature level)
-        B, N, H, W = heatmaps.shape
-        flat_attn = F.softmax(heatmaps.flatten(2), dim=-1).view(B, N, H, W)
-        attn_160 = F.adaptive_avg_pool2d(flat_attn, d1.shape[-2:])
-        attn_sum = attn_160.flatten(2).sum(dim=-1, keepdim=True).clamp(min=1e-8)
-        attn_160 = (attn_160.flatten(2) / attn_sum).view_as(attn_160)
-
-        node_features = torch.einsum("bnij,bcij->bnc", attn_160, d1)  # [B, 13, 128]
+        # 2. Extract High-Resolution Landmark Features via Bilinear Grid Sampling on d1 (160x160)
+        # grid_sample expects coordinates in [-1, 1] range: (x, y) -> 2 * norm - 1
+        B, N, _ = base_coords.shape
+        grid_sample_coords = (base_coords * 2.0 - 1.0).unsqueeze(2)  # [B, 13, 1, 2]
+        sampled_feats = F.grid_sample(
+            d1, grid_sample_coords, mode="bilinear", padding_mode="border", align_corners=True
+        )  # [B, 128, 13, 1]
+        node_features = sampled_feats.squeeze(-1).permute(0, 2, 1).contiguous()  # [B, 13, 128]
 
         # 3. Dynamic GAT Graph Residual Coordinate Offset Prediction
         gat_feat = F.elu(self.gat1(node_features, self.adj_matrix))
         gat_feat = F.elu(self.gat2(gat_feat, self.adj_matrix))
-        coord_offset = 0.05 * torch.tanh(self.offset_head(gat_feat))  # Bounded offset [-0.05, 0.05]
+        coord_offset = 0.03 * torch.tanh(self.offset_head(gat_feat))  # Bounded offset [-0.03, 0.03]
 
         # Final Refined Coordinates
-        coords = torch.clamp(soft_coords + coord_offset, 0.0, 1.0)
+        coords = torch.clamp(base_coords + coord_offset, 0.0, 1.0)
 
         return heatmaps, coords
+
 

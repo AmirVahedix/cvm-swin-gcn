@@ -28,20 +28,35 @@ TRAIN_NPZ_DIR = "dataset/train/labels"
 VAL_IMG_DIR = "dataset/val/images"
 VAL_NPZ_DIR = "dataset/val/labels"
 
-BATCH_SIZE = 32
+BATCH_SIZE = 16
 EPOCHS = 100
-LR = 1e-4
+LR = 2e-4
 LLRD_DECAY_RATE = 0.8
 LAMBDA_HM = 1.0
-LAMBDA_CD = 10.0
-LAMBDA_GRAPH = 2.0
-EARLY_STOPPING_PATIENCE = 30
+LAMBDA_CD = 5.0
+LAMBDA_GRAPH = 1.0
+EARLY_STOPPING_PATIENCE = 40
 SAVE_PATH = "./artifacts/best.pth"
+
+
+def get_cosine_schedule_with_warmup(optimizer, warmup_epochs: int, total_epochs: int, min_lr_ratio: float = 0.01):
+    """
+    Constructs a learning rate scheduler with linear warmup followed by cosine annealing decay.
+    """
+    import math
+
+    def lr_lambda(epoch):
+        if epoch < warmup_epochs:
+            return float(epoch + 1) / float(max(1, warmup_epochs))
+        progress = float(epoch - warmup_epochs) / float(max(1, total_epochs - warmup_epochs))
+        return min_lr_ratio + 0.5 * (1.0 - min_lr_ratio) * (1.0 + math.cos(math.pi * progress))
+
+    return optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
 
 def get_llrd_param_groups(
     model: torch.nn.Module,
-    base_lr: float = 1e-4,
+    base_lr: float = 2e-4,
     weight_decay: float = 1e-4,
     decay_rate: float = 0.8,
 ) -> list[dict]:
@@ -88,7 +103,6 @@ def get_llrd_param_groups(
 
 
 def get_landmark_weights(device: torch.device) -> torch.Tensor:
-
     """
     Constructs landmark loss weights prioritizing difficult lower-vertebral posterior landmarks.
     """
@@ -423,11 +437,11 @@ def main(
     optimizer = optim.AdamW(param_groups)
     print(f"--> Initialized AdamW optimizer with LLRD (base LR: {lr}, decay rate: {llrd_decay_rate}, {len(param_groups)} param groups)")
 
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+    scheduler = get_cosine_schedule_with_warmup(
         optimizer,
-        mode="min",
-        factor=0.5,
-        patience=5,
+        warmup_epochs=5,
+        total_epochs=epochs,
+        min_lr_ratio=0.01,
     )
 
     # Losses & Landmark Weights
@@ -437,6 +451,8 @@ def main(
     landmark_weights = get_landmark_weights(device)
 
     best_val_loss = float("inf")
+    best_val_sdr = 0.0
+    best_val_mae = float("inf")
     patience_counter = 0
 
     print(f"Starting training with MLflow experiment '{exp_name}'...")
@@ -457,14 +473,13 @@ def main(
                 "img_size": 640,
                 "num_landmarks": NUM_LANDMARKS,
                 "optimizer": "AdamW-LLRD",
-                "scheduler": "ReduceLROnPlateau",
+                "scheduler": "CosineAnnealingWithWarmup",
                 "heatmap_loss": "AdaptiveWingLoss",
                 "coord_loss": "WingLoss",
                 "graph_loss": "AnatomicalGraphLoss",
                 "device": str(device),
             }
         )
-
 
         history = {
             "epochs": [],
@@ -518,7 +533,8 @@ def main(
             epoch_time = time.time() - start_time
             current_lr = optimizer.param_groups[0]["lr"]
 
-            scheduler.step(val_loss)
+            # Step Cosine Scheduler per epoch
+            scheduler.step()
 
             # Accumulate history metrics
             history["epochs"].append(epoch + 1)
@@ -554,11 +570,16 @@ def main(
                 f"Epoch [{epoch + 1}/{epochs}] | Time: {epoch_time:.2f}s | "
                 f"Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | "
                 f"MAE: {metrics['mae']:.2f} px | RMSE: {metrics['rmse']:.2f} px | "
-                f"SDR@2.5px: {metrics['sdr_2_5']:.1f}%"
+                f"SDR@2.0px: {metrics['sdr_2_0']:.1f}% | SDR@2.5px: {metrics['sdr_2_5']:.1f}%"
             )
 
-            # Checkpoint Saving & Early Stopping
-            if val_loss < best_val_loss:
+            # Checkpoint Saving & Early Stopping based on SDR & MAE
+            is_best_sdr = metrics["sdr_2_5"] > best_val_sdr
+            is_tied_sdr_better_mae = (abs(metrics["sdr_2_5"] - best_val_sdr) < 1e-4) and (metrics["mae"] < best_val_mae)
+
+            if is_best_sdr or is_tied_sdr_better_mae:
+                best_val_sdr = metrics["sdr_2_5"]
+                best_val_mae = metrics["mae"]
                 best_val_loss = val_loss
                 patience_counter = 0
                 os.makedirs(os.path.dirname(SAVE_PATH), exist_ok=True)
@@ -571,29 +592,32 @@ def main(
                         "val_mae": metrics["mae"],
                         "val_rmse": metrics["rmse"],
                         "val_sdr_2_5": metrics["sdr_2_5"],
+                        "val_sdr_2_0": metrics["sdr_2_0"],
                     },
                     SAVE_PATH,
                 )
                 print(
-                    f"--> Saved new best model locally (Val Loss: {best_val_loss:.4f}, "
-                    f"MAE: {metrics['mae']:.2f} px, RMSE: {metrics['rmse']:.2f} px, SDR@2.5px: {metrics['sdr_2_5']:.1f}%)"
+                    f"--> Saved new best model locally (SDR@2.5px: {best_val_sdr:.1f}%, "
+                    f"MAE: {best_val_mae:.2f} px, RMSE: {metrics['rmse']:.2f} px, Val Loss: {best_val_loss:.4f})"
                 )
 
                 # Log best metrics to MLflow
                 mlflow.log_metrics(
                     {
                         "best_val_loss": best_val_loss,
-                        "best_val_mae": metrics["mae"],
+                        "best_val_mae": best_val_mae,
                         "best_val_rmse": metrics["rmse"],
-                        "best_val_sdr_2_5": metrics["sdr_2_5"],
+                        "best_val_sdr_2_5": best_val_sdr,
+                        "best_val_sdr_2_0": metrics["sdr_2_0"],
                     },
                     step=epoch + 1,
                 )
             else:
                 patience_counter += 1
-                print(f"No improvement in validation loss for {patience_counter} epoch(s).")
+                if patience_counter % 5 == 0:
+                    print(f"No SDR improvement for {patience_counter} consecutive epoch(s).")
                 if patience_counter >= patience:
-                    print(f"Early stopping triggered: Validation loss did not improve for {patience} consecutive epochs.")
+                    print(f"Early stopping triggered: Best SDR did not improve for {patience} consecutive epochs.")
                     break
 
         # --- GENERATE & LOG TRAINING METRIC PNG CHARTS TO MLFLOW ---
