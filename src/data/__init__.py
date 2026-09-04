@@ -1,5 +1,8 @@
 from .constants import LANDMARK_CLASSES, NUM_LANDMARKS
-from .loaders import CVMDataset, get_dataloaders, get_test_dataloader, get_transforms
+try:
+    from .loaders import CVMDataset, get_dataloaders, get_test_dataloader, get_transforms
+except ImportError:
+    pass
 
 __all__ = [
     "LANDMARK_CLASSES",

@@ -134,7 +134,12 @@ def load_model(weights_path: str, device: torch.device) -> torch.nn.Module:
         model.eval()
         return model
 
-    model.load_state_dict(state_dict)
+    # Filter out static coordinate grid buffers if present in checkpoint
+    state_dict = {k: v for k, v in state_dict.items() if not k.endswith("grid_x") and not k.endswith("grid_y")}
+    try:
+        model.load_state_dict(state_dict, strict=False)
+    except Exception:
+        model.load_state_dict(state_dict, strict=False)
     model.to(device)
     model.eval()
     return model
@@ -739,11 +744,27 @@ def run_evaluation(
             if isinstance(v, (int, float))
         }
 
+        def _log_eval_artifacts_in_order(run_id_str: str):
+            # Step 1: Log scalar metrics and .json/.txt report FIRST
+            mlflow.log_metrics(clean_metrics)
+            if (run_folder / "metrics.json").exists():
+                mlflow.log_artifact(str(run_folder / "metrics.json"), artifact_path="evaluation")
+                print(f"--> Successfully logged 'metrics.json' to MLflow artifact path 'evaluation'.")
+            if (run_folder / "summary_report.txt").exists():
+                mlflow.log_artifact(str(run_folder / "summary_report.txt"), artifact_path="evaluation")
+
+            # Step 2: Upload charts and sample visualizations after .json
+            if (run_folder / "charts").exists():
+                mlflow.log_artifacts(str(run_folder / "charts"), artifact_path="evaluation/charts")
+                print(f"--> Successfully logged evaluation charts to MLflow artifact path 'evaluation/charts'.")
+            if (run_folder / "visualizations").exists():
+                mlflow.log_artifacts(str(run_folder / "visualizations"), artifact_path="evaluation/visualizations")
+                print(f"--> Successfully logged evaluation visualization PNGs to MLflow artifact path 'evaluation/visualizations'.")
+
         active_run = mlflow.active_run()
         if active_run is not None:
             try:
-                mlflow.log_metrics(clean_metrics)
-                mlflow.log_artifacts(str(run_folder), artifact_path="evaluation")
+                _log_eval_artifacts_in_order(active_run.info.run_id)
                 print(f"--> Successfully logged evaluation metrics and artifacts to active MLflow run {active_run.info.run_id}.")
             except Exception as ml_err:
                 print(f"⚠️ Warning: Could not log evaluation to active MLflow run: {ml_err}")
@@ -759,8 +780,7 @@ def run_evaluation(
                         "eval_threshold_px": threshold_px,
                         "eval_batch_size": batch_size,
                     })
-                    mlflow.log_metrics(clean_metrics)
-                    mlflow.log_artifacts(str(run_folder), artifact_path="evaluation")
+                    _log_eval_artifacts_in_order(standalone_run.info.run_id)
                     print(f"--> Successfully logged standalone evaluation to MLflow experiment '{exp_name}' (Run ID: {standalone_run.info.run_id}).")
             except Exception as ml_err:
                 print(f"⚠️ Warning: Could not log standalone evaluation to MLflow: {ml_err}")

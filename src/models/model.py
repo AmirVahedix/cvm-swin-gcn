@@ -95,8 +95,8 @@ class LocalWindowSoftArgmax2D(nn.Module):
         dy = torch.arange(-radius, radius + 1, dtype=torch.float32)
         dx = torch.arange(-radius, radius + 1, dtype=torch.float32)
         grid_y, grid_x = torch.meshgrid(dy, dx, indexing="ij")
-        self.register_buffer("grid_x", grid_x.unsqueeze(0).unsqueeze(0))  # [1, 1, 2R+1, 2R+1]
-        self.register_buffer("grid_y", grid_y.unsqueeze(0).unsqueeze(0))  # [1, 1, 2R+1, 2R+1]
+        self.register_buffer("grid_x", grid_x.contiguous().clone().unsqueeze(0).unsqueeze(0), persistent=False)
+        self.register_buffer("grid_y", grid_y.contiguous().clone().unsqueeze(0).unsqueeze(0), persistent=False)
 
     def forward(self, heatmaps: torch.Tensor) -> torch.Tensor:
         """

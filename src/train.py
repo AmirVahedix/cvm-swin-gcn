@@ -1,6 +1,7 @@
 import os
 import sys
 import time
+import json
 import tempfile
 from pathlib import Path
 
@@ -620,21 +621,34 @@ def main(
                     print(f"Early stopping triggered: Best SDR did not improve for {patience} consecutive epochs.")
                     break
 
-        # --- GENERATE & LOG TRAINING METRIC PNG CHARTS TO MLFLOW ---
-        print("\n--- Generating and Logging Training Metric PNG Charts to MLflow ---")
-        generate_and_log_training_charts(history, log_to_mlflow=True)
+        # =========================================================================
+        # POST-TRAINING COMPLETION PIPELINE:
+        # Step 1: Log the .json metrics file(s) and test metrics FIRST
+        # Step 2: Upload the charts (training & evaluation metric PNG charts)
+        # Step 3: Upload the large model checkpoint file (.pth)
+        # =========================================================================
 
-        # --- LOG BEST MODEL CHECKPOINT TO MLFLOW ---
-        if os.path.exists(SAVE_PATH):
-            print("\n--- Logging Best Model Checkpoint to MLflow ---")
-            try:
-                mlflow.log_artifact(SAVE_PATH, artifact_path="checkpoints")
-                print(f"--> Successfully logged best checkpoint artifact '{SAVE_PATH}' to MLflow.")
-            except Exception as ml_err:
-                print(f"⚠️ Warning: Could not log checkpoint artifact to MLflow: {ml_err}")
+        # 1. Prepare and save training history JSON
+        history_json_path = os.path.join(os.path.dirname(SAVE_PATH), "training_history.json")
+        try:
+            with open(history_json_path, "w") as f:
+                json.dump(
+                    {
+                        "best_val_loss": best_val_loss,
+                        "best_val_sdr_2_5": best_val_sdr,
+                        "best_val_mae": best_val_mae,
+                        "total_epochs_completed": len(history["epochs"]),
+                        "history": history,
+                    },
+                    f,
+                    indent=4,
+                )
+        except Exception as hist_err:
+            print(f"⚠️ Warning: Could not save training history JSON: {hist_err}")
 
-        # --- POST-TRAINING EVALUATION & MLFLOW LOGGING ---
+        # 2. Run post-training evaluation to generate evaluation metrics.json
         eval_metrics_json_path = None
+        eval_run_folder = None
         if not skip_eval and os.path.exists(SAVE_PATH):
             test_img_dir = "dataset/test/images"
             test_npz_dir = "dataset/test/labels"
@@ -647,9 +661,10 @@ def main(
                         test_npz_dir=test_npz_dir,
                         output_dir="evaluation",
                         img_size=640,
+                        log_to_mlflow=False,
                     )
 
-                    # Log all test summary metrics into MLflow
+                    # Log all test summary scalar metrics into MLflow
                     eval_metrics_to_log = {}
                     for k, v in summary_metrics.items():
                         if isinstance(v, (int, float)):
@@ -658,30 +673,46 @@ def main(
 
                     mlflow.log_metrics(eval_metrics_to_log)
 
-                    # Log evaluation artifacts (report, metrics json, visualization PNGs)
-                    if os.path.exists(eval_run_folder):
-                        mlflow.log_artifacts(eval_run_folder, artifact_path="evaluation")
-                        print(f"--> Successfully logged evaluation artifacts from '{eval_run_folder}' to MLflow.")
-
-                        candidate_json = Path(eval_run_folder) / "metrics.json"
-                        if candidate_json.exists():
-                            eval_metrics_json_path = str(candidate_json)
+                    candidate_json = Path(eval_run_folder) / "metrics.json"
+                    if candidate_json.exists():
+                        eval_metrics_json_path = str(candidate_json)
                 except Exception as e:
                     print(f"❌ Warning: Post-training evaluation failed: {e}")
             else:
                 print("⚠️ Test dataset directories not found; skipping post-training evaluation.")
 
-        # --- UPLOAD FINAL MODEL AND METRICS JSON TO FTP HOST ---
-        if not skip_ftp:
-            print("\n--- Uploading Final Model and Metrics JSON to FTP Host ---")
-            ftp_files = []
-            if os.path.exists(SAVE_PATH):
-                ftp_files.append(SAVE_PATH)
+        # --- STEP 1: LOG .JSON METRICS FIRST (MLFLOW & FTP) ---
+        print("\n[Step 1/3] --- Logging .json Metrics Files First ---")
+        # 1a. MLflow: Log JSON artifacts
+        if eval_metrics_json_path and os.path.exists(eval_metrics_json_path):
+            try:
+                mlflow.log_artifact(eval_metrics_json_path, artifact_path="evaluation")
+                print(f"--> Successfully logged '{eval_metrics_json_path}' to MLflow artifact path 'evaluation'.")
+            except Exception as ml_err:
+                print(f"⚠️ Warning: Could not log metrics JSON to MLflow: {ml_err}")
 
+        if os.path.exists(history_json_path):
+            try:
+                mlflow.log_artifact(history_json_path, artifact_path="checkpoints")
+                print(f"--> Successfully logged '{history_json_path}' to MLflow artifact path 'checkpoints'.")
+            except Exception as ml_err:
+                print(f"⚠️ Warning: Could not log training history JSON to MLflow: {ml_err}")
+
+        if eval_run_folder:
+            eval_txt = Path(eval_run_folder) / "summary_report.txt"
+            if eval_txt.exists():
+                try:
+                    mlflow.log_artifact(str(eval_txt), artifact_path="evaluation")
+                except Exception as ml_err:
+                    print(f"⚠️ Warning: Could not log summary report to MLflow: {ml_err}")
+
+        # 1b. FTP: Upload .json metrics files FIRST
+        if not skip_ftp:
+            ftp_json_files = []
             if eval_metrics_json_path and os.path.exists(eval_metrics_json_path):
-                ftp_files.append(eval_metrics_json_path)
+                ftp_json_files.append(eval_metrics_json_path)
             else:
-                # Fallback: check if any recent metrics.json exists in evaluation/
+                # Fallback check for any recent metrics.json in evaluation/
                 eval_base = Path("evaluation")
                 if eval_base.exists():
                     found_jsons = sorted(
@@ -690,12 +721,16 @@ def main(
                         reverse=True,
                     )
                     if found_jsons:
-                        ftp_files.append(str(found_jsons[0]))
+                        ftp_json_files.append(str(found_jsons[0]))
 
-            if ftp_files:
+            if os.path.exists(history_json_path):
+                ftp_json_files.append(history_json_path)
+
+            if ftp_json_files:
+                print(f"\n--> Uploading {len(ftp_json_files)} .json metrics file(s) to FTP server first...")
                 try:
                     upload_files_to_ftp(
-                        files=ftp_files,
+                        files=ftp_json_files,
                         ftp_host=ftp_host,
                         ftp_port=ftp_port,
                         ftp_user=ftp_user,
@@ -704,9 +739,60 @@ def main(
                         use_tls=ftp_tls,
                     )
                 except Exception as ftp_err:
-                    print(f"⚠️ Warning: FTP upload encountered an error: {ftp_err}")
-            else:
-                print("ℹ️ No model checkpoint or metrics.json found to upload to FTP.")
+                    print(f"⚠️ Warning: FTP JSON upload encountered an error: {ftp_err}")
+
+        # --- STEP 2: AFTER THAT, UPLOAD/LOG CHARTS ---
+        print("\n[Step 2/3] --- Uploading Metric PNG Charts ---")
+        # 2a. Generate and log training metric PNG charts to MLflow
+        generate_and_log_training_charts(history, log_to_mlflow=True)
+
+        # 2b. Log evaluation charts and visualizations to MLflow
+        if eval_run_folder and os.path.exists(eval_run_folder):
+            eval_charts_dir = Path(eval_run_folder) / "charts"
+            if eval_charts_dir.exists():
+                try:
+                    mlflow.log_artifacts(str(eval_charts_dir), artifact_path="evaluation/charts")
+                    print(f"--> Successfully logged evaluation charts to MLflow artifact path 'evaluation/charts'.")
+                except Exception as ml_err:
+                    print(f"⚠️ Warning: Could not log evaluation charts to MLflow: {ml_err}")
+
+            eval_vis_dir = Path(eval_run_folder) / "visualizations"
+            if eval_vis_dir.exists():
+                try:
+                    mlflow.log_artifacts(str(eval_vis_dir), artifact_path="evaluation/visualizations")
+                    print(f"--> Successfully logged evaluation visualization PNGs to MLflow artifact path 'evaluation/visualizations'.")
+                except Exception as ml_err:
+                    print(f"⚠️ Warning: Could not log evaluation visualizations to MLflow: {ml_err}")
+
+        # --- STEP 3: AFTER THAT, UPLOAD LARGE MODEL FILE ---
+        print("\n[Step 3/3] --- Uploading Large Model Checkpoint File ---")
+        if os.path.exists(SAVE_PATH):
+            model_size_mb = os.path.getsize(SAVE_PATH) / (1024 * 1024)
+            # 3a. MLflow: Log large model checkpoint artifact
+            print(f"--> Logging large checkpoint '{SAVE_PATH}' ({model_size_mb:.2f} MB) to MLflow...")
+            try:
+                mlflow.log_artifact(SAVE_PATH, artifact_path="checkpoints")
+                print(f"--> Successfully logged best checkpoint artifact '{SAVE_PATH}' to MLflow.")
+            except Exception as ml_err:
+                print(f"⚠️ Warning: Could not log checkpoint artifact to MLflow: {ml_err}")
+
+            # 3b. FTP: Upload large model file
+            if not skip_ftp:
+                print(f"--> Uploading large checkpoint '{SAVE_PATH}' ({model_size_mb:.2f} MB) to FTP server...")
+                try:
+                    upload_files_to_ftp(
+                        files=[SAVE_PATH],
+                        ftp_host=ftp_host,
+                        ftp_port=ftp_port,
+                        ftp_user=ftp_user,
+                        ftp_password=ftp_password,
+                        remote_dir=ftp_remote_dir,
+                        use_tls=ftp_tls,
+                    )
+                except Exception as ftp_err:
+                    print(f"⚠️ Warning: FTP model upload encountered an error: {ftp_err}")
+        else:
+            print(f"⚠️ Best checkpoint '{SAVE_PATH}' was not found.")
 
 
 if __name__ == "__main__":
