@@ -1,3 +1,4 @@
+import os
 import sys
 import argparse
 from pathlib import Path
@@ -39,6 +40,19 @@ def main():
         type=int,
         default=8,
         help="Batch size for training.",
+    )
+    parser.add_argument(
+        "--lr",
+        "--learning-rate",
+        type=float,
+        default=float(os.getenv("LEARNING_RATE", 5e-5)),
+        help="Base learning rate for AdamW-LLRD optimizer (default: 5e-5 or $LEARNING_RATE).",
+    )
+    parser.add_argument(
+        "--llrd-decay-rate",
+        type=float,
+        default=float(os.getenv("LLRD_DECAY_RATE", 0.8)),
+        help="Layer-wise Learning Rate Decay factor (default: 0.8 or $LLRD_DECAY_RATE).",
     )
     parser.add_argument(
         "--skip-download",
@@ -285,11 +299,13 @@ def main():
 
         # Step 5: Model Training
         print(
-            f"\n[5/6] Executing: train_main() with {args.epochs} epochs, batch_size={args.batch_size}"
+            f"\n[5/6] Executing: train_main() with {args.epochs} epochs, batch_size={args.batch_size}, lr={args.lr}"
         )
         train_main(
             epochs=args.epochs,
             batch_size=args.batch_size,
+            lr=args.lr,
+            llrd_decay_rate=args.llrd_decay_rate,
             experiment_name=args.mlflow_experiment_name,
             tracking_uri=args.mlflow_tracking_uri,
             run_name=args.mlflow_run_name,

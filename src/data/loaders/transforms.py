@@ -36,19 +36,13 @@ def get_transforms(img_size=640):
             A.Perspective(
                 scale=(0.01, 0.04),
                 keep_size=True,
-                pad_mode=cv2.BORDER_CONSTANT,
-                pad_val=0,
-                mask_pad_val=0,
                 p=0.3,
             ),
             # 3. Non-rigid Elastic Deformations (Anatomical shape variation)
             A.ElasticTransform(
                 alpha=1,
                 sigma=30,
-                alpha_affine=20,
                 border_mode=cv2.BORDER_CONSTANT,
-                value=0,
-                mask_value=0,
                 p=0.3,
             ),
             # 4. Noise / Blur

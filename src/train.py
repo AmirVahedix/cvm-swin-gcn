@@ -34,8 +34,8 @@ TEST_NPZ_DIR = "dataset/test/labels"
 
 BATCH_SIZE = 16
 EPOCHS = 100
-LR = 2e-4
-LLRD_DECAY_RATE = 0.8
+LR = float(os.getenv("LEARNING_RATE", 5e-5))
+LLRD_DECAY_RATE = float(os.getenv("LLRD_DECAY_RATE", 0.8))
 LAMBDA_HM = 1.0
 LAMBDA_CD = 5.0
 LAMBDA_GRAPH = 1.0

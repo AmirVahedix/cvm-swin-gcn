@@ -130,7 +130,7 @@ class LocalWindowSoftArgmax2D(nn.Module):
         patches = torch.gather(flat_padded, dim=2, index=flat_patch_idx).view(B, N, 2 * R + 1, 2 * R + 1)
 
         # 3. Temperature-scaled softmax expectation within local patch
-        temperature = torch.exp(self.log_temperature).clamp(min=1e-3, max=1.0)
+        temperature = torch.exp(self.log_temperature).clamp(min=0.05, max=1.0)
         scaled_patches = patches / temperature
         patch_softmax = F.softmax(scaled_patches.view(B, N, -1), dim=-1).view(B, N, 2 * R + 1, 2 * R + 1)
 
