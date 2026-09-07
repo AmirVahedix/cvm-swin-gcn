@@ -23,6 +23,7 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
+from src.utils.verify_env import verify_env
 from src.data.constants import LANDMARK_CLASSES, NUM_LANDMARKS
 from src.data.preprocessing.download_data import download_export_and_images
 from src.data.preprocessing.resize_images import resize_images
@@ -284,6 +285,8 @@ def validate_single_record(record: dict, rule13_mode: str = "both") -> dict:
 
     return {
         "filename": clean_filename,
+        "label_studio_id": record.get("id"),
+        "original_img": record.get("data", {}).get("img") or record.get("file_upload", ""),
         "is_valid": is_valid,
         "has_label_error": has_label_error,
         "label_errors": label_errors,
@@ -339,7 +342,9 @@ def print_terminal_report(results: List[dict], rule13_mode: str = "both") -> Non
         print("\n❌ SAMPLES WITH LABEL INTEGRITY ERRORS:")
         for res in results:
             if res["has_label_error"]:
-                print(f"  [{res['filename']}]:")
+                ls_id = res.get("label_studio_id")
+                id_str = f" [Label Studio Task ID: #{ls_id}]" if ls_id else ""
+                print(f"  [{res['filename']}]{id_str}:")
                 for err in res["label_errors"]:
                     print(f"    - {err}")
 
@@ -364,7 +369,9 @@ def print_terminal_report(results: List[dict], rule13_mode: str = "both") -> Non
         print(f"   Samples exhibiting physiological lordosis/tilt overstep:")
         for lc in lordosis_cases[:10]:
             r13 = lc["rule13_info"]
-            print(f"     • {lc['filename']}: C4_PS_y - C3_PI_y = {r13['strict_delta']}px (strict FAIL), C4_PS_y - C3_PS_y = +{r13['safer_delta']}px (safer PASS)")
+            ls_id = lc.get("label_studio_id")
+            id_str = f" [Task #{ls_id}]" if ls_id else ""
+            print(f"     • {lc['filename']}{id_str}: C4_PS_y - C3_PI_y = {r13['strict_delta']}px (strict FAIL), C4_PS_y - C3_PS_y = +{r13['safer_delta']}px (safer PASS)")
         if len(lordosis_cases) > 10:
             print(f"     ... and {len(lordosis_cases) - 10} more.")
 
@@ -374,7 +381,9 @@ def print_terminal_report(results: List[dict], rule13_mode: str = "both") -> Non
         print("\n" + "-" * 80)
         print(f"🚨 SAMPLES VIOLATING CONSTRAINTS (Total {len(violating_samples)}):")
         for res in violating_samples[:25]:
-            print(f"\n  📁 {res['filename']}:")
+            ls_id = res.get("label_studio_id")
+            id_str = f" [Label Studio Task ID: #{ls_id}]" if ls_id else ""
+            print(f"\n  📁 {res['filename']}{id_str}:")
             if res["has_label_error"]:
                 for err in res["label_errors"]:
                     print(f"     [LABEL ERROR] {err}")
@@ -425,6 +434,8 @@ def generate_web_ui(
     for rec in violating_records:
         ui_dataset.append({
             "filename": rec["filename"],
+            "label_studio_id": rec.get("label_studio_id"),
+            "original_img": rec.get("original_img", ""),
             "image_url": f"images/{rec['filename']}",
             "is_valid": rec["is_valid"],
             "has_label_error": rec["has_label_error"],
@@ -669,7 +680,7 @@ INDEX_HTML_CONTENT = """<!DOCTYPE html>
     <div class="sidebar-header">
       <h2>Validation Violations</h2>
       <p id="summary-count">Loading violations...</p>
-      <input type="text" id="search-input" class="search-box" placeholder="Search filename (e.g. 0023)...">
+      <input type="text" id="search-input" class="search-box" placeholder="Search filename or Task ID (e.g. 378)...">
       <select id="rule-filter" class="filter-select">
         <option value="ALL">All Violations</option>
         <option value="LABEL_ERROR">Label Count/Uniqueness Errors</option>
@@ -785,9 +796,13 @@ INDEX_HTML_CONTENT = """<!DOCTYPE html>
         const isLordosis = item.rule13_info && item.rule13_info.is_lordosis_tilt_case;
         const count = item.rule_violations.length + (item.has_label_error ? 1 : 0);
         const badgeClass = isLordosis ? "badge-count lordosis" : "badge-count";
+        const taskIdHtml = item.label_studio_id ? `<div style="font-size:0.75rem; color:#38bdf8; font-family:monospace; margin-top:2px;">Label Studio Task #${item.label_studio_id}</div>` : "";
 
         div.innerHTML = `
-          <span class="item-title">${item.filename}</span>
+          <div>
+            <div class="item-title">${item.filename}</div>
+            ${taskIdHtml}
+          </div>
           <span class="${badgeClass}">${count} fail</span>
         `;
         div.onclick = () => selectImage(idx);
@@ -804,7 +819,8 @@ INDEX_HTML_CONTENT = """<!DOCTYPE html>
       });
 
       const record = filteredData[currentIndex];
-      document.getElementById("current-filename").textContent = record.filename;
+      const taskIdBadge = record.label_studio_id ? ` <span style="font-size:0.8rem; color:#38bdf8; background:rgba(56,189,248,0.15); padding:2px 8px; border-radius:4px; font-weight:normal; margin-left:8px;">Task #${record.label_studio_id}</span>` : "";
+      document.getElementById("current-filename").innerHTML = `${record.filename}${taskIdBadge}`;
 
       imageLoaded = false;
       currentImage = new Image();
@@ -1233,7 +1249,8 @@ INDEX_HTML_CONTENT = """<!DOCTYPE html>
       const ruleChoice = document.getElementById("rule-filter").value;
 
       filteredData = window.VALIDATION_DATA.filter(item => {
-        const matchesQuery = !q || item.filename.toLowerCase().includes(q);
+        const idStr = item.label_studio_id ? String(item.label_studio_id) : "";
+        const matchesQuery = !q || item.filename.toLowerCase().includes(q) || idStr.includes(q);
         if (!matchesQuery) return false;
 
         if (ruleChoice === "ALL") return true;
@@ -1266,19 +1283,15 @@ INDEX_HTML_CONTENT = """<!DOCTYPE html>
 
 
 def main():
+    verify_env()
+
     parser = argparse.ArgumentParser(
         description="Dataset Validation & Geometric Consistency Verification Script."
     )
     parser.add_argument(
         "--skip-download",
         action="store_true",
-        default=True,
-        help="Skip downloading export and images from Label Studio (default: True if raw export exists).",
-    )
-    parser.add_argument(
-        "--force-download",
-        action="store_true",
-        help="Force download from Label Studio even if raw files exist.",
+        help="Skip downloading raw export and images from Label Studio.",
     )
     parser.add_argument(
         "--skip-preprocessing",
@@ -1349,23 +1362,35 @@ def main():
 
     # 1. Preprocessing Steps (up to generate_labels)
     if not args.skip_preprocessing:
-        if args.force_download or (not args.skip_download):
-            print("\n[Step 1/3] Downloading raw export and images from Label Studio...")
+        if not args.skip_download:
+            print("\n[Step 1/3] Executing: download_export_and_images()")
             download_export_and_images(
                 export_dir=args.raw_exports_dir,
                 img_dir=args.raw_images_dir,
             )
         else:
-            print("\n[Step 1/3] Skipping download (using existing data).")
+            print("\n[Step 1/3] Skipping download as requested.")
 
-        print("\n[Step 2/3] Resizing images to target square dimension & updating coordinates...")
+        print("\n[Step 2/3] Executing: resize_images()")
         raw_exports_dir = Path(args.raw_exports_dir)
         raw_json_files = sorted(
             raw_exports_dir.glob("*.json"),
             key=lambda p: p.stat().st_mtime,
             reverse=True,
         )
-        raw_json_path = str(raw_json_files[0]) if raw_json_files else args.exports_json
+        raw_json_path = (
+            str(raw_json_files[0])
+            if raw_json_files
+            else os.path.join(args.raw_exports_dir, "export.json")
+        )
+
+        if not os.path.exists(raw_json_path):
+            print(
+                f"❌ Error: Raw export JSON not found at '{raw_json_path}'. "
+                f"Run without --skip-download to fetch it from Label Studio.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
 
         resize_images(
             img_dir=args.raw_images_dir,
@@ -1375,7 +1400,7 @@ def main():
             target_size=args.target_size,
         )
 
-        print("\n[Step 3/3] Generating Heatmaps & GCN Landmark Labels...")
+        print("\n[Step 3/3] Executing: generate_labels()")
         generate_labels(
             json_path=args.exports_json,
             images_dir=args.images_dir,

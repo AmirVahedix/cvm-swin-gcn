@@ -392,6 +392,7 @@ def main(
     ftp_remote_dir: str | None = None,
     ftp_tls: bool | None = None,
     skip_ftp: bool = False,
+    save_optimizer: bool = False,
 ):
     load_dotenv()
 
@@ -584,21 +585,27 @@ def main(
                 best_val_loss = val_loss
                 patience_counter = 0
                 os.makedirs(os.path.dirname(SAVE_PATH), exist_ok=True)
-                torch.save(
-                    {
-                        "epoch": epoch,
-                        "model_state_dict": model.state_dict(),
-                        "optimizer_state_dict": optimizer.state_dict(),
-                        "val_loss": best_val_loss,
-                        "val_mae": metrics["mae"],
-                        "val_rmse": metrics["rmse"],
-                        "val_sdr_2_5": metrics["sdr_2_5"],
-                        "val_sdr_2_0": metrics["sdr_2_0"],
-                    },
-                    SAVE_PATH,
-                )
+                if save_optimizer:
+                    torch.save(
+                        {
+                            "epoch": epoch,
+                            "model_state_dict": model.state_dict(),
+                            "optimizer_state_dict": optimizer.state_dict(),
+                            "val_loss": best_val_loss,
+                            "val_mae": metrics["mae"],
+                            "val_rmse": metrics["rmse"],
+                            "val_sdr_2_5": metrics["sdr_2_5"],
+                            "val_sdr_2_0": metrics["sdr_2_0"],
+                        },
+                        SAVE_PATH,
+                    )
+                else:
+                    # Save state_dict only (reduces file size from ~1.5GB to ~420MB)
+                    torch.save(model.state_dict(), SAVE_PATH)
+
+                saved_size_mb = os.path.getsize(SAVE_PATH) / (1024 * 1024)
                 print(
-                    f"--> Saved new best model locally (SDR@2.5px: {best_val_sdr:.1f}%, "
+                    f"--> Saved new best model weights locally [{saved_size_mb:.1f} MB] (SDR@2.5px: {best_val_sdr:.1f}%, "
                     f"MAE: {best_val_mae:.2f} px, RMSE: {metrics['rmse']:.2f} px, Val Loss: {best_val_loss:.4f})"
                 )
 
@@ -817,6 +824,11 @@ if __name__ == "__main__":
     parser.add_argument("--ftp-remote-dir", "--ftp-dir", type=str, default=None, help="Remote directory path on FTP server")
     parser.add_argument("--ftp-tls", action="store_true", help="Use FTPS / TLS encryption for FTP upload")
     parser.add_argument("--skip-ftp", action="store_true", help="Skip uploading model and metrics to FTP server")
+    parser.add_argument(
+        "--save-optimizer",
+        action="store_true",
+        help="Also save optimizer state dict in checkpoint (increases file size from ~420MB to ~1.5GB, useful only if resuming training)",
+    )
 
     args = parser.parse_args()
     main(
@@ -838,5 +850,6 @@ if __name__ == "__main__":
         ftp_remote_dir=args.ftp_remote_dir,
         ftp_tls=args.ftp_tls if args.ftp_tls else None,
         skip_ftp=args.skip_ftp,
+        save_optimizer=args.save_optimizer,
     )
 

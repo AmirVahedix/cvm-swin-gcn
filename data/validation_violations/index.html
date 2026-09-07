@@ -217,7 +217,7 @@
     <div class="sidebar-header">
       <h2>Validation Violations</h2>
       <p id="summary-count">Loading violations...</p>
-      <input type="text" id="search-input" class="search-box" placeholder="Search filename (e.g. 0023)...">
+      <input type="text" id="search-input" class="search-box" placeholder="Search filename or Task ID (e.g. 378)...">
       <select id="rule-filter" class="filter-select">
         <option value="ALL">All Violations</option>
         <option value="LABEL_ERROR">Label Count/Uniqueness Errors</option>
@@ -333,9 +333,13 @@
         const isLordosis = item.rule13_info && item.rule13_info.is_lordosis_tilt_case;
         const count = item.rule_violations.length + (item.has_label_error ? 1 : 0);
         const badgeClass = isLordosis ? "badge-count lordosis" : "badge-count";
+        const taskIdHtml = item.label_studio_id ? `<div style="font-size:0.75rem; color:#38bdf8; font-family:monospace; margin-top:2px;">Label Studio Task #${item.label_studio_id}</div>` : "";
 
         div.innerHTML = `
-          <span class="item-title">${item.filename}</span>
+          <div>
+            <div class="item-title">${item.filename}</div>
+            ${taskIdHtml}
+          </div>
           <span class="${badgeClass}">${count} fail</span>
         `;
         div.onclick = () => selectImage(idx);
@@ -352,7 +356,8 @@
       });
 
       const record = filteredData[currentIndex];
-      document.getElementById("current-filename").textContent = record.filename;
+      const taskIdBadge = record.label_studio_id ? ` <span style="font-size:0.8rem; color:#38bdf8; background:rgba(56,189,248,0.15); padding:2px 8px; border-radius:4px; font-weight:normal; margin-left:8px;">Task #${record.label_studio_id}</span>` : "";
+      document.getElementById("current-filename").innerHTML = `${record.filename}${taskIdBadge}`;
 
       imageLoaded = false;
       currentImage = new Image();
@@ -781,7 +786,8 @@
       const ruleChoice = document.getElementById("rule-filter").value;
 
       filteredData = window.VALIDATION_DATA.filter(item => {
-        const matchesQuery = !q || item.filename.toLowerCase().includes(q);
+        const idStr = item.label_studio_id ? String(item.label_studio_id) : "";
+        const matchesQuery = !q || item.filename.toLowerCase().includes(q) || idStr.includes(q);
         if (!matchesQuery) return false;
 
         if (ruleChoice === "ALL") return true;

@@ -169,6 +169,11 @@ def main():
         action="store_true",
         help="Skip uploading final model and metrics JSON to FTP server.",
     )
+    parser.add_argument(
+        "--save-optimizer",
+        action="store_true",
+        help="Save optimizer state dict along with model weights (useful only for resuming training, adds ~900MB).",
+    )
 
     args = parser.parse_args()
 
@@ -295,6 +300,7 @@ def main():
             ftp_remote_dir=args.ftp_remote_dir,
             ftp_tls=args.ftp_tls if args.ftp_tls else None,
             skip_ftp=args.skip_ftp,
+            save_optimizer=args.save_optimizer,
         )
         print("-" * 20)
 

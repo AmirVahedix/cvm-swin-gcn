@@ -1,555 +1,231 @@
 window.VALIDATION_DATA = [
   {
-    "filename": "0377.jpg",
-    "image_url": "images/0377.jpg",
+    "filename": "0655.jpg",
+    "label_studio_id": 656,
+    "original_img": "https://label.amirlogedixyz.ir/data/local-files/?d=cvm-images/0655.jpg",
+    "image_url": "images/0655.jpg",
     "is_valid": false,
-    "has_label_error": true,
-    "label_errors": [
-      "Total keypoints count is 14 (expected 13)",
-      "Duplicate landmarks: C3_AI (2x)"
-    ],
+    "has_label_error": false,
+    "label_errors": [],
     "rule_violations": [
-      {
-        "rule_id": 4,
-        "desc": "C3_IC => must be always at the left of C3_AI",
-        "passed": false,
-        "delta": null,
-        "message": "Cannot evaluate strictly: C3_AI has 2 duplicate annotations",
-        "landmark_a": "C3_IC",
-        "landmark_b": "C3_AI"
-      },
-      {
-        "rule_id": 12,
-        "desc": "C3_AI => must be always at the bottom of C3_AS",
-        "passed": false,
-        "delta": null,
-        "message": "Cannot evaluate strictly: C3_AI has 2 duplicate annotations",
-        "landmark_a": "C3_AI",
-        "landmark_b": "C3_AS"
-      },
       {
         "rule_id": 14,
         "desc": "C4_AS => must be always at the bottom of C3_AI",
         "passed": false,
-        "delta": null,
-        "message": "Cannot evaluate strictly: C3_AI has 2 duplicate annotations",
+        "delta": -0.86,
+        "message": "VIOLATION: C4_AS (y=497.21) is NOT bottom of C3_AI (y=498.07), delta=-0.86px",
         "landmark_a": "C4_AS",
         "landmark_b": "C3_AI"
       }
     ],
     "rule13_info": {
       "strict_pass": true,
-      "strict_delta": 12.92,
+      "strict_delta": 7.64,
       "safer_pass": true,
-      "safer_delta": 51.22,
-      "centroid_pass": false,
-      "centroid_delta": null,
+      "safer_delta": 48.88,
+      "centroid_pass": true,
+      "centroid_delta": 46.02,
       "is_lordosis_tilt_case": false
     },
     "landmarks": {
       "C4_PS": {
-        "x": 244.28,
-        "y": 499.7,
-        "norm_x": 0.3817,
-        "norm_y": 0.7808
+        "x": 105.08,
+        "y": 493.9,
+        "norm_x": 0.1642,
+        "norm_y": 0.7717
       },
       "C4_AS": {
-        "x": 277.19,
-        "y": 515.43,
-        "norm_x": 0.4331,
-        "norm_y": 0.8054
+        "x": 130.1,
+        "y": 497.21,
+        "norm_x": 0.2033,
+        "norm_y": 0.7769
       },
       "C4_PI": {
-        "x": 237.54,
-        "y": 537.87,
-        "norm_x": 0.3712,
-        "norm_y": 0.8404
+        "x": 102.43,
+        "y": 534.31,
+        "norm_x": 0.16,
+        "norm_y": 0.8349
       },
       "C4_IC": {
-        "x": 252.15,
-        "y": 535.58,
-        "norm_x": 0.394,
-        "norm_y": 0.8368
+        "x": 117.86,
+        "y": 532.54,
+        "norm_x": 0.1842,
+        "norm_y": 0.8321
       },
       "C4_AI": {
-        "x": 272.24,
-        "y": 551.24,
-        "norm_x": 0.4254,
-        "norm_y": 0.8613
+        "x": 141.97,
+        "y": 540.27,
+        "norm_x": 0.2218,
+        "norm_y": 0.8442
       },
       "C3_PS": {
-        "x": 256.79,
-        "y": 448.48,
-        "norm_x": 0.4012,
-        "norm_y": 0.7008
+        "x": 115.39,
+        "y": 445.02,
+        "norm_x": 0.1803,
+        "norm_y": 0.6953
       },
       "C3_AS": {
-        "x": 287.3,
-        "y": 466.57,
-        "norm_x": 0.4489,
-        "norm_y": 0.729
-      },
-      "C3_PI": {
-        "x": 248.19,
-        "y": 486.78,
-        "norm_x": 0.3878,
-        "norm_y": 0.7606
-      },
-      "C3_IC": {
-        "x": 261.09,
-        "y": 486.06,
-        "norm_x": 0.4079,
-        "norm_y": 0.7595
-      },
-      "C3_AI": [
-        {
-          "x": 277.96,
-          "y": 502.85,
-          "norm_x": 0.4343,
-          "norm_y": 0.7857
-        },
-        {
-          "x": 255.87,
-          "y": 490.64,
-          "norm_x": 0.3998,
-          "norm_y": 0.7666
-        }
-      ],
-      "C2_PI": {
-        "x": 259.67,
-        "y": 437.94,
-        "norm_x": 0.4057,
-        "norm_y": 0.6843
-      },
-      "C2_IC": {
-        "x": 272.82,
-        "y": 437.7,
-        "norm_x": 0.4263,
-        "norm_y": 0.6839
-      },
-      "C2_AI": {
-        "x": 288.84,
-        "y": 454.38,
-        "norm_x": 0.4513,
+        "x": 147.61,
+        "y": 454.4,
+        "norm_x": 0.2306,
         "norm_y": 0.71
-      }
-    }
-  },
-  {
-    "filename": "0399.jpg",
-    "image_url": "images/0399.jpg",
-    "is_valid": false,
-    "has_label_error": true,
-    "label_errors": [
-      "Total keypoints count is 14 (expected 13)",
-      "Duplicate landmarks: C4_IC (2x)"
-    ],
-    "rule_violations": [
-      {
-        "rule_id": 5,
-        "desc": "C4_PI => must be always at the left of C4_IC",
-        "passed": false,
-        "delta": null,
-        "message": "Cannot evaluate strictly: C4_IC has 2 duplicate annotations",
-        "landmark_a": "C4_PI",
-        "landmark_b": "C4_IC"
-      },
-      {
-        "rule_id": 6,
-        "desc": "C4_IC => must be always at the left of C4_AI",
-        "passed": false,
-        "delta": null,
-        "message": "Cannot evaluate strictly: C4_IC has 2 duplicate annotations",
-        "landmark_a": "C4_IC",
-        "landmark_b": "C4_AI"
-      },
-      {
-        "rule_id": 18,
-        "desc": "C4_IC => must be always at the bottom of C3_IC",
-        "passed": false,
-        "delta": null,
-        "message": "Cannot evaluate strictly: C4_IC has 2 duplicate annotations",
-        "landmark_a": "C4_IC",
-        "landmark_b": "C3_IC"
-      }
-    ],
-    "rule13_info": {
-      "strict_pass": true,
-      "strict_delta": 12.23,
-      "safer_pass": true,
-      "safer_delta": 50.22,
-      "centroid_pass": false,
-      "centroid_delta": null,
-      "is_lordosis_tilt_case": false
-    },
-    "landmarks": {
-      "C4_PS": {
-        "x": 172.92,
-        "y": 529.15,
-        "norm_x": 0.2702,
-        "norm_y": 0.8268
-      },
-      "C4_AS": {
-        "x": 212.15,
-        "y": 541.98,
-        "norm_x": 0.3315,
-        "norm_y": 0.8468
-      },
-      "C4_PI": {
-        "x": 169.38,
-        "y": 564.2,
-        "norm_x": 0.2647,
-        "norm_y": 0.8816
-      },
-      "C4_IC": [
-        {
-          "x": 185.72,
-          "y": 564.16,
-          "norm_x": 0.2902,
-          "norm_y": 0.8815
-        },
-        {
-          "x": 197.82,
-          "y": 562.69,
-          "norm_x": 0.3091,
-          "norm_y": 0.8792
-        }
-      ],
-      "C4_AI": {
-        "x": 206.79,
-        "y": 576.56,
-        "norm_x": 0.3231,
-        "norm_y": 0.9009
-      },
-      "C3_PS": {
-        "x": 188.15,
-        "y": 478.93,
-        "norm_x": 0.294,
-        "norm_y": 0.7483
-      },
-      "C3_AS": {
-        "x": 223.1,
-        "y": 496.54,
-        "norm_x": 0.3486,
-        "norm_y": 0.7758
       },
       "C3_PI": {
-        "x": 179.79,
-        "y": 516.92,
-        "norm_x": 0.2809,
-        "norm_y": 0.8077
+        "x": 111.02,
+        "y": 486.26,
+        "norm_x": 0.1735,
+        "norm_y": 0.7598
       },
       "C3_IC": {
-        "x": 194.47,
-        "y": 518.35,
-        "norm_x": 0.3039,
-        "norm_y": 0.8099
+        "x": 123.81,
+        "y": 484.39,
+        "norm_x": 0.1935,
+        "norm_y": 0.7569
       },
       "C3_AI": {
-        "x": 213.46,
-        "y": 531.93,
-        "norm_x": 0.3335,
-        "norm_y": 0.8311
+        "x": 148.78,
+        "y": 498.07,
+        "norm_x": 0.2325,
+        "norm_y": 0.7782
       },
       "C2_PI": {
-        "x": 194.7,
-        "y": 470.73,
-        "norm_x": 0.3042,
-        "norm_y": 0.7355
+        "x": 121.56,
+        "y": 435.2,
+        "norm_x": 0.1899,
+        "norm_y": 0.68
       },
       "C2_IC": {
-        "x": 207.26,
-        "y": 469.71,
-        "norm_x": 0.3238,
-        "norm_y": 0.7339
+        "x": 134.78,
+        "y": 437.88,
+        "norm_x": 0.2106,
+        "norm_y": 0.6842
       },
       "C2_AI": {
-        "x": 226.9,
-        "y": 487.28,
-        "norm_x": 0.3545,
-        "norm_y": 0.7614
+        "x": 156.8,
+        "y": 448.44,
+        "norm_x": 0.245,
+        "norm_y": 0.7007
       }
     }
   },
   {
-    "filename": "0416.jpg",
-    "image_url": "images/0416.jpg",
+    "filename": "0408.jpg",
+    "label_studio_id": 832,
+    "original_img": "https://label.amirlogedixyz.ir/data/local-files/?d=cvm-images/0408.jpg",
+    "image_url": "images/0408.jpg",
     "is_valid": false,
-    "has_label_error": true,
-    "label_errors": [
-      "Total keypoints count is 14 (expected 13)",
-      "Duplicate landmarks: C3_AI (2x)"
-    ],
+    "has_label_error": false,
+    "label_errors": [],
     "rule_violations": [
-      {
-        "rule_id": 4,
-        "desc": "C3_IC => must be always at the left of C3_AI",
-        "passed": false,
-        "delta": null,
-        "message": "Cannot evaluate strictly: C3_AI has 2 duplicate annotations",
-        "landmark_a": "C3_IC",
-        "landmark_b": "C3_AI"
-      },
-      {
-        "rule_id": 12,
-        "desc": "C3_AI => must be always at the bottom of C3_AS",
-        "passed": false,
-        "delta": null,
-        "message": "Cannot evaluate strictly: C3_AI has 2 duplicate annotations",
-        "landmark_a": "C3_AI",
-        "landmark_b": "C3_AS"
-      },
-      {
-        "rule_id": 14,
-        "desc": "C4_AS => must be always at the bottom of C3_AI",
-        "passed": false,
-        "delta": null,
-        "message": "Cannot evaluate strictly: C3_AI has 2 duplicate annotations",
-        "landmark_a": "C4_AS",
-        "landmark_b": "C3_AI"
-      }
-    ],
-    "rule13_info": {
-      "strict_pass": true,
-      "strict_delta": 10.79,
-      "safer_pass": true,
-      "safer_delta": 50.13,
-      "centroid_pass": false,
-      "centroid_delta": null,
-      "is_lordosis_tilt_case": false
-    },
-    "landmarks": {
-      "C4_PS": {
-        "x": 200.68,
-        "y": 504.81,
-        "norm_x": 0.3136,
-        "norm_y": 0.7888
-      },
-      "C4_AS": {
-        "x": 232.42,
-        "y": 514.26,
-        "norm_x": 0.3632,
-        "norm_y": 0.8035
-      },
-      "C4_PI": {
-        "x": 192.02,
-        "y": 539.69,
-        "norm_x": 0.3,
-        "norm_y": 0.8433
-      },
-      "C4_IC": {
-        "x": 208.15,
-        "y": 541.03,
-        "norm_x": 0.3252,
-        "norm_y": 0.8454
-      },
-      "C4_AI": {
-        "x": 226.61,
-        "y": 554.25,
-        "norm_x": 0.3541,
-        "norm_y": 0.866
-      },
-      "C3_PS": {
-        "x": 218.7,
-        "y": 454.68,
-        "norm_x": 0.3417,
-        "norm_y": 0.7104
-      },
-      "C3_AS": {
-        "x": 247.32,
-        "y": 470.15,
-        "norm_x": 0.3864,
-        "norm_y": 0.7346
-      },
-      "C3_PI": {
-        "x": 206.57,
-        "y": 494.02,
-        "norm_x": 0.3228,
-        "norm_y": 0.7719
-      },
-      "C3_IC": {
-        "x": 219.61,
-        "y": 494.86,
-        "norm_x": 0.3431,
-        "norm_y": 0.7732
-      },
-      "C3_AI": [
-        {
-          "x": 235.65,
-          "y": 506.18,
-          "norm_x": 0.3682,
-          "norm_y": 0.7909
-        },
-        {
-          "x": 230.69,
-          "y": 508.88,
-          "norm_x": 0.3605,
-          "norm_y": 0.7951
-        }
-      ],
-      "C2_PI": {
-        "x": 220.54,
-        "y": 446.81,
-        "norm_x": 0.3446,
-        "norm_y": 0.6981
-      },
-      "C2_IC": {
-        "x": 236.81,
-        "y": 447.17,
-        "norm_x": 0.37,
-        "norm_y": 0.6987
-      },
-      "C2_AI": {
-        "x": 252.52,
-        "y": 460.05,
-        "norm_x": 0.3946,
-        "norm_y": 0.7188
-      }
-    }
-  },
-  {
-    "filename": "0463.jpg",
-    "image_url": "images/0463.jpg",
-    "is_valid": false,
-    "has_label_error": true,
-    "label_errors": [
-      "Total keypoints count is 14 (expected 13)",
-      "Duplicate landmarks: C3_AS (2x)"
-    ],
-    "rule_violations": [
-      {
-        "rule_id": 7,
-        "desc": "C3_PS => must be always at the left of C3_AS",
-        "passed": false,
-        "delta": null,
-        "message": "Cannot evaluate strictly: C3_AS has 2 duplicate annotations",
-        "landmark_a": "C3_PS",
-        "landmark_b": "C3_AS"
-      },
       {
         "rule_id": 9,
         "desc": "C3_AS => must be always at the bottom of C2_AI",
         "passed": false,
-        "delta": null,
-        "message": "Cannot evaluate strictly: C3_AS has 2 duplicate annotations",
+        "delta": -1.4,
+        "message": "VIOLATION: C3_AS (y=460.88) is NOT bottom of C2_AI (y=462.28), delta=-1.4px",
         "landmark_a": "C3_AS",
         "landmark_b": "C2_AI"
-      },
-      {
-        "rule_id": 12,
-        "desc": "C3_AI => must be always at the bottom of C3_AS",
-        "passed": false,
-        "delta": null,
-        "message": "Cannot evaluate strictly: C3_AS has 2 duplicate annotations",
-        "landmark_a": "C3_AI",
-        "landmark_b": "C3_AS"
       }
     ],
     "rule13_info": {
       "strict_pass": true,
-      "strict_delta": 17.41,
+      "strict_delta": 11.25,
       "safer_pass": true,
-      "safer_delta": 59.33,
-      "centroid_pass": false,
-      "centroid_delta": null,
+      "safer_delta": 47.04,
+      "centroid_pass": true,
+      "centroid_delta": 45.39,
       "is_lordosis_tilt_case": false
     },
     "landmarks": {
-      "C3_PS": {
-        "x": 101.94,
-        "y": 473.13,
-        "norm_x": 0.1593,
-        "norm_y": 0.7393
-      },
-      "C3_AS": [
-        {
-          "x": 149.72,
-          "y": 488.44,
-          "norm_x": 0.2339,
-          "norm_y": 0.7632
-        },
-        {
-          "x": 132.66,
-          "y": 493.57,
-          "norm_x": 0.2073,
-          "norm_y": 0.7712
-        }
-      ],
-      "C3_PI": {
-        "x": 92.53,
-        "y": 515.05,
-        "norm_x": 0.1446,
-        "norm_y": 0.8048
-      },
-      "C3_IC": {
-        "x": 113.21,
-        "y": 515.59,
-        "norm_x": 0.1769,
-        "norm_y": 0.8056
-      },
-      "C3_AI": {
-        "x": 142.28,
-        "y": 532.03,
-        "norm_x": 0.2223,
-        "norm_y": 0.8313
-      },
-      "C2_PI": {
-        "x": 107.28,
-        "y": 458.28,
-        "norm_x": 0.1676,
-        "norm_y": 0.7161
-      },
-      "C2_IC": {
-        "x": 124.15,
-        "y": 455.91,
-        "norm_x": 0.194,
-        "norm_y": 0.7124
-      },
-      "C2_AI": {
-        "x": 152.56,
-        "y": 476.91,
-        "norm_x": 0.2384,
-        "norm_y": 0.7452
-      },
       "C4_PS": {
-        "x": 90.88,
-        "y": 532.46,
-        "norm_x": 0.142,
-        "norm_y": 0.832
+        "x": 221.57,
+        "y": 497.47,
+        "norm_x": 0.3462,
+        "norm_y": 0.7773
       },
       "C4_AS": {
-        "x": 138.31,
-        "y": 547.87,
-        "norm_x": 0.2161,
-        "norm_y": 0.856
+        "x": 246.45,
+        "y": 509.82,
+        "norm_x": 0.3851,
+        "norm_y": 0.7966
       },
       "C4_PI": {
-        "x": 81.22,
-        "y": 572.96,
-        "norm_x": 0.1269,
-        "norm_y": 0.8953
+        "x": 213.11,
+        "y": 531.99,
+        "norm_x": 0.333,
+        "norm_y": 0.8312
       },
       "C4_IC": {
-        "x": 103.22,
-        "y": 574.74,
-        "norm_x": 0.1613,
-        "norm_y": 0.898
+        "x": 226.32,
+        "y": 531.74,
+        "norm_x": 0.3536,
+        "norm_y": 0.8308
       },
       "C4_AI": {
-        "x": 130.85,
-        "y": 586.57,
-        "norm_x": 0.2044,
-        "norm_y": 0.9165
+        "x": 242.78,
+        "y": 545.21,
+        "norm_x": 0.3793,
+        "norm_y": 0.8519
+      },
+      "C2_PI": {
+        "x": 241.29,
+        "y": 441.45,
+        "norm_x": 0.377,
+        "norm_y": 0.6898
+      },
+      "C2_IC": {
+        "x": 253.7,
+        "y": 444.45,
+        "norm_x": 0.3964,
+        "norm_y": 0.6944
+      },
+      "C2_AI": {
+        "x": 266.99,
+        "y": 462.28,
+        "norm_x": 0.4172,
+        "norm_y": 0.7223
+      },
+      "C3_PS": {
+        "x": 236.59,
+        "y": 450.43,
+        "norm_x": 0.3697,
+        "norm_y": 0.7038
+      },
+      "C3_AS": {
+        "x": 256.14,
+        "y": 460.88,
+        "norm_x": 0.4002,
+        "norm_y": 0.7201
+      },
+      "C3_PI": {
+        "x": 226.28,
+        "y": 486.22,
+        "norm_x": 0.3536,
+        "norm_y": 0.7597
+      },
+      "C3_IC": {
+        "x": 238.99,
+        "y": 487.59,
+        "norm_x": 0.3734,
+        "norm_y": 0.7619
+      },
+      "C3_AI": {
+        "x": 253.93,
+        "y": 504.16,
+        "norm_x": 0.3968,
+        "norm_y": 0.7878
       }
     }
   },
   {
-    "filename": "0480.jpg",
-    "image_url": "images/0480.jpg",
+    "filename": "0534.jpg",
+    "label_studio_id": 1090,
+    "original_img": "https://label.amirlogedixyz.ir/data/local-files/?d=cvm-images/0534.jpg",
+    "image_url": "images/0534.jpg",
     "is_valid": false,
     "has_label_error": true,
     "label_errors": [
-      "Total keypoints count is 14 (expected 13)",
+      "Missing landmarks: C3_AI",
       "Duplicate landmarks: C3_PI (2x)"
     ],
     "rule_violations": [
@@ -563,6 +239,15 @@ window.VALIDATION_DATA = [
         "landmark_b": "C3_IC"
       },
       {
+        "rule_id": 4,
+        "desc": "C3_IC => must be always at the left of C3_AI",
+        "passed": false,
+        "delta": null,
+        "message": "Cannot evaluate: missing landmark (C3_AI)",
+        "landmark_a": "C3_IC",
+        "landmark_b": "C3_AI"
+      },
+      {
         "rule_id": 11,
         "desc": "C3_PI => must be always at the bottom of C3_PS",
         "passed": false,
@@ -572,6 +257,15 @@ window.VALIDATION_DATA = [
         "landmark_b": "C3_PS"
       },
       {
+        "rule_id": 12,
+        "desc": "C3_AI => must be always at the bottom of C3_AS",
+        "passed": false,
+        "delta": null,
+        "message": "Cannot evaluate: missing landmark (C3_AI)",
+        "landmark_a": "C3_AI",
+        "landmark_b": "C3_AS"
+      },
+      {
         "rule_id": 13,
         "desc": "C4_PS => must be always at the bottom of C3_PI",
         "passed": false,
@@ -579,95 +273,98 @@ window.VALIDATION_DATA = [
         "message": "Cannot evaluate strictly: C3_PI has 2 duplicate annotations",
         "landmark_a": "C4_PS",
         "landmark_b": "C3_PI"
+      },
+      {
+        "rule_id": 14,
+        "desc": "C4_AS => must be always at the bottom of C3_AI",
+        "passed": false,
+        "delta": null,
+        "message": "Cannot evaluate: missing landmark (C3_AI)",
+        "landmark_a": "C4_AS",
+        "landmark_b": "C3_AI"
       }
     ],
     "rule13_info": {},
     "landmarks": {
-      "C4_PS": {
-        "x": 224.94,
-        "y": 490.74,
-        "norm_x": 0.3515,
-        "norm_y": 0.7668
+      "C2_PI": {
+        "x": 293.98,
+        "y": 433.49,
+        "norm_x": 0.4593,
+        "norm_y": 0.6773
       },
-      "C4_AS": {
-        "x": 251.17,
-        "y": 512.67,
-        "norm_x": 0.3925,
-        "norm_y": 0.801
+      "C2_IC": {
+        "x": 305.51,
+        "y": 435.61,
+        "norm_x": 0.4774,
+        "norm_y": 0.6806
       },
-      "C4_PI": {
-        "x": 209.37,
-        "y": 520.04,
-        "norm_x": 0.3271,
-        "norm_y": 0.8126
-      },
-      "C4_IC": {
-        "x": 221.94,
-        "y": 526.77,
-        "norm_x": 0.3468,
-        "norm_y": 0.8231
-      },
-      "C4_AI": {
-        "x": 235.6,
-        "y": 547.65,
-        "norm_x": 0.3681,
-        "norm_y": 0.8557
+      "C2_AI": {
+        "x": 317.31,
+        "y": 445.95,
+        "norm_x": 0.4958,
+        "norm_y": 0.6968
       },
       "C3_PS": {
-        "x": 239.62,
-        "y": 449.57,
-        "norm_x": 0.3744,
-        "norm_y": 0.7025
+        "x": 289.35,
+        "y": 446.54,
+        "norm_x": 0.4521,
+        "norm_y": 0.6977
       },
       "C3_AS": {
-        "x": 265.29,
-        "y": 466.01,
-        "norm_x": 0.4145,
-        "norm_y": 0.7281
+        "x": 314.79,
+        "y": 456.88,
+        "norm_x": 0.4919,
+        "norm_y": 0.7139
       },
       "C3_PI": [
         {
-          "x": 230.64,
-          "y": 480.82,
-          "norm_x": 0.3604,
-          "norm_y": 0.7513
+          "x": 289.61,
+          "y": 468.41,
+          "norm_x": 0.4525,
+          "norm_y": 0.7319
         },
         {
-          "x": 250.94,
-          "y": 484.11,
-          "norm_x": 0.3921,
-          "norm_y": 0.7564
+          "x": 300.48,
+          "y": 470.8,
+          "norm_x": 0.4695,
+          "norm_y": 0.7356
         }
       ],
       "C3_IC": {
-        "x": 242.75,
-        "y": 482.34,
-        "norm_x": 0.3793,
-        "norm_y": 0.7537
+        "x": 315.99,
+        "y": 477.03,
+        "norm_x": 0.4937,
+        "norm_y": 0.7454
       },
-      "C3_AI": {
-        "x": 256.46,
-        "y": 501.84,
-        "norm_x": 0.4007,
-        "norm_y": 0.7841
+      "C4_PS": {
+        "x": 285.9,
+        "y": 479.55,
+        "norm_x": 0.4467,
+        "norm_y": 0.7493
       },
-      "C2_PI": {
-        "x": 242.87,
-        "y": 436.23,
-        "norm_x": 0.3795,
-        "norm_y": 0.6816
+      "C4_AS": {
+        "x": 310.95,
+        "y": 488.96,
+        "norm_x": 0.4859,
+        "norm_y": 0.764
       },
-      "C2_IC": {
-        "x": 256.21,
-        "y": 435.55,
-        "norm_x": 0.4003,
-        "norm_y": 0.6805
+      "C4_PI": {
+        "x": 284.44,
+        "y": 499.16,
+        "norm_x": 0.4444,
+        "norm_y": 0.7799
       },
-      "C2_AI": {
-        "x": 268.36,
-        "y": 454.94,
-        "norm_x": 0.4193,
-        "norm_y": 0.7108
+      "C4_IC": {
+        "x": 294.78,
+        "y": 503.41,
+        "norm_x": 0.4606,
+        "norm_y": 0.7866
+      },
+      "C4_AI": {
+        "x": 309.49,
+        "y": 508.57,
+        "norm_x": 0.4836,
+        "norm_y": 0.7946
       }
     }
   }
