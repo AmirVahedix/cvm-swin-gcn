@@ -44,12 +44,16 @@ class WingLoss(nn.Module):
     """
     Wing Loss for robust direct coordinate regression.
     Ref: Feng et al., "Wing Loss for Robust Facial Landmark Localisation with Convolutional Neural Networks", CVPR 2018.
+    
+    When inputs are normalized in [0, 1], img_size (default 640.0) automatically converts 
+    pixel thresholds (omega=10.0 px, epsilon=2.0 px) into normalized scale [0, 1].
     """
-    def __init__(self, omega: float = 10.0, epsilon: float = 2.0):
+    def __init__(self, omega: float = 10.0, epsilon: float = 2.0, img_size: float = 640.0):
         super().__init__()
-        self.omega = omega
-        self.epsilon = epsilon
-        self.C = omega - omega * torch.log(torch.tensor(1.0 + omega / epsilon))
+        # Calibrate pixel thresholds into normalized coordinate space [0, 1]
+        self.omega = omega / img_size
+        self.epsilon = epsilon / img_size
+        self.C = self.omega - self.omega * torch.log(torch.tensor(1.0 + self.omega / self.epsilon))
 
     def forward(self, pred: torch.Tensor, target: torch.Tensor, landmark_weights: torch.Tensor | None = None) -> torch.Tensor:
         """

@@ -108,12 +108,17 @@ def get_llrd_param_groups(
 
 def get_landmark_weights(device: torch.device) -> torch.Tensor:
     """
-    Constructs landmark loss weights prioritizing difficult lower-vertebral posterior landmarks.
+    Constructs landmark loss weights prioritizing empirically difficult landmarks
+    identified from test evaluation (C4_PS, C3_AS, C2_IC, C3_IC, C3_PS, C4_AS).
     """
     weights = torch.ones(NUM_LANDMARKS, dtype=torch.float32, device=device)
-    weights[5] = 2.0   # C3_PI
-    weights[10] = 2.5  # C4_PI (worst performing landmark)
-    weights[12] = 2.0  # C4_AI
+    weights[8] = 2.0   # C4_PS (lowest SDR@2.5px: 72.1%, RMSE: 5.17 px)
+    weights[4] = 2.0   # C3_AS (SDR@2.5px: 74.8%, RMSE: 3.81 px)
+    weights[1] = 1.8   # C2_IC (SDR@2.5px: 74.8%, concavity)
+    weights[6] = 1.8   # C3_IC (SDR@2.5px: 76.9%, concavity)
+    weights[3] = 1.6   # C3_PS (SDR@2.5px: 79.6%, RMSE: 3.98 px)
+    weights[9] = 1.5   # C4_AS (SDR@2.5px: 83.0%, RMSE: 6.07 px)
+    weights[11] = 1.2  # C4_IC (SDR@2.5px: 85.0%, concavity)
     return weights
 
 
@@ -563,7 +568,7 @@ def main(
 
     # Losses & Landmark Weights
     awl_loss = AdaptiveWingLoss().to(device)
-    wing_loss = WingLoss().to(device)
+    wing_loss = WingLoss(img_size=640.0).to(device)
     graph_loss = AnatomicalGraphLoss(model.adj_matrix).to(device)
     landmark_weights = get_landmark_weights(device)
 

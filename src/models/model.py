@@ -208,11 +208,6 @@ class CephalometricSwinGCN(nn.Module):
             num_landmarks=num_landmarks, radius=window_radius, init_temperature=0.1
         )
 
-        # Dynamic Multi-Head Graph Attention (GAT) Structural Residual Refinement Head
-        self.gat1 = GraphAttentionLayer(128, 128, heads=4, concat=True)
-        self.gat2 = GraphAttentionLayer(128, 64, heads=4, concat=True)
-        self.offset_head = nn.Linear(64, 2)
-
         self.register_buffer("adj_matrix", self._build_adjacency())
 
     def _build_adjacency(self) -> torch.Tensor:
@@ -258,25 +253,8 @@ class CephalometricSwinGCN(nn.Module):
         d0 = self.up0(d1, None)  # 64, 320x320
         heatmaps = self.up_final(d0)  # 13, 640x640
 
-        # 1. Local-Window Soft-Argmax Sub-Pixel Base Coordinates
-        base_coords = self.soft_argmax(heatmaps)  # [B, 13, 2]
-
-        # 2. Extract High-Resolution Landmark Features via Bilinear Grid Sampling on d1 (160x160)
-        # grid_sample expects coordinates in [-1, 1] range: (x, y) -> 2 * norm - 1
-        B, N, _ = base_coords.shape
-        grid_sample_coords = (base_coords * 2.0 - 1.0).unsqueeze(2)  # [B, 13, 1, 2]
-        sampled_feats = F.grid_sample(
-            d1, grid_sample_coords, mode="bilinear", padding_mode="border", align_corners=True
-        )  # [B, 128, 13, 1]
-        node_features = sampled_feats.squeeze(-1).permute(0, 2, 1).contiguous()  # [B, 13, 128]
-
-        # 3. Dynamic GAT Graph Residual Coordinate Offset Prediction
-        gat_feat = F.elu(self.gat1(node_features, self.adj_matrix))
-        gat_feat = F.elu(self.gat2(gat_feat, self.adj_matrix))
-        coord_offset = 0.03 * torch.tanh(self.offset_head(gat_feat))  # Bounded offset [-0.03, 0.03]
-
-        # Final Refined Coordinates
-        coords = torch.clamp(base_coords + coord_offset, 0.0, 1.0)
+        # Local-Window Soft-Argmax Sub-Pixel Coordinates directly from heatmaps
+        coords = self.soft_argmax(heatmaps)  # [B, 13, 2] in [0, 1]
 
         return heatmaps, coords
 
