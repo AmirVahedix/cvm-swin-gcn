@@ -29,6 +29,9 @@ TRAIN_NPZ_DIR = "dataset/train/labels"
 VAL_IMG_DIR = "dataset/val/images"
 VAL_NPZ_DIR = "dataset/val/labels"
 
+TEST_IMG_DIR = "dataset/test/images"
+TEST_NPZ_DIR = "dataset/test/labels"
+
 BATCH_SIZE = 16
 EPOCHS = 100
 LR = 2e-4
@@ -373,12 +376,124 @@ def generate_and_log_training_charts(history: dict, log_to_mlflow: bool = True):
                 print(f"⚠️ Warning: Could not log training charts to MLflow: {ml_err}")
 
 
+def log_split_image_ids_to_mlflow(
+    val_img_dir: str = VAL_IMG_DIR,
+    test_img_dir: str = TEST_IMG_DIR,
+    output_dir: str | Path | None = None,
+) -> tuple[list[str], list[str]]:
+    """
+    Logs validation and test split image IDs as JSON array artifacts to the active MLflow run
+    before training begins. Checks existing JSON files first; falls back to scanning directories
+    if files don't exist. Guaranteed not to crash the training run if an MLflow or filesystem
+    anomaly occurs.
+    """
+    valid_exts = {".jpg", ".jpeg", ".png", ".bmp"}
+
+    dataset_dir = Path(output_dir) if output_dir else Path(val_img_dir).parent.parent
+    val_json_path = dataset_dir / "val_image_ids.json"
+    test_json_path = dataset_dir / "test_image_ids.json"
+
+    val_ids: list[str] = []
+    test_ids: list[str] = []
+
+    # 1. Resolve validation image IDs
+    if val_json_path.exists():
+        try:
+            with open(val_json_path, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+                if isinstance(loaded, list):
+                    val_ids = loaded
+        except Exception as e:
+            print(f"⚠️ Warning reading {val_json_path}: {e}")
+
+    # 2. Resolve test image IDs
+    if test_json_path.exists():
+        try:
+            with open(test_json_path, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+                if isinstance(loaded, list):
+                    test_ids = loaded
+        except Exception as e:
+            print(f"⚠️ Warning reading {test_json_path}: {e}")
+
+    # Fallback directory scan if either list is missing
+    if not val_ids or not test_ids:
+        try:
+            from src.data.preprocessing.split_dataset import load_label_studio_mapping
+            ls_mapping = load_label_studio_mapping()
+        except Exception:
+            ls_mapping = {}
+
+        def resolve_id(p: Path):
+            if p.stem in ls_mapping:
+                return ls_mapping[p.stem]
+            if p.name in ls_mapping:
+                return ls_mapping[p.name]
+            return int(p.stem) if p.stem.isdigit() else p.stem
+
+        if not val_ids:
+            val_path = Path(val_img_dir)
+            if val_path.exists():
+                val_ids = sorted(
+                    [resolve_id(f) for f in val_path.iterdir() if f.is_file() and f.suffix.lower() in valid_exts],
+                    key=lambda x: (0, x) if isinstance(x, int) else (1, str(x)),
+                )
+                try:
+                    val_json_path.parent.mkdir(parents=True, exist_ok=True)
+                    with open(val_json_path, "w", encoding="utf-8") as f:
+                        json.dump(val_ids, f, indent=2)
+                except Exception as e:
+                    print(f"⚠️ Warning writing {val_json_path}: {e}")
+
+        if not test_ids:
+            test_path = Path(test_img_dir)
+            if test_path.exists():
+                test_ids = sorted(
+                    [resolve_id(f) for f in test_path.iterdir() if f.is_file() and f.suffix.lower() in valid_exts],
+                    key=lambda x: (0, x) if isinstance(x, int) else (1, str(x)),
+                )
+                try:
+                    test_json_path.parent.mkdir(parents=True, exist_ok=True)
+                    with open(test_json_path, "w", encoding="utf-8") as f:
+                        json.dump(test_ids, f, indent=2)
+                except Exception as e:
+                    print(f"⚠️ Warning writing {test_json_path}: {e}")
+
+    # 3. Log to active MLflow run safely
+    try:
+        active_run = mlflow.active_run()
+        if active_run is not None:
+            if val_json_path.exists():
+                mlflow.log_artifact(str(val_json_path))
+            else:
+                mlflow.log_dict(val_ids, "val_image_ids.json")
+
+            if test_json_path.exists():
+                mlflow.log_artifact(str(test_json_path))
+            else:
+                mlflow.log_dict(test_ids, "test_image_ids.json")
+
+            print(
+                f"--> Successfully logged split image ID artifacts to MLflow: "
+                f"'val_image_ids.json' ({len(val_ids)} items), 'test_image_ids.json' ({len(test_ids)} items)"
+            )
+        else:
+            print("⚠️ Notice: No active MLflow run found; skipping split ID artifact logging.")
+    except Exception as ml_err:
+        print(f"⚠️ Warning: Could not log split image IDs to MLflow: {ml_err}")
+
+    return val_ids, test_ids
+
+
 def main(
     epochs: int = EPOCHS,
     batch_size: int = BATCH_SIZE,
     patience: int = EARLY_STOPPING_PATIENCE,
     lr: float = LR,
     llrd_decay_rate: float = LLRD_DECAY_RATE,
+    val_img_dir: str = VAL_IMG_DIR,
+    val_npz_dir: str = VAL_NPZ_DIR,
+    test_img_dir: str = TEST_IMG_DIR,
     experiment_name: str | None = None,
     tracking_uri: str | None = None,
     run_name: str | None = None,
@@ -422,8 +537,8 @@ def main(
     train_loader, val_loader = get_dataloaders(
         train_img_dir=TRAIN_IMG_DIR,
         train_npz_dir=TRAIN_NPZ_DIR,
-        val_img_dir=VAL_IMG_DIR,
-        val_npz_dir=VAL_NPZ_DIR,
+        val_img_dir=val_img_dir,
+        val_npz_dir=val_npz_dir,
         batch_size=batch_size,
     )
 
@@ -481,6 +596,12 @@ def main(
                 "graph_loss": "AnatomicalGraphLoss",
                 "device": str(device),
             }
+        )
+
+        # Log validation and test split image IDs before starting training
+        log_split_image_ids_to_mlflow(
+            val_img_dir=val_img_dir,
+            test_img_dir=test_img_dir,
         )
 
         history = {

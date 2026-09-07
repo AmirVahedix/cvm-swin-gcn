@@ -1,7 +1,9 @@
 import argparse
 import os
+import json
 import shutil
 from pathlib import Path
+from urllib.parse import urlparse, parse_qs
 from sklearn.model_selection import train_test_split
 from tqdm import tqdm
 
@@ -82,6 +84,65 @@ def copy_files(file_pairs, split_name, base_output_dir):
         shutil.copy2(label_path, label_dest)
 
 
+def load_label_studio_mapping(export_json_path=None) -> dict[str, int]:
+    """
+    Loads Label Studio JSON export and returns a mapping from image filename/stem to Label Studio task ID.
+    """
+    mapping = {}
+    candidate_paths = []
+    if export_json_path:
+        candidate_paths.append(Path(export_json_path))
+    candidate_paths.append(Path("data/exports/export.json"))
+    raw_exports_dir = Path("data/raw/exports")
+    if raw_exports_dir.exists():
+        raw_files = sorted(
+            raw_exports_dir.glob("*.json"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        candidate_paths.extend(raw_files)
+
+    found_path = None
+    for p in candidate_paths:
+        if p.exists() and p.is_file():
+            found_path = p
+            break
+
+    if not found_path:
+        return mapping
+
+    try:
+        with open(found_path, "r", encoding="utf-8") as f:
+            tasks = json.load(f)
+        for task in tasks:
+            task_id = task.get("id")
+            if task_id is None:
+                continue
+            raw_path = task.get("file_upload") or task.get("data", {}).get("img")
+            if not raw_path:
+                continue
+            parsed_url = urlparse(raw_path)
+            query_params = parse_qs(parsed_url.query)
+            if "d" in query_params:
+                filename = os.path.basename(query_params["d"][0])
+            else:
+                filename = os.path.basename(parsed_url.path)
+
+            if "-" in filename and len(filename.split("-")[0]) == 8:
+                clean_filename = "-".join(filename.split("-")[1:])
+            else:
+                clean_filename = filename
+
+            stem = Path(clean_filename).stem
+            mapping[clean_filename] = task_id
+            mapping[stem] = task_id
+        print(f"--> Loaded Label Studio task ID mapping for {len(mapping)//2} images from: {found_path}")
+    except Exception as e:
+        print(f"⚠️ Warning loading Label Studio mapping from {found_path}: {e}")
+
+    return mapping
+
+
 def split_dataset(
     images_dir="data/images",
     labels_dir="data/labels",
@@ -91,6 +152,7 @@ def split_dataset(
     test_ratio=0.15,
     seed=42,
     clean_output=True,
+    export_json_path="data/exports/export.json",
 ):
     """
     Creates train-val-test splits for image/label pairs and copies them into output_dir structure.
@@ -139,11 +201,47 @@ def split_dataset(
         "test": len(test_pairs),
     }
 
+    # Load Label Studio task ID mapping if available
+    ls_mapping = load_label_studio_mapping(export_json_path=export_json_path)
+
+    def resolve_image_id(file_path: str):
+        stem = Path(file_path).stem
+        name = Path(file_path).name
+        if stem in ls_mapping:
+            return ls_mapping[stem]
+        if name in ls_mapping:
+            return ls_mapping[name]
+        return int(stem) if stem.isdigit() else stem
+
+    # Extract and save validation and test image ID arrays (Label Studio IDs)
+    val_ids = sorted(
+        [resolve_image_id(p[0]) for p in val_pairs],
+        key=lambda x: (0, x) if isinstance(x, int) else (1, str(x)),
+    )
+    test_ids = sorted(
+        [resolve_image_id(p[0]) for p in test_pairs],
+        key=lambda x: (0, x) if isinstance(x, int) else (1, str(x)),
+    )
+
+    val_json_path = Path(output_dir) / "val_image_ids.json"
+    test_json_path = Path(output_dir) / "test_image_ids.json"
+
+    with open(val_json_path, "w", encoding="utf-8") as f:
+        json.dump(val_ids, f, indent=2)
+
+    with open(test_json_path, "w", encoding="utf-8") as f:
+        json.dump(test_ids, f, indent=2)
+
+    split_counts["val_ids"] = val_ids
+    split_counts["test_ids"] = test_ids
+    split_counts["val_ids_path"] = str(val_json_path)
+    split_counts["test_ids_path"] = str(test_json_path)
+
     print("\n--- Split Complete ---")
     print(f"Total dataset size: {len(paired_files)}")
     print(f"Train set: {split_counts['train']} pairs")
-    print(f"Validation set: {split_counts['val']} pairs")
-    print(f"Test set: {split_counts['test']} pairs")
+    print(f"Validation set: {split_counts['val']} pairs (Label Studio IDs saved to {val_json_path.name})")
+    print(f"Test set: {split_counts['test']} pairs (Label Studio IDs saved to {test_json_path.name})")
     print(f"Output stored in: {os.path.abspath(output_dir)}")
 
     return split_counts
@@ -201,6 +299,12 @@ def main():
         dest="clean_output",
         help="Do not clean target split directories prior to copying.",
     )
+    parser.add_argument(
+        "--export_json_path",
+        type=str,
+        default="data/exports/export.json",
+        help="Path to Label Studio JSON export file to map image filenames to Label Studio task IDs.",
+    )
 
     args = parser.parse_args()
 
@@ -213,6 +317,7 @@ def main():
         test_ratio=args.test_ratio,
         seed=args.seed,
         clean_output=args.clean_output,
+        export_json_path=args.export_json_path,
     )
 
 

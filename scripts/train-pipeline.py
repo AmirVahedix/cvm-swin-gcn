@@ -267,7 +267,7 @@ def main():
 
             # Step 4: Generate Data Splits
             print("\n[4/6] Executing: split_dataset()")
-            split_dataset(
+            split_info = split_dataset(
                 images_dir="data/images",
                 labels_dir="data/labels",
                 output_dir="./dataset",
@@ -276,6 +276,9 @@ def main():
                 test_ratio=0.15,
                 seed=42,
             )
+            val_cnt = len(split_info.get("val_ids", []))
+            test_cnt = len(split_info.get("test_ids", []))
+            print(f"--> Split artifacts ready: 'val_image_ids.json' ({val_cnt} IDs), 'test_image_ids.json' ({test_cnt} IDs)")
             print("-" * 20)
         else:
             print("\n[1-4/6] Skipping steps 1 to 4 (--train-only flag set).")
