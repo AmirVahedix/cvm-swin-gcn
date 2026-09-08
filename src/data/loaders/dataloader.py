@@ -20,7 +20,7 @@ def get_dataloaders(
     val_img_dir,
     val_npz_dir,
     batch_size=8,
-    img_size=640,
+    img_size=1024,
     num_workers=4,
 ):
     train_transform, val_transform = get_transforms(img_size=img_size)
@@ -65,7 +65,7 @@ def get_test_dataloader(
     test_img_dir=TEST_IMG_DIR,
     test_npz_dir=TEST_NPZ_DIR,
     batch_size=8,
-    img_size=640,
+    img_size=1024,
     num_workers=4,
 ):
     """

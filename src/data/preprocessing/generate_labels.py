@@ -18,7 +18,7 @@ def prepare_empty_directory(path: str) -> None:
     os.makedirs(path, exist_ok=True)
 
 
-def generate_gaussian_heatmap(shape, center, sigma=3.0):
+def generate_gaussian_heatmap(shape, center, sigma=4.0):
     h, w = shape
     x, y = center
     x_grid, y_grid = np.meshgrid(np.arange(w), np.arange(h))
@@ -81,17 +81,17 @@ def process_single_record(record, images_dir, output_dir, sigma):
             channel_idx = LANDMARK_CLASSES.index(label_name)
 
             # --- Heatmap calculations (Absolute pixels) ---
-            orig_w = item.get("original_width", w)
-            orig_h = item.get("original_height", h)
-            abs_x = int((val.get("x", 0) * orig_w) / 100.0)
-            abs_y = int((val.get("y", 0) * orig_h) / 100.0)
+            orig_w = float(item.get("original_width", w))
+            orig_h = float(item.get("original_height", h))
+            abs_x = (float(val.get("x", 0.0)) * orig_w) / 100.0
+            abs_y = (float(val.get("y", 0.0)) * orig_h) / 100.0
 
             heatmap_layer = generate_gaussian_heatmap((h, w), (abs_x, abs_y), sigma)
             heatmaps[channel_idx] = heatmap_layer.astype(np.float16)
 
             # --- GCN calculations (Normalized [0, 1] floats) ---
-            norm_x = val.get("x", 0) / 100.0
-            norm_y = val.get("y", 0) / 100.0
+            norm_x = float(val.get("x", 0.0)) / 100.0
+            norm_y = float(val.get("y", 0.0)) / 100.0
             coords[channel_idx] = [norm_x, norm_y]
 
             valid_keypoints += 1
@@ -111,7 +111,7 @@ def generate_labels(
     json_path: str = "data/exports/export.json",
     images_dir: str = "data/images",
     output_dir: str = "data/labels",
-    sigma: float = 3.0,
+    sigma: float = 4.0,
     max_workers: int | None = None,
 ) -> int:
     """
@@ -198,8 +198,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--sigma",
         type=float,
-        default=3.0,
-        help="Gaussian heatmap sigma parameter",
+        default=4.0,
+        help="Gaussian heatmap sigma parameter (default: 4.0)",
     )
     parser.add_argument(
         "--workers",

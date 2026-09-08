@@ -45,10 +45,10 @@ class WingLoss(nn.Module):
     Wing Loss for robust direct coordinate regression.
     Ref: Feng et al., "Wing Loss for Robust Facial Landmark Localisation with Convolutional Neural Networks", CVPR 2018.
     
-    When inputs are normalized in [0, 1], img_size (default 640.0) automatically converts 
+    When inputs are normalized in [0, 1], img_size (default 1024.0) automatically converts 
     pixel thresholds (omega=10.0 px, epsilon=2.0 px) into normalized scale [0, 1].
     """
-    def __init__(self, omega: float = 10.0, epsilon: float = 2.0, img_size: float = 640.0):
+    def __init__(self, omega: float = 10.0, epsilon: float = 2.0, img_size: float = 1024.0):
         super().__init__()
         # Calibrate pixel thresholds into normalized coordinate space [0, 1]
         self.omega = omega / img_size

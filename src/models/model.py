@@ -179,25 +179,26 @@ class CephalometricSwinGCN(nn.Module):
     3. Continuous landmark feature sampling via bilinear grid_sample on 160x160 pyramid features.
     4. Dynamic Multi-Head Graph Attention (GAT) residual offset head for anatomical graph alignment.
     """
-    def __init__(self, num_landmarks: int = 13, pretrained: bool = True, window_radius: int = 7):
+    def __init__(self, num_landmarks: int = 13, pretrained: bool = True, window_radius: int = 9, img_size: int = 1024):
         super().__init__()
         self.num_landmarks = num_landmarks
+        self.img_size = img_size
 
         self.backbone = timm.create_model(
             "swin_base_patch4_window7_224",
             pretrained=pretrained,
             features_only=True,
-            img_size=(640, 640),
+            img_size=(img_size, img_size),
         )
 
         # U-Net Pyramid Decoder Blocks
-        # Swin channels: Stage 0: 128 (160x160), Stage 1: 256 (80x80), Stage 2: 512 (40x40), Stage 3: 1024 (20x20)
-        self.up3 = UNetUpBlock(1024, 512, 512)  # 20x20 -> 40x40
-        self.up2 = UNetUpBlock(512, 256, 256)   # 40x40 -> 80x80
-        self.up1 = UNetUpBlock(256, 128, 128)   # 80x80 -> 160x160
-        self.up0 = UNetUpBlock(128, 0, 64)      # 160x160 -> 320x320
+        # Swin feature stages: Stage 0 (H/4), Stage 1 (H/8), Stage 2 (H/16), Stage 3 (H/32)
+        self.up3 = UNetUpBlock(1024, 512, 512)
+        self.up2 = UNetUpBlock(512, 256, 256)
+        self.up1 = UNetUpBlock(256, 128, 128)
+        self.up0 = UNetUpBlock(128, 0, 64)
         self.up_final = nn.Sequential(
-            nn.ConvTranspose2d(64, 32, kernel_size=4, stride=2, padding=1),  # 320x320 -> 640x640
+            nn.ConvTranspose2d(64, 32, kernel_size=4, stride=2, padding=1),
             nn.BatchNorm2d(32),
             nn.ReLU(inplace=True),
             nn.Conv2d(32, num_landmarks, kernel_size=1),
@@ -241,17 +242,21 @@ class CephalometricSwinGCN(nn.Module):
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         features = self.backbone(x)
         # Permute (B, H, W, C) -> (B, C, H, W) for timm Swin outputs
-        f0 = features[0].permute(0, 3, 1, 2).contiguous()  # 128, 160x160
-        f1 = features[1].permute(0, 3, 1, 2).contiguous()  # 256, 80x80
-        f2 = features[2].permute(0, 3, 1, 2).contiguous()  # 512, 40x40
-        f3 = features[3].permute(0, 3, 1, 2).contiguous()  # 1024, 20x20
+        f0 = features[0].permute(0, 3, 1, 2).contiguous()
+        f1 = features[1].permute(0, 3, 1, 2).contiguous()
+        f2 = features[2].permute(0, 3, 1, 2).contiguous()
+        f3 = features[3].permute(0, 3, 1, 2).contiguous()
 
         # U-Net Pyramid Decoding with Skip Connections
-        d3 = self.up3(f3, f2)  # 512, 40x40
-        d2 = self.up2(d3, f1)  # 256, 80x80
-        d1 = self.up1(d2, f0)  # 128, 160x160
-        d0 = self.up0(d1, None)  # 64, 320x320
-        heatmaps = self.up_final(d0)  # 13, 640x640
+        d3 = self.up3(f3, f2)
+        d2 = self.up2(d3, f1)
+        d1 = self.up1(d2, f0)
+        d0 = self.up0(d1, None)
+        heatmaps = self.up_final(d0)
+
+        # Safety interpolation if any feature pyramid edge padding requires exact match
+        if heatmaps.shape[-2:] != x.shape[-2:]:
+            heatmaps = F.interpolate(heatmaps, size=x.shape[-2:], mode="bilinear", align_corners=False)
 
         # Local-Window Soft-Argmax Sub-Pixel Coordinates directly from heatmaps
         coords = self.soft_argmax(heatmaps)  # [B, 13, 2] in [0, 1]

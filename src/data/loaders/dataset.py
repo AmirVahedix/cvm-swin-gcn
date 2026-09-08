@@ -5,7 +5,7 @@ import torch
 from torch.utils.data import Dataset
 
 
-def generate_gaussian_heatmaps(coords_px: np.ndarray, img_size: int = 640, sigma: float = 3.0) -> torch.Tensor:
+def generate_gaussian_heatmaps(coords_px: np.ndarray, img_size: int = 1024, sigma: float = 4.0) -> torch.Tensor:
     """
     Generates pristine [NUM_LANDMARKS, H, W] Gaussian heatmaps directly from
     ground-truth landmark pixel coordinates.
@@ -41,15 +41,15 @@ def generate_gaussian_heatmaps(coords_px: np.ndarray, img_size: int = 640, sigma
 
 class CVMDataset(Dataset):
     def __init__(
-        self, image_dir, npz_dir, image_filenames, transform=None, img_size=640, sigma=3.0
+        self, image_dir, npz_dir, image_filenames, transform=None, img_size=1024, sigma=4.0
     ):
         """
         Args:
-            image_dir (str): Path to directory containing images (640x640).
+            image_dir (str): Path to directory containing images.
             npz_dir (str): Path to directory containing .npz files.
             image_filenames (list): List of image filenames allocated for this split.
             transform (albumentations.Compose): Spatial and pixel augmentations.
-            img_size (int): Expected target pixel size (640).
+            img_size (int): Expected target pixel size (1024).
             sigma (float): Gaussian heatmap sigma in pixels.
         """
         self.image_dir = image_dir

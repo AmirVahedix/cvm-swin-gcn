@@ -67,14 +67,14 @@ def main():
     parser.add_argument(
         "--target-size",
         type=int,
-        default=640,
-        help="Target square image dimension (e.g. 640 for 640x640).",
+        default=1024,
+        help="Target square image dimension (default: 1024).",
     )
     parser.add_argument(
         "--sigma",
         type=float,
-        default=3.0,
-        help="Gaussian heatmap sigma parameter.",
+        default=4.0,
+        help="Gaussian heatmap sigma parameter (default: 4.0).",
     )
     parser.add_argument(
         "--eval-weights",
@@ -306,6 +306,7 @@ def main():
             batch_size=args.batch_size,
             lr=args.lr,
             llrd_decay_rate=args.llrd_decay_rate,
+            img_size=args.target_size,
             experiment_name=args.mlflow_experiment_name,
             tracking_uri=args.mlflow_tracking_uri,
             run_name=args.mlflow_run_name,

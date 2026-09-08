@@ -1301,14 +1301,14 @@ def main():
     parser.add_argument(
         "--target-size",
         type=int,
-        default=640,
-        help="Target square image dimension for preprocessing (default: 640).",
+        default=1024,
+        help="Target square image dimension for preprocessing (default: 1024).",
     )
     parser.add_argument(
         "--sigma",
         type=float,
-        default=3.0,
-        help="Gaussian heatmap sigma parameter (default: 3.0).",
+        default=4.0,
+        help="Gaussian heatmap sigma parameter (default: 4.0).",
     )
     parser.add_argument(
         "--raw-exports-dir",

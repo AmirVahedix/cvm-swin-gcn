@@ -3,8 +3,10 @@ import sys
 import time
 import json
 import tempfile
+from datetime import datetime
 from pathlib import Path
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -17,7 +19,7 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from src.data import get_dataloaders, NUM_LANDMARKS
+from src.data import get_dataloaders, NUM_LANDMARKS, LANDMARK_CLASSES
 from src.models.model import CephalometricSwinGCN
 from src.models.losses import AdaptiveWingLoss, WingLoss, AnatomicalGraphLoss
 from src.eval import run_evaluation
@@ -170,6 +172,105 @@ def train_epoch(
     return epoch_loss / len(dataloader) if len(dataloader) > 0 else 0.0
 
 
+def compute_per_landmark_metrics(
+    pred_coords: torch.Tensor | np.ndarray,
+    gt_coords: torch.Tensor | np.ndarray,
+    img_size: int = 1024,
+) -> list[dict]:
+    """
+    Computes detailed per-landmark performance metrics.
+
+    Args:
+        pred_coords: Array or Tensor of shape (N, NUM_LANDMARKS, 2) in normalized [0, 1] range.
+        gt_coords: Array or Tensor of shape (N, NUM_LANDMARKS, 2) in normalized [0, 1] range (-1 for missing).
+        img_size: Target square image dimension in pixels (default 1024).
+
+    Returns:
+        List of dicts with performance metrics for each landmark.
+    """
+    if isinstance(pred_coords, torch.Tensor):
+        pred_coords = pred_coords.detach().cpu().numpy()
+    if isinstance(gt_coords, torch.Tensor):
+        gt_coords = gt_coords.detach().cpu().numpy()
+
+    pred_px = pred_coords * img_size
+    gt_px = gt_coords * img_size
+
+    # Valid mask for GT coordinates (excluding missing landmarks marked with negative coordinates)
+    valid_mask = (gt_coords[:, :, 0] >= 0) & (gt_coords[:, :, 1] >= 0)
+
+    dx = pred_px[:, :, 0] - gt_px[:, :, 0]
+    dy = pred_px[:, :, 1] - gt_px[:, :, 1]
+    abs_dx = np.abs(dx)
+    abs_dy = np.abs(dy)
+    radial_errors = np.sqrt(dx**2 + dy**2)
+
+    num_lms = pred_coords.shape[1]
+    landmark_metrics = []
+
+    for i in range(num_lms):
+        name = LANDMARK_CLASSES[i] if i < len(LANDMARK_CLASSES) else f"Landmark_{i}"
+        l_mask = valid_mask[:, i]
+        count = int(np.sum(l_mask))
+
+        if count == 0:
+            landmark_metrics.append({
+                "id": i,
+                "name": name,
+                "count": 0,
+                "mae_px": 0.0,
+                "rmse_px": 0.0,
+                "mre_px": 0.0,
+                "medre_px": 0.0,
+                "sdre_px": 0.0,
+                "min_error_px": 0.0,
+                "max_error_px": 0.0,
+                "sdr_2.0px": 0.0,
+                "sdr_2.5px": 0.0,
+                "sdr_3.0px": 0.0,
+                "sdr_4.0px": 0.0,
+            })
+            continue
+
+        l_radial = radial_errors[:, i][l_mask]
+        l_dx = dx[:, i][l_mask]
+        l_dy = dy[:, i][l_mask]
+        l_abs_dx = abs_dx[:, i][l_mask]
+        l_abs_dy = abs_dy[:, i][l_mask]
+
+        l_mae = float(np.mean((l_abs_dx + l_abs_dy) / 2.0))
+        l_rmse = float(np.sqrt(np.mean(l_dx**2 + l_dy**2)))
+        l_mre = float(np.mean(l_radial))
+        l_medre = float(np.median(l_radial))
+        l_sdre = float(np.std(l_radial)) if count > 1 else 0.0
+        l_min = float(np.min(l_radial))
+        l_max = float(np.max(l_radial))
+
+        l_sdr2_0 = float(np.mean(l_radial <= 2.0) * 100.0)
+        l_sdr2_5 = float(np.mean(l_radial <= 2.5) * 100.0)
+        l_sdr3_0 = float(np.mean(l_radial <= 3.0) * 100.0)
+        l_sdr4_0 = float(np.mean(l_radial <= 4.0) * 100.0)
+
+        landmark_metrics.append({
+            "id": i,
+            "name": name,
+            "count": count,
+            "mae_px": l_mae,
+            "rmse_px": l_rmse,
+            "mre_px": l_mre,
+            "medre_px": l_medre,
+            "sdre_px": l_sdre,
+            "min_error_px": l_min,
+            "max_error_px": l_max,
+            "sdr_2.0px": l_sdr2_0,
+            "sdr_2.5px": l_sdr2_5,
+            "sdr_3.0px": l_sdr3_0,
+            "sdr_4.0px": l_sdr4_0,
+        })
+
+    return landmark_metrics
+
+
 def validate_epoch(
     model,
     dataloader,
@@ -181,13 +282,15 @@ def validate_epoch(
     lambda_cd,
     lambda_graph,
     device,
-    img_size=640,
+    img_size=1024,
     epoch: int = 1,
     epochs: int = 1,
 ):
     model.eval()
     epoch_loss = 0.0
     all_radial_errors = []
+    all_pred_coords = []
+    all_gt_coords = []
 
     pbar = tqdm(
         dataloader,
@@ -214,6 +317,8 @@ def validate_epoch(
             gt_px = gt_coords * img_size
             radial_errors = torch.sqrt(torch.sum((pred_px - gt_px) ** 2, dim=-1))  # [B, N]
             all_radial_errors.append(radial_errors.cpu())
+            all_pred_coords.append(pred_coords.cpu())
+            all_gt_coords.append(gt_coords.cpu())
 
             pbar.set_postfix(loss=f"{epoch_loss / step:.4f}")
 
@@ -221,14 +326,20 @@ def validate_epoch(
 
     if len(all_radial_errors) > 0:
         all_errors = torch.cat(all_radial_errors, dim=0)  # [Total_Samples, N]
+        all_preds = torch.cat(all_pred_coords, dim=0)
+        all_gts = torch.cat(all_gt_coords, dim=0)
+
         val_mae = all_errors.mean().item()
         val_rmse = torch.sqrt((all_errors ** 2).mean()).item()
         sdr_2_0 = (all_errors <= 2.0).float().mean().item() * 100.0
         sdr_2_5 = (all_errors <= 2.5).float().mean().item() * 100.0
         sdr_3_0 = (all_errors <= 3.0).float().mean().item() * 100.0
         sdr_4_0 = (all_errors <= 4.0).float().mean().item() * 100.0
+
+        per_landmark_metrics = compute_per_landmark_metrics(all_preds, all_gts, img_size=img_size)
     else:
         val_mae, val_rmse, sdr_2_0, sdr_2_5, sdr_3_0, sdr_4_0 = 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+        per_landmark_metrics = []
 
     metrics = {
         "mae": val_mae,
@@ -237,6 +348,7 @@ def validate_epoch(
         "sdr_2_5": sdr_2_5,
         "sdr_3_0": sdr_3_0,
         "sdr_4_0": sdr_4_0,
+        "per_landmark": per_landmark_metrics,
     }
 
     return val_loss, metrics
@@ -490,6 +602,66 @@ def log_split_image_ids_to_mlflow(
     return val_ids, test_ids
 
 
+def log_best_per_landmark_metrics_to_mlflow(
+    landmark_metrics: list[dict],
+    epoch: int,
+    metrics: dict,
+    best_val_sdr: float,
+    best_val_mae: float,
+    best_val_loss: float,
+    save_dir: str | Path = "./artifacts",
+) -> dict:
+    """
+    Saves and logs a JSON of per-landmark performance metrics to MLflow
+    whenever a new best validation performance is achieved during training.
+
+    Guaranteed not to crash training if an MLflow or filesystem exception occurs.
+    """
+    save_dir = Path(save_dir)
+    save_dir.mkdir(parents=True, exist_ok=True)
+    json_path = save_dir / "best_per_landmark_metrics.json"
+
+    export_payload = {
+        "epoch": int(epoch),
+        "step": int(epoch),
+        "timestamp": datetime.now().isoformat(),
+        "summary": {
+            "best_val_loss": float(best_val_loss),
+            "best_val_mae": float(best_val_mae),
+            "best_val_rmse": float(metrics.get("rmse", 0.0)),
+            "best_val_sdr_2_0": float(metrics.get("sdr_2_0", 0.0)),
+            "best_val_sdr_2_5": float(best_val_sdr),
+            "best_val_sdr_3_0": float(metrics.get("sdr_3_0", 0.0)),
+            "best_val_sdr_4_0": float(metrics.get("sdr_4_0", 0.0)),
+        },
+        "landmarks": landmark_metrics,
+        "by_landmark_name": {lm["name"]: lm for lm in landmark_metrics},
+    }
+
+    # 1. Save local JSON file
+    try:
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(export_payload, f, indent=4)
+        print(f"--> Saved best per-landmark metrics JSON locally to '{json_path}'")
+    except Exception as io_err:
+        print(f"⚠️ Warning: Could not write {json_path}: {io_err}")
+
+    # 2. Log to active MLflow run safely
+    try:
+        active_run = mlflow.active_run()
+        if active_run is not None:
+            mlflow.log_dict(export_payload, "best_per_landmark_metrics.json")
+            if json_path.exists():
+                mlflow.log_artifact(str(json_path), artifact_path="checkpoints")
+            print(f"--> Successfully logged per-landmark metrics JSON to MLflow for best epoch {epoch}")
+        else:
+            print("⚠️ Notice: No active MLflow run found; skipping MLflow per-landmark metrics logging.")
+    except Exception as ml_err:
+        print(f"⚠️ Warning: Could not log per-landmark metrics JSON to MLflow: {ml_err}")
+
+    return export_payload
+
+
 def main(
     epochs: int = EPOCHS,
     batch_size: int = BATCH_SIZE,
@@ -499,6 +671,7 @@ def main(
     val_img_dir: str = VAL_IMG_DIR,
     val_npz_dir: str = VAL_NPZ_DIR,
     test_img_dir: str = TEST_IMG_DIR,
+    img_size: int = 1024,
     experiment_name: str | None = None,
     tracking_uri: str | None = None,
     run_name: str | None = None,
@@ -545,9 +718,10 @@ def main(
         val_img_dir=val_img_dir,
         val_npz_dir=val_npz_dir,
         batch_size=batch_size,
+        img_size=img_size,
     )
 
-    model = CephalometricSwinGCN(num_landmarks=NUM_LANDMARKS).to(device)
+    model = CephalometricSwinGCN(num_landmarks=NUM_LANDMARKS, img_size=img_size).to(device)
 
     # Layer-wise Learning Rate Decay (LLRD) Parameter Grouping
     param_groups = get_llrd_param_groups(
@@ -568,7 +742,7 @@ def main(
 
     # Losses & Landmark Weights
     awl_loss = AdaptiveWingLoss().to(device)
-    wing_loss = WingLoss(img_size=640.0).to(device)
+    wing_loss = WingLoss(img_size=float(img_size)).to(device)
     graph_loss = AnatomicalGraphLoss(model.adj_matrix).to(device)
     landmark_weights = get_landmark_weights(device)
 
@@ -592,7 +766,7 @@ def main(
                 "lambda_graph": LAMBDA_GRAPH,
                 "early_stopping_patience": patience,
                 "save_path": SAVE_PATH,
-                "img_size": 640,
+                "img_size": img_size,
                 "num_landmarks": NUM_LANDMARKS,
                 "optimizer": "AdamW-LLRD",
                 "scheduler": "CosineAnnealingWithWarmup",
@@ -653,7 +827,7 @@ def main(
                 LAMBDA_CD,
                 LAMBDA_GRAPH,
                 device,
-                img_size=640,
+                img_size=img_size,
                 epoch=epoch + 1,
                 epochs=epochs,
             )
@@ -746,6 +920,18 @@ def main(
                     },
                     step=epoch + 1,
                 )
+
+                # Log per-landmark performance metrics JSON to MLflow
+                if "per_landmark" in metrics and metrics["per_landmark"]:
+                    log_best_per_landmark_metrics_to_mlflow(
+                        landmark_metrics=metrics["per_landmark"],
+                        epoch=epoch + 1,
+                        metrics=metrics,
+                        best_val_sdr=best_val_sdr,
+                        best_val_mae=best_val_mae,
+                        best_val_loss=best_val_loss,
+                        save_dir=os.path.dirname(SAVE_PATH),
+                    )
             else:
                 patience_counter += 1
                 if patience_counter % 5 == 0:
@@ -793,7 +979,7 @@ def main(
                         test_img_dir=test_img_dir,
                         test_npz_dir=test_npz_dir,
                         output_dir="evaluation",
-                        img_size=640,
+                        img_size=img_size,
                         log_to_mlflow=False,
                     )
 
@@ -858,6 +1044,10 @@ def main(
 
             if os.path.exists(history_json_path):
                 ftp_json_files.append(history_json_path)
+
+            best_lm_json = os.path.join(os.path.dirname(SAVE_PATH), "best_per_landmark_metrics.json")
+            if os.path.exists(best_lm_json):
+                ftp_json_files.append(best_lm_json)
 
             if ftp_json_files:
                 print(f"\n--> Uploading {len(ftp_json_files)} .json metrics file(s) to FTP server first...")
@@ -955,6 +1145,12 @@ if __name__ == "__main__":
         action="store_true",
         help="Also save optimizer state dict in checkpoint (increases file size from ~420MB to ~1.5GB, useful only if resuming training)",
     )
+    parser.add_argument(
+        "--img-size",
+        type=int,
+        default=1024,
+        help="Input image resolution in pixels (default: 1024)",
+    )
 
     args = parser.parse_args()
     main(
@@ -963,6 +1159,7 @@ if __name__ == "__main__":
         patience=args.patience,
         lr=args.lr,
         llrd_decay_rate=args.llrd_decay_rate,
+        img_size=args.img_size,
         experiment_name=args.experiment_name,
         tracking_uri=args.tracking_uri,
         run_name=args.run_name,

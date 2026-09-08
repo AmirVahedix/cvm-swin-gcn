@@ -112,7 +112,7 @@ def draw_legend_box(vis_img: np.ndarray, num_landmarks: int):
         )
 
 
-def load_model(weights_path: str, device: torch.device) -> torch.nn.Module:
+def load_model(weights_path: str, device: torch.device, img_size: int = 1024) -> torch.nn.Module:
     """
     Instantiates CephalometricSwinGCN and loads checkpoint weights safely.
     """
@@ -120,7 +120,7 @@ def load_model(weights_path: str, device: torch.device) -> torch.nn.Module:
     if not os.path.exists(weights_path):
         raise FileNotFoundError(f"Weights file not found at '{weights_path}'")
 
-    model = CephalometricSwinGCN(num_landmarks=NUM_LANDMARKS, pretrained=False)
+    model = CephalometricSwinGCN(num_landmarks=NUM_LANDMARKS, pretrained=False, img_size=img_size)
     checkpoint = torch.load(weights_path, map_location=device)
 
     if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
@@ -148,7 +148,7 @@ def load_model(weights_path: str, device: torch.device) -> torch.nn.Module:
 def compute_metrics(
     pred_coords: np.ndarray,
     gt_coords: np.ndarray,
-    img_size: int = 640,
+    img_size: int = 1024,
     threshold_px: float = 2.5,
 ) -> tuple[dict, list[dict]]:
     """
@@ -493,7 +493,7 @@ def draw_landmarks_on_image(
     image: np.ndarray,
     pred_coords: np.ndarray,
     gt_coords: np.ndarray | None = None,
-    img_size: int = 640,
+    img_size: int = 1024,
 ) -> np.ndarray:
     """
     Renders predicted landmarks (and optionally ground truth) onto an RGB image.
@@ -540,7 +540,7 @@ def visualize_batch_and_save(
     device: torch.device,
     save_dir: Path,
     num_samples: int = 8,
-    img_size: int = 640,
+    img_size: int = 1024,
     test_img_dir: str = "dataset/test/images",
 ):
     """
@@ -549,48 +549,41 @@ def visualize_batch_and_save(
     save_dir.mkdir(parents=True, exist_ok=True)
     saved_count = 0
 
+    pbar = tqdm(test_loader, desc="Generating Visualizations", leave=False)
     with torch.no_grad():
-        for batch in test_loader:
-            images_tensor = batch["image"].to(device)
-            gt_coords_batch = batch["coords"].cpu().numpy()
-            filenames = batch.get("filename", [f"sample_{i}.png" for i in range(len(images_tensor))])
+        for batch in pbar:
+            images = batch["image"].to(device)
+            gt_coords = batch["coords"].cpu().numpy()  # (B, 13, 2)
+            filenames = batch["filename"]
 
-            _, pred_coords_batch = model(images_tensor)
-            pred_coords_batch = pred_coords_batch.cpu().numpy()
+            _, pred_coords = model(images)
+            pred_coords = pred_coords.cpu().numpy()  # (B, 13, 2)
 
-            for idx in range(len(images_tensor)):
+            for i in range(len(filenames)):
                 if saved_count >= num_samples:
-                    break
+                    return
 
-                img_name = filenames[idx] if isinstance(filenames, (list, tuple)) else filenames
-                raw_img_path = os.path.join(test_img_dir, img_name)
-
-                if os.path.exists(raw_img_path):
-                    image_bgr = cv2.imread(raw_img_path)
+                fname = filenames[i]
+                orig_img_path = Path(test_img_dir) / fname
+                if orig_img_path.exists():
+                    raw_bgr = cv2.imread(str(orig_img_path))
+                    raw_rgb = cv2.cvtColor(raw_bgr, cv2.COLOR_BGR2RGB)
                 else:
-                    # Fallback to un-normalizing tensor image
-                    img_np = images_tensor[idx].cpu().numpy().transpose(1, 2, 0)
-                    if img_np.max() <= 1.0:
-                        img_np = (img_np * 255.0).astype(np.uint8)
-                    else:
-                        img_np = img_np.astype(np.uint8)
-                    image_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
+                    raw_tensor = images[i].cpu().permute(1, 2, 0).numpy()
+                    raw_rgb = ((raw_tensor - raw_tensor.min()) / (raw_tensor.max() - raw_tensor.min() + 1e-8) * 255).astype(np.uint8)
 
-                rendered_img = draw_landmarks_on_image(
-                    image=image_bgr,
-                    pred_coords=pred_coords_batch[idx],
-                    gt_coords=gt_coords_batch[idx],
+                # Overlay landmarks
+                vis_rgb = draw_landmarks_on_image(
+                    image=raw_rgb,
+                    pred_coords=pred_coords[i],
+                    gt_coords=gt_coords[i],
                     img_size=img_size,
                 )
 
-                out_path = save_dir / f"eval_{saved_count + 1:03d}_{img_name}"
-                cv2.imwrite(str(out_path), rendered_img)
+                out_path = save_dir / f"vis_{saved_count + 1:02d}_{Path(fname).stem}.png"
+                vis_bgr = cv2.cvtColor(vis_rgb, cv2.COLOR_RGB2BGR)
+                cv2.imwrite(str(out_path), vis_bgr)
                 saved_count += 1
-
-            if saved_count >= num_samples:
-                break
-
-    print(f"--> Saved {saved_count} visualization PNGs to '{save_dir}'")
 
 
 def run_evaluation(
@@ -600,7 +593,7 @@ def run_evaluation(
     output_dir: str = "evaluation",
     run_name: str | None = None,
     batch_size: int = 8,
-    img_size: int = 640,
+    img_size: int = 1024,
     num_samples: int = 8,
     threshold_px: float = 2.5,
     device_str: str | None = None,
@@ -655,7 +648,7 @@ def run_evaluation(
     vis_folder = run_folder / "visualizations"
 
     # 2. Load model & test dataset
-    model = load_model(weights_path, device)
+    model = load_model(weights_path, device, img_size=img_size)
     test_loader = get_test_dataloader(
         test_img_dir=test_img_dir,
         test_npz_dir=test_npz_dir,
@@ -836,8 +829,8 @@ def main():
     parser.add_argument(
         "--img-size",
         type=int,
-        default=640,
-        help="Target image dimension in pixels.",
+        default=1024,
+        help="Target image dimension in pixels (default: 1024).",
     )
     parser.add_argument(
         "--num-samples",
