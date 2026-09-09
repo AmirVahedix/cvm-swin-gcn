@@ -151,6 +151,41 @@ class TestAMPTraining(unittest.TestCase):
         self.assertTrue(args_custom.compile_model)
         self.assertEqual(args_custom.batch_size, 16)
 
+    def test_soft_argmax_2d_differentiability(self):
+        """Verify that SoftArgmax2D produces non-zero gradients across the full spatial heatmap."""
+        from src.models.model import SoftArgmax2D
+
+        layer = SoftArgmax2D(num_landmarks=3, init_temperature=0.1)
+        # Heatmap input with gradient tracking
+        heatmaps = torch.randn(2, 3, 32, 32, requires_grad=True)
+        coords = layer(heatmaps)
+
+        self.assertEqual(coords.shape, (2, 3, 2))
+        self.assertTrue((coords >= 0.0).all() and (coords <= 1.0).all())
+
+        # Backpropagate arbitrary target coordinate loss
+        target = torch.tensor([[[0.2, 0.8], [0.5, 0.5], [0.9, 0.1]]]).expand(2, -1, -1)
+        loss = torch.sum((coords - target) ** 2)
+        loss.backward()
+
+        # Ensure non-zero gradients flowed back to heatmaps
+        self.assertIsNotNone(heatmaps.grad)
+        self.assertTrue((heatmaps.grad != 0.0).any())
+        self.assertFalse(torch.isnan(heatmaps.grad).any())
+
+    def test_coord_loss_warmup_factor(self):
+        """Verify get_coord_loss_warmup_factor schedules lambda_cd from 0.0 to 1.0."""
+        from src.train import get_coord_loss_warmup_factor
+
+        self.assertAlmostEqual(get_coord_loss_warmup_factor(1, 5), 0.0)
+        self.assertAlmostEqual(get_coord_loss_warmup_factor(2, 5), 0.25)
+        self.assertAlmostEqual(get_coord_loss_warmup_factor(3, 5), 0.50)
+        self.assertAlmostEqual(get_coord_loss_warmup_factor(4, 5), 0.75)
+        self.assertAlmostEqual(get_coord_loss_warmup_factor(5, 5), 1.0)
+        self.assertAlmostEqual(get_coord_loss_warmup_factor(6, 5), 1.0)
+        self.assertAlmostEqual(get_coord_loss_warmup_factor(10, 5), 1.0)
+        self.assertAlmostEqual(get_coord_loss_warmup_factor(1, 0), 1.0)
+
 
 if __name__ == "__main__":
     unittest.main()

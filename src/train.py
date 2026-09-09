@@ -36,13 +36,26 @@ TEST_NPZ_DIR = "dataset/test/labels"
 
 BATCH_SIZE = 8
 EPOCHS = 100
-LR = float(os.getenv("LEARNING_RATE", 5e-5))
+LR = float(os.getenv("LEARNING_RATE", 1e-4))
 LLRD_DECAY_RATE = float(os.getenv("LLRD_DECAY_RATE", 0.8))
 LAMBDA_HM = 1.0
 LAMBDA_CD = 5.0
 LAMBDA_GRAPH = 1.0
 EARLY_STOPPING_PATIENCE = 40
+WARMUP_COORD_EPOCHS = 5
 SAVE_PATH = "./artifacts/best.pth"
+
+
+def get_coord_loss_warmup_factor(epoch: int, warmup_epochs: int) -> float:
+    """
+    Ramps coordinate and graph loss weights linearly from 0.0 to 1.0 across warmup_epochs.
+    Allows heatmaps to establish coarse localization during early epochs before
+    activating strong direct coordinate and graph structural losses.
+    """
+    if warmup_epochs <= 0:
+        return 1.0
+    # epoch is 1-indexed: epoch 1 -> 0.0, epoch warmup_epochs -> 1.0
+    return float(min(1.0, max(0.0, (epoch - 1) / max(1, warmup_epochs - 1))))
 
 
 def get_cosine_schedule_with_warmup(optimizer, warmup_epochs: int, total_epochs: int, min_lr_ratio: float = 0.01):
@@ -345,12 +358,18 @@ def validate_epoch(
         all_preds = torch.cat(all_pred_coords, dim=0)
         all_gts = torch.cat(all_gt_coords, dim=0)
 
-        val_mae = all_errors.mean().item()
-        val_rmse = torch.sqrt((all_errors ** 2).mean()).item()
-        sdr_2_0 = (all_errors <= 2.0).float().mean().item() * 100.0
-        sdr_2_5 = (all_errors <= 2.5).float().mean().item() * 100.0
-        sdr_3_0 = (all_errors <= 3.0).float().mean().item() * 100.0
-        sdr_4_0 = (all_errors <= 4.0).float().mean().item() * 100.0
+        # Valid mask for GT coordinates (excluding missing landmarks marked with negative coordinates)
+        valid_mask = (all_gts[:, :, 0] >= 0) & (all_gts[:, :, 1] >= 0)
+        if valid_mask.any():
+            valid_errors = all_errors[valid_mask]
+            val_mae = valid_errors.mean().item()
+            val_rmse = torch.sqrt((valid_errors ** 2).mean()).item()
+            sdr_2_0 = (valid_errors <= 2.0).float().mean().item() * 100.0
+            sdr_2_5 = (valid_errors <= 2.5).float().mean().item() * 100.0
+            sdr_3_0 = (valid_errors <= 3.0).float().mean().item() * 100.0
+            sdr_4_0 = (valid_errors <= 4.0).float().mean().item() * 100.0
+        else:
+            val_mae, val_rmse, sdr_2_0, sdr_2_5, sdr_3_0, sdr_4_0 = 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
 
         per_landmark_metrics = compute_per_landmark_metrics(all_preds, all_gts, img_size=img_size)
     else:
@@ -704,6 +723,7 @@ def main(
     save_optimizer: bool = False,
     use_amp: bool = True,
     compile_model: bool = False,
+    warmup_coord_epochs: int = WARMUP_COORD_EPOCHS,
 ):
     load_dotenv()
 
@@ -801,6 +821,7 @@ def main(
                 "lambda_heatmap": LAMBDA_HM,
                 "lambda_coord": LAMBDA_CD,
                 "lambda_graph": LAMBDA_GRAPH,
+                "warmup_coord_epochs": warmup_coord_epochs,
                 "early_stopping_patience": patience,
                 "save_path": SAVE_PATH,
                 "img_size": img_size,
@@ -839,6 +860,11 @@ def main(
         for epoch in range(epochs):
             start_time = time.time()
 
+            # Dynamic coordinate & graph loss warmup factor
+            coord_warmup_factor = get_coord_loss_warmup_factor(epoch + 1, warmup_coord_epochs)
+            effective_lambda_cd = LAMBDA_CD * coord_warmup_factor
+            effective_lambda_graph = LAMBDA_GRAPH * coord_warmup_factor
+
             train_loss = train_epoch(
                 model,
                 train_loader,
@@ -848,8 +874,8 @@ def main(
                 graph_loss,
                 landmark_weights,
                 LAMBDA_HM,
-                LAMBDA_CD,
-                LAMBDA_GRAPH,
+                effective_lambda_cd,
+                effective_lambda_graph,
                 device,
                 epoch=epoch + 1,
                 epochs=epochs,
@@ -865,8 +891,8 @@ def main(
                 graph_loss,
                 landmark_weights,
                 LAMBDA_HM,
-                LAMBDA_CD,
-                LAMBDA_GRAPH,
+                effective_lambda_cd,
+                effective_lambda_graph,
                 device,
                 img_size=img_size,
                 epoch=epoch + 1,
@@ -906,6 +932,8 @@ def main(
                     "val_sdr_4_0": metrics["sdr_4_0"],
                     "learning_rate": current_lr,
                     "epoch_time_seconds": epoch_time,
+                    "lambda_coord": effective_lambda_cd,
+                    "lambda_graph": effective_lambda_graph,
                 },
                 step=epoch + 1,
             )
@@ -914,7 +942,8 @@ def main(
                 f"Epoch [{epoch + 1}/{epochs}] | Time: {epoch_time:.2f}s | "
                 f"Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | "
                 f"MAE: {metrics['mae']:.2f} px | RMSE: {metrics['rmse']:.2f} px | "
-                f"SDR@2.0px: {metrics['sdr_2_0']:.1f}% | SDR@2.5px: {metrics['sdr_2_5']:.1f}%"
+                f"SDR@2.0px: {metrics['sdr_2_0']:.1f}% | SDR@2.5px: {metrics['sdr_2_5']:.1f}% | "
+                f"λ_cd: {effective_lambda_cd:.2f}"
             )
 
             # Checkpoint Saving & Early Stopping based on SDR & MAE
@@ -1219,6 +1248,12 @@ if __name__ == "__main__":
         action="store_false",
         help="Disable PyTorch model compilation and force eager mode",
     )
+    parser.add_argument(
+        "--warmup-coord-epochs",
+        type=int,
+        default=WARMUP_COORD_EPOCHS,
+        help=f"Number of initial epochs to linearly ramp coordinate/graph losses from 0.0 to full weight (default: {WARMUP_COORD_EPOCHS})",
+    )
 
     args = parser.parse_args()
     main(
@@ -1244,5 +1279,6 @@ if __name__ == "__main__":
         save_optimizer=args.save_optimizer,
         use_amp=args.use_amp,
         compile_model=args.compile_model,
+        warmup_coord_epochs=args.warmup_coord_epochs,
     )
 

@@ -73,30 +73,20 @@ class GraphAttentionLayer(nn.Module):
         return out
 
 
-class LocalWindowSoftArgmax2D(nn.Module):
+class SoftArgmax2D(nn.Module):
     """
-    Differentiable Local-Window Soft-Argmax 2D coordinate extraction.
-    Computes spatial argmax to locate the integer peak, extracts a localized
-    (2R+1) x (2R+1) neighborhood window around the peak, and performs temperature-scaled
-    expectation within the window.
-    
-    This eliminates 100% of global background noise/bias on large spatial heatmaps (640x640)
-    while providing high-precision sub-pixel differentiability.
+    Differentiable 2D Soft-Argmax coordinate regression layer.
+    Computes spatial expectation over normalized coordinate grids [0, 1] x [0, 1]
+    weighted by a temperature-scaled spatial softmax over the full heatmap H x W.
+    Guarantees global differentiability so coordinate losses (WingLoss, GraphLoss)
+    can pull heatmap peaks across the entire image space.
     """
-    def __init__(self, num_landmarks: int = 13, radius: int = 7, init_temperature: float = 0.1):
+    def __init__(self, num_landmarks: int = 13, init_temperature: float = 0.1):
         super().__init__()
         import math
         self.num_landmarks = num_landmarks
-        self.radius = radius
         init_log_temp = torch.full((1, num_landmarks, 1, 1), math.log(init_temperature))
         self.log_temperature = nn.Parameter(init_log_temp)
-
-        # Coordinate grid offsets relative to the window center [-R, R]
-        dy = torch.arange(-radius, radius + 1, dtype=torch.float32)
-        dx = torch.arange(-radius, radius + 1, dtype=torch.float32)
-        grid_y, grid_x = torch.meshgrid(dy, dx, indexing="ij")
-        self.register_buffer("grid_x", grid_x.contiguous().clone().unsqueeze(0).unsqueeze(0), persistent=False)
-        self.register_buffer("grid_y", grid_y.contiguous().clone().unsqueeze(0).unsqueeze(0), persistent=False)
 
     def forward(self, heatmaps: torch.Tensor) -> torch.Tensor:
         """
@@ -106,43 +96,29 @@ class LocalWindowSoftArgmax2D(nn.Module):
             coords: Tensor of shape [B, N, 2] in normalized scale [0, 1]
         """
         B, N, H, W = heatmaps.shape
-        R = self.radius
+        device = heatmaps.device
 
-        # 1. Integer Peak Location via Spatial Argmax
-        flat_hm = heatmaps.view(B, N, -1)
-        max_idx = torch.argmax(flat_hm, dim=-1)  # [B, N]
-        py = max_idx // W                        # [B, N]
-        px = max_idx % W                         # [B, N]
+        # Temperature scaling with numerical stability clamp
+        temperature = torch.exp(self.log_temperature).clamp(min=1e-3, max=1.0)
+        scaled_hm = heatmaps / temperature
 
-        # 2. Extract localized patches with replicate padding to safely handle image boundaries
-        padded = F.pad(heatmaps, (R, R, R, R), mode="replicate")  # [B, N, H + 2R, W + 2R]
-        W_pad = W + 2 * R
+        # Spatial softmax across the full (H, W) spatial domain
+        flat_hm = scaled_hm.view(B, N, -1)
+        softmax_hm = F.softmax(flat_hm, dim=-1).view(B, N, H, W)
 
-        cy = py + R  # Center Y in padded coordinate system
-        cx = px + R  # Center X in padded coordinate system
+        # Build coordinate grid in [0, 1] normalized space matching input device and dtype
+        grid_y, grid_x = torch.meshgrid(
+            torch.linspace(0.0, 1.0, H, device=device, dtype=heatmaps.dtype),
+            torch.linspace(0.0, 1.0, W, device=device, dtype=heatmaps.dtype),
+            indexing="ij",
+        )
+        grid_x = grid_x.view(1, 1, H, W)
+        grid_y = grid_y.view(1, 1, H, W)
 
-        # Build absolute index grid for gathering local patches across [B, N, 2R+1, 2R+1]
-        sample_y = cy.unsqueeze(-1).unsqueeze(-1) + self.grid_y.long()  # [B, N, 2R+1, 2R+1]
-        sample_x = cx.unsqueeze(-1).unsqueeze(-1) + self.grid_x.long()  # [B, N, 2R+1, 2R+1]
-        flat_patch_idx = (sample_y * W_pad + sample_x).view(B, N, -1)  # [B, N, (2R+1)^2]
+        exp_x = torch.sum(softmax_hm * grid_x, dim=(-2, -1))
+        exp_y = torch.sum(softmax_hm * grid_y, dim=(-2, -1))
 
-        flat_padded = padded.view(B, N, -1)
-        patches = torch.gather(flat_padded, dim=2, index=flat_patch_idx).view(B, N, 2 * R + 1, 2 * R + 1)
-
-        # 3. Temperature-scaled softmax expectation within local patch
-        temperature = torch.exp(self.log_temperature).clamp(min=0.05, max=1.0)
-        scaled_patches = patches / temperature
-        patch_softmax = F.softmax(scaled_patches.view(B, N, -1), dim=-1).view(B, N, 2 * R + 1, 2 * R + 1)
-
-        # Sub-pixel coordinate offsets in [-R, R]
-        delta_x = torch.sum(patch_softmax * self.grid_x, dim=(-2, -1))  # [B, N]
-        delta_y = torch.sum(patch_softmax * self.grid_y, dim=(-2, -1))  # [B, N]
-
-        # Continuous sub-pixel coordinates in [0, 1] normalized space
-        coord_x = (px.float() + delta_x) / float(W)
-        coord_y = (py.float() + delta_y) / float(H)
-
-        return torch.stack([coord_x, coord_y], dim=-1).clamp(0.0, 1.0)  # [B, N, 2]
+        return torch.stack([exp_x, exp_y], dim=-1).clamp(0.0, 1.0)
 
 
 class UNetUpBlock(nn.Module):
@@ -173,13 +149,20 @@ class UNetUpBlock(nn.Module):
 
 class CephalometricSwinGCN(nn.Module):
     """
-    Upgraded Cephalometric Swin-GAT Network featuring:
+    Upgraded Cephalometric Swin-GCN Network featuring:
     1. Multi-scale Swin Backbone with U-Net feature pyramid skip-connections.
-    2. Local Windowed Soft-Argmax heatmap coordinate extraction (zero background bias, sharp sub-pixel precision).
-    3. Continuous landmark feature sampling via bilinear grid_sample on 160x160 pyramid features.
-    4. Dynamic Multi-Head Graph Attention (GAT) residual offset head for anatomical graph alignment.
+    2. Sigmoid normalized heatmaps [0, 1] matching ground-truth Gaussian targets.
+    3. Global differentiable Soft-Argmax coordinate regression with learnable temperature.
+    4. Graph Loss structural alignment via anatomical adjacency buffering.
     """
-    def __init__(self, num_landmarks: int = 13, pretrained: bool = True, window_radius: int = 9, img_size: int = 1024):
+    def __init__(
+        self,
+        num_landmarks: int = 13,
+        pretrained: bool = True,
+        img_size: int = 1024,
+        init_temperature: float = 0.1,
+        window_radius: int | None = None,  # Kept for backward compatibility
+    ):
         super().__init__()
         self.num_landmarks = num_landmarks
         self.img_size = img_size
@@ -204,9 +187,9 @@ class CephalometricSwinGCN(nn.Module):
             nn.Conv2d(32, num_landmarks, kernel_size=1),
         )
 
-        # Local-Window Soft-Argmax layer with learnable per-landmark temperature
-        self.soft_argmax = LocalWindowSoftArgmax2D(
-            num_landmarks=num_landmarks, radius=window_radius, init_temperature=0.1
+        # Global Differentiable Soft-Argmax layer with learnable per-landmark temperature
+        self.soft_argmax = SoftArgmax2D(
+            num_landmarks=num_landmarks, init_temperature=init_temperature
         )
 
         self.register_buffer("adj_matrix", self._build_adjacency())
@@ -258,7 +241,10 @@ class CephalometricSwinGCN(nn.Module):
         if heatmaps.shape[-2:] != x.shape[-2:]:
             heatmaps = F.interpolate(heatmaps, size=x.shape[-2:], mode="bilinear", align_corners=False)
 
-        # Local-Window Soft-Argmax Sub-Pixel Coordinates directly from heatmaps
+        # Heatmap Normalization: strictly bound predictions to [0, 1] matching ground-truth Gaussian targets
+        heatmaps = torch.sigmoid(heatmaps)
+
+        # Global Differentiable Soft-Argmax Coordinates directly from normalized heatmaps
         coords = self.soft_argmax(heatmaps)  # [B, 13, 2] in [0, 1]
 
         return heatmaps, coords

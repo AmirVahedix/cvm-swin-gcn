@@ -214,6 +214,12 @@ def main():
         action="store_false",
         help="Disable PyTorch model compilation and force eager mode.",
     )
+    parser.add_argument(
+        "--warmup-coord-epochs",
+        type=int,
+        default=5,
+        help="Number of initial epochs to linearly ramp coordinate/graph losses from 0.0 to full weight (default: 5).",
+    )
 
     args = parser.parse_args()
 
@@ -349,6 +355,7 @@ def main():
             save_optimizer=args.save_optimizer,
             use_amp=args.use_amp,
             compile_model=args.compile_model,
+            warmup_coord_epochs=args.warmup_coord_epochs,
         )
         print("-" * 20)
 
