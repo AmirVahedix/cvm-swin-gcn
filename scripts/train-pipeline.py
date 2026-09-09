@@ -45,8 +45,8 @@ def main():
         "--lr",
         "--learning-rate",
         type=float,
-        default=float(os.getenv("LEARNING_RATE", 5e-5)),
-        help="Base learning rate for AdamW-LLRD optimizer (default: 5e-5 or $LEARNING_RATE).",
+        default=float(os.getenv("LEARNING_RATE", 1e-4)),
+        help="Base learning rate for AdamW-LLRD optimizer (default: 1e-4 or $LEARNING_RATE).",
     )
     parser.add_argument(
         "--llrd-decay-rate",
