@@ -43,19 +43,24 @@ def get_dataloaders(
         val_img_dir, val_npz_dir, val_files, transform=val_transform, img_size=img_size
     )
 
+    pin_memory = torch.cuda.is_available() or (num_workers > 0)
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
         num_workers=num_workers,
-        pin_memory=True if num_workers > 0 else False,
+        pin_memory=pin_memory,
+        persistent_workers=True if num_workers > 0 else False,
+        prefetch_factor=2 if num_workers > 0 else None,
     )
     val_loader = DataLoader(
         val_dataset,
         batch_size=batch_size,
         shuffle=False,
         num_workers=num_workers,
-        pin_memory=True if num_workers > 0 else False,
+        pin_memory=pin_memory,
+        persistent_workers=True if num_workers > 0 else False,
+        prefetch_factor=2 if num_workers > 0 else None,
     )
 
     return train_loader, val_loader
@@ -85,12 +90,15 @@ def get_test_dataloader(
         img_size=img_size,
     )
 
+    pin_memory = torch.cuda.is_available() or (num_workers > 0)
     test_loader = DataLoader(
         test_dataset,
         batch_size=batch_size,
         shuffle=False,
         num_workers=num_workers,
-        pin_memory=True if num_workers > 0 else False,
+        pin_memory=pin_memory,
+        persistent_workers=True if num_workers > 0 else False,
+        prefetch_factor=2 if num_workers > 0 else None,
     )
 
     return test_loader
