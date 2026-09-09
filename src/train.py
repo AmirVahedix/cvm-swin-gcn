@@ -34,7 +34,7 @@ VAL_NPZ_DIR = "dataset/val/labels"
 TEST_IMG_DIR = "dataset/test/images"
 TEST_NPZ_DIR = "dataset/test/labels"
 
-BATCH_SIZE = 16
+BATCH_SIZE = 8
 EPOCHS = 100
 LR = float(os.getenv("LEARNING_RATE", 5e-5))
 LLRD_DECAY_RATE = float(os.getenv("LLRD_DECAY_RATE", 0.8))
@@ -138,6 +138,8 @@ def train_epoch(
     device,
     epoch: int = 1,
     epochs: int = 1,
+    scaler: torch.amp.GradScaler | None = None,
+    use_amp: bool = True,
 ):
     model.train()
     epoch_loss = 0.0
@@ -147,6 +149,9 @@ def train_epoch(
         desc=f"Epoch [{epoch}/{epochs}] Train",
         leave=False,
     )
+    device_type = "cuda" if device.type == "cuda" else ("mps" if device.type == "mps" else "cpu")
+    amp_enabled = use_amp and device_type == "cuda"
+
     for step, batch in enumerate(pbar, 1):
         images = batch["image"].to(device)
         gt_heatmaps = batch["heatmaps"].to(device)
@@ -154,17 +159,24 @@ def train_epoch(
 
         optimizer.zero_grad()
 
-        pred_heatmaps, pred_coords = model(images)
+        with torch.amp.autocast(device_type=device_type, dtype=torch.float16, enabled=amp_enabled):
+            pred_heatmaps, pred_coords = model(images)
+            # Ensure float32 for loss computation to maintain numerical stability
+            loss_hm = awl_loss(pred_heatmaps.float(), gt_heatmaps.float())
+            loss_cd = wing_loss(pred_coords.float(), gt_coords.float(), landmark_weights=landmark_weights)
+            loss_g = graph_loss(pred_coords.float(), gt_coords.float())
+            total_loss = (lambda_hm * loss_hm) + (lambda_cd * loss_cd) + (lambda_graph * loss_g)
 
-        loss_hm = awl_loss(pred_heatmaps, gt_heatmaps)
-        loss_cd = wing_loss(pred_coords, gt_coords, landmark_weights=landmark_weights)
-        loss_g = graph_loss(pred_coords, gt_coords)
-
-        total_loss = (lambda_hm * loss_hm) + (lambda_cd * loss_cd) + (lambda_graph * loss_g)
-
-        total_loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        optimizer.step()
+        if scaler is not None and amp_enabled:
+            scaler.scale(total_loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            total_loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            optimizer.step()
 
         epoch_loss += total_loss.item()
         pbar.set_postfix(loss=f"{epoch_loss / step:.4f}")
@@ -285,6 +297,7 @@ def validate_epoch(
     img_size=1024,
     epoch: int = 1,
     epochs: int = 1,
+    use_amp: bool = True,
 ):
     model.eval()
     epoch_loss = 0.0
@@ -297,19 +310,22 @@ def validate_epoch(
         desc=f"Epoch [{epoch}/{epochs}] Val",
         leave=False,
     )
+    device_type = "cuda" if device.type == "cuda" else ("mps" if device.type == "mps" else "cpu")
+    amp_enabled = use_amp and device_type == "cuda"
+
     with torch.no_grad():
         for step, batch in enumerate(pbar, 1):
             images = batch["image"].to(device)
             gt_heatmaps = batch["heatmaps"].to(device)
             gt_coords = batch["coords"].to(device)
 
-            pred_heatmaps, pred_coords = model(images)
+            with torch.amp.autocast(device_type=device_type, dtype=torch.float16, enabled=amp_enabled):
+                pred_heatmaps, pred_coords = model(images)
+                loss_hm = awl_loss(pred_heatmaps.float(), gt_heatmaps.float())
+                loss_cd = wing_loss(pred_coords.float(), gt_coords.float(), landmark_weights=landmark_weights)
+                loss_g = graph_loss(pred_coords.float(), gt_coords.float())
+                total_loss = (lambda_hm * loss_hm) + (lambda_cd * loss_cd) + (lambda_graph * loss_g)
 
-            loss_hm = awl_loss(pred_heatmaps, gt_heatmaps)
-            loss_cd = wing_loss(pred_coords, gt_coords, landmark_weights=landmark_weights)
-            loss_g = graph_loss(pred_coords, gt_coords)
-
-            total_loss = (lambda_hm * loss_hm) + (lambda_cd * loss_cd) + (lambda_graph * loss_g)
             epoch_loss += total_loss.item()
 
             # Radial errors (in pixels) across landmarks
@@ -686,6 +702,8 @@ def main(
     ftp_tls: bool | None = None,
     skip_ftp: bool = False,
     save_optimizer: bool = False,
+    use_amp: bool = True,
+    compile_model: bool = False,
 ):
     load_dotenv()
 
@@ -706,6 +724,9 @@ def main(
 
     if torch.cuda.is_available():
         device = torch.device("cuda")
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        print("--> Enabled CUDA TF32 for matmul and cuDNN")
     elif torch.backends.mps.is_available():
         device = torch.device("mps")
     else:
@@ -723,6 +744,17 @@ def main(
 
     model = CephalometricSwinGCN(num_landmarks=NUM_LANDMARKS, img_size=img_size).to(device)
 
+    # Compile model with torch.compile if requested
+    if compile_model:
+        if hasattr(torch, "compile"):
+            try:
+                print("--> Compiling model with torch.compile()...")
+                model = torch.compile(model)
+            except Exception as e:
+                print(f"⚠️ Warning: torch.compile() failed ({e}). Falling back to eager mode.")
+        else:
+            print("⚠️ Warning: torch.compile is not supported in this PyTorch version.")
+
     # Layer-wise Learning Rate Decay (LLRD) Parameter Grouping
     param_groups = get_llrd_param_groups(
         model,
@@ -732,6 +764,11 @@ def main(
     )
     optimizer = optim.AdamW(param_groups)
     print(f"--> Initialized AdamW optimizer with LLRD (base LR: {lr}, decay rate: {llrd_decay_rate}, {len(param_groups)} param groups)")
+
+    # Automatic Mixed Precision GradScaler
+    scaler = torch.amp.GradScaler("cuda", enabled=(use_amp and device.type == "cuda"))
+    if use_amp and device.type == "cuda":
+        print("--> Automatic Mixed Precision (AMP FP16) enabled with GradScaler")
 
     scheduler = get_cosine_schedule_with_warmup(
         optimizer,
@@ -774,6 +811,8 @@ def main(
                 "coord_loss": "WingLoss",
                 "graph_loss": "AnatomicalGraphLoss",
                 "device": str(device),
+                "use_amp": use_amp,
+                "compile_model": compile_model,
             }
         )
 
@@ -814,6 +853,8 @@ def main(
                 device,
                 epoch=epoch + 1,
                 epochs=epochs,
+                scaler=scaler,
+                use_amp=use_amp,
             )
 
             val_loss, metrics = validate_epoch(
@@ -830,6 +871,7 @@ def main(
                 img_size=img_size,
                 epoch=epoch + 1,
                 epochs=epochs,
+                use_amp=use_amp,
             )
 
             epoch_time = time.time() - start_time
@@ -1151,6 +1193,32 @@ if __name__ == "__main__":
         default=1024,
         help="Input image resolution in pixels (default: 1024)",
     )
+    parser.add_argument(
+        "--amp",
+        dest="use_amp",
+        action="store_true",
+        default=True,
+        help="Enable Automatic Mixed Precision (AMP FP16) training (default: True)",
+    )
+    parser.add_argument(
+        "--no-amp",
+        dest="use_amp",
+        action="store_false",
+        help="Disable Automatic Mixed Precision and train in full FP32",
+    )
+    parser.add_argument(
+        "--compile",
+        dest="compile_model",
+        action="store_true",
+        default=bool(int(os.getenv("TORCH_COMPILE", "0"))),
+        help="Enable PyTorch 2.0+ model compilation via torch.compile() (default: False or $TORCH_COMPILE)",
+    )
+    parser.add_argument(
+        "--no-compile",
+        dest="compile_model",
+        action="store_false",
+        help="Disable PyTorch model compilation and force eager mode",
+    )
 
     args = parser.parse_args()
     main(
@@ -1174,5 +1242,7 @@ if __name__ == "__main__":
         ftp_tls=args.ftp_tls if args.ftp_tls else None,
         skip_ftp=args.skip_ftp,
         save_optimizer=args.save_optimizer,
+        use_amp=args.use_amp,
+        compile_model=args.compile_model,
     )
 

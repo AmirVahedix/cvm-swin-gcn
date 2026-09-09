@@ -188,6 +188,32 @@ def main():
         action="store_true",
         help="Save optimizer state dict along with model weights (useful only for resuming training, adds ~900MB).",
     )
+    parser.add_argument(
+        "--amp",
+        dest="use_amp",
+        action="store_true",
+        default=True,
+        help="Enable Automatic Mixed Precision (AMP FP16) training (default: True).",
+    )
+    parser.add_argument(
+        "--no-amp",
+        dest="use_amp",
+        action="store_false",
+        help="Disable Automatic Mixed Precision and train in full FP32.",
+    )
+    parser.add_argument(
+        "--compile",
+        dest="compile_model",
+        action="store_true",
+        default=bool(int(os.getenv("TORCH_COMPILE", "0"))),
+        help="Enable PyTorch 2.0+ model compilation via torch.compile() (default: False or $TORCH_COMPILE).",
+    )
+    parser.add_argument(
+        "--no-compile",
+        dest="compile_model",
+        action="store_false",
+        help="Disable PyTorch model compilation and force eager mode.",
+    )
 
     args = parser.parse_args()
 
@@ -321,6 +347,8 @@ def main():
             ftp_tls=args.ftp_tls if args.ftp_tls else None,
             skip_ftp=args.skip_ftp,
             save_optimizer=args.save_optimizer,
+            use_amp=args.use_amp,
+            compile_model=args.compile_model,
         )
         print("-" * 20)
 

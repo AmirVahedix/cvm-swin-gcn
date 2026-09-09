@@ -301,6 +301,20 @@ try:
 except Exception as e:
     print(f"❌ PRE-FLIGHT TEST FAILED: CUDA kernel execution error on {dev_name} ({arch}): {e}")
     sys.exit(1)
+
+# Verify Triton compiler & torch.compile support
+try:
+    import triton
+    if hasattr(torch, "compile"):
+        @torch.compile
+        def _probe(x):
+            return x + 1
+        _probe(torch.zeros(1, device="cuda"))
+        print("  - Triton Compiler: AVAILABLE (torch.compile acceleration supported)")
+    else:
+        print("  - Triton Compiler: PyTorch < 2.0 (compile not supported)")
+except Exception:
+    print("  - Triton Compiler: NOT AVAILABLE (eager execution mode)")
 ' 2>&1)
 
 PREFLIGHT_EXIT=$?
@@ -320,6 +334,39 @@ if [ "$RUN_PIPELINE" = true ]; then
     echo -e "${BLUE}🚀 Auto-launching Training Pipeline...${NC}"
     echo -e "${BLUE}==========================================${NC}\n"
     cd "$PROJECT_DIR" || exit 1
+
+    # Check if --compile or --no-compile was already explicitly passed
+    COMPILE_FLAG_PASSED=false
+    for arg in "${PIPELINE_ARGS[@]}"; do
+        if [ "$arg" = "--compile" ] || [ "$arg" = "--no-compile" ]; then
+            COMPILE_FLAG_PASSED=true
+            break
+        fi
+    done
+
+    # Automatically probe and enable --compile if supported and not explicitly passed
+    if [ "$COMPILE_FLAG_PASSED" = false ]; then
+        if "$PYTHON_BIN" -c '
+import sys
+try:
+    import triton
+    import torch
+    if hasattr(torch, "compile"):
+        @torch.compile
+        def _probe(x):
+            return x + 1
+        _probe(torch.zeros(1))
+        sys.exit(0)
+    sys.exit(1)
+except Exception:
+    sys.exit(1)
+' 2>/dev/null; then
+            echo -e "${GREEN}⚡ Triton compiler supported in this environment! Automatically adding --compile flag.${NC}"
+            PIPELINE_ARGS+=("--compile")
+        else
+            echo -e "${YELLOW}ℹ️ Triton compiler not available or not supported on this environment. Running in standard eager mode.${NC}"
+        fi
+    fi
 
     echo -e "${BLUE}Running: ${PYTHON_BIN} scripts/train-pipeline.py ${PIPELINE_ARGS[*]}${NC}\n"
     "$PYTHON_BIN" scripts/train-pipeline.py "${PIPELINE_ARGS[@]}"
