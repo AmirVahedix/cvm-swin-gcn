@@ -374,9 +374,11 @@ def main():
         )
         print("-" * 20)
 
-        # Step 6: Model Evaluation
-        if not args.skip_eval:
-            print("\n[6/6] Executing: run_evaluation()")
+        # Step 6: Standalone Model Evaluation
+        # Note: train_main() already runs evaluation and logs all metrics/artifacts to the training MLflow run.
+        # Step 6 will only execute if custom eval-weights were provided.
+        if not args.skip_eval and args.eval_weights != "./artifacts/best.pth":
+            print(f"\n[6/6] Executing standalone evaluation for custom weights: {args.eval_weights}")
             run_evaluation(
                 weights_path=args.eval_weights,
                 test_img_dir="dataset/test/images",
@@ -391,6 +393,9 @@ def main():
                 tracking_username=args.mlflow_username,
                 tracking_password=args.mlflow_password,
             )
+            print("-" * 20)
+        elif not args.skip_eval:
+            print("\n[6/6] Clinical test evaluation completed inside Step 5 (logged directly into the MLflow training run).")
             print("-" * 20)
         else:
             print("\n[6/6] Skipping model evaluation step (--skip-eval set).")

@@ -113,9 +113,10 @@ def draw_legend_box(vis_img: np.ndarray, num_landmarks: int):
         )
 
 
-def load_model(weights_path: str, device: torch.device, img_size: int = 1024) -> torch.nn.Module:
+def load_model(weights_path: str, device: torch.device, img_size: int = 640) -> torch.nn.Module:
     """
-    Instantiates CephalometricSwinGCN and loads checkpoint weights safely.
+    Instantiates CephalometricSwinGCN and loads checkpoint weights safely,
+    supporting checkpoints trained with torch.compile (_orig_mod.) and DataParallel (module.).
     """
     print(f"Loading checkpoint weights from: {weights_path}")
     if not os.path.exists(weights_path):
@@ -135,12 +136,37 @@ def load_model(weights_path: str, device: torch.device, img_size: int = 1024) ->
         model.eval()
         return model
 
-    # Filter out static coordinate grid buffers if present in checkpoint
-    state_dict = {k: v for k, v in state_dict.items() if not k.endswith("grid_x") and not k.endswith("grid_y")}
-    try:
-        model.load_state_dict(state_dict, strict=False)
-    except Exception:
-        model.load_state_dict(state_dict, strict=False)
+    # Clean state dict keys:
+    # 1. Strip static coordinate grid buffers
+    # 2. Strip PyTorch 2.0+ torch.compile '_orig_mod.' prefix
+    # 3. Strip DataParallel/DistributedDataParallel 'module.' prefix
+    cleaned_state_dict = {}
+    for k, v in state_dict.items():
+        if k.endswith("grid_x") or k.endswith("grid_y"):
+            continue
+        if k.startswith("_orig_mod."):
+            k = k[len("_orig_mod."):]
+        if k.startswith("module."):
+            k = k[len("module."):]
+        cleaned_state_dict[k] = v
+
+    missing_keys, unexpected_keys = model.load_state_dict(cleaned_state_dict, strict=False)
+    matched_keys = [k for k in cleaned_state_dict.keys() if k not in unexpected_keys]
+
+    if len(matched_keys) == 0:
+        raise RuntimeError(
+            f"FATAL: 0 weights matched when loading '{weights_path}'! Model would remain randomly initialized."
+        )
+
+    if missing_keys:
+        critical_missing = [k for k in missing_keys if not k.endswith("adj_matrix")]
+        if critical_missing:
+            print(f"⚠️ Warning: Missing keys when loading checkpoint ({len(missing_keys)} total): {missing_keys[:5]}...")
+    if unexpected_keys:
+        print(f"⚠️ Warning: Unexpected keys in checkpoint ({len(unexpected_keys)} total): {unexpected_keys[:5]}...")
+
+    print(f"--> Successfully loaded {len(matched_keys)}/{len(model.state_dict())} parameter tensors from '{weights_path}'.")
+
     model.to(device)
     model.eval()
     return model

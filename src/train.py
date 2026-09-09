@@ -1071,8 +1071,11 @@ def main(
                 best_val_loss = val_loss
                 patience_counter = 0
                 os.makedirs(os.path.dirname(SAVE_PATH), exist_ok=True)
+                # Ensure compiled models (_orig_mod) are unwrapped before saving
+                raw_model = getattr(model, "_orig_mod", model)
+
                 # 1. Clean model weights (~420 MB state_dict) for inference and MLflow logging
-                torch.save(model.state_dict(), SAVE_PATH)
+                torch.save(raw_model.state_dict(), SAVE_PATH)
 
                 # 2. Full checkpoint bundle (~1.3 GB) saved locally on VPS (NOT sent to MLflow)
                 full_ckpt_path = os.path.join(os.path.dirname(SAVE_PATH), "best_full_checkpoint.pth")
@@ -1080,7 +1083,7 @@ def main(
                     torch.save(
                         {
                             "epoch": epoch,
-                            "model_state_dict": model.state_dict(),
+                            "model_state_dict": raw_model.state_dict(),
                             "optimizer_state_dict": optimizer.state_dict(),
                             "scheduler_state_dict": scheduler.state_dict() if scheduler is not None else None,
                             "val_loss": best_val_loss,
