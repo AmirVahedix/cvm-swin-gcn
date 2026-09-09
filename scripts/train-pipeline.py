@@ -376,7 +376,9 @@ def main():
         print("Pipeline execution completed successfully.")
 
     except Exception as e:
+        import traceback
         print(f"\n[!] Pipeline failed during execution: {e}", file=sys.stderr)
+        traceback.print_exc()
         sys.exit(1)
 
 
