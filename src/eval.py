@@ -1058,6 +1058,12 @@ def main():
         help="MLflow run name for evaluation.",
     )
     parser.add_argument(
+        "--device",
+        type=str,
+        default=None,
+        help="Device to run evaluation on ('mps', 'cuda', 'cpu'). Auto-selects if not specified.",
+    )
+    parser.add_argument(
         "--no-mlflow",
         action="store_true",
         help="Disable MLflow logging during evaluation.",
@@ -1076,6 +1082,7 @@ def main():
         pixel_spacing=args.pixel_spacing,
         num_samples=args.num_samples,
         threshold_px=args.threshold_px,
+        device_str=args.device,
         log_to_mlflow=not args.no_mlflow,
         tracking_uri=args.tracking_uri,
         experiment_name=args.experiment_name,

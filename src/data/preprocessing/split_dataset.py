@@ -153,9 +153,12 @@ def split_dataset(
     seed=42,
     clean_output=True,
     export_json_path="data/exports/export.json",
+    fixed_test_ids_path=None,
 ):
     """
     Creates train-val-test splits for image/label pairs and copies them into output_dir structure.
+    If fixed_test_ids_path is specified (or test_image_ids.json exists in output_dir),
+    the test set will strictly contain those exact IDs.
 
     Returns:
         dict: Counts of dataset split pairs {"train": int, "val": int, "test": int}.
@@ -166,6 +169,35 @@ def split_dataset(
             f"Train, val, and test ratios must sum to 1.0. Current sum: {total_ratio}"
         )
 
+    # Load Label Studio task ID mapping early to support fixed test set assignment
+    ls_mapping = load_label_studio_mapping(export_json_path=export_json_path)
+
+    def resolve_image_id(file_path: str):
+        stem = Path(file_path).stem
+        name = Path(file_path).name
+        if stem in ls_mapping:
+            return ls_mapping[stem]
+        if name in ls_mapping:
+            return ls_mapping[name]
+        return int(stem) if stem.isdigit() else stem
+
+    # Check for fixed test IDs
+    target_fixed_test_path = None
+    if fixed_test_ids_path and Path(fixed_test_ids_path).exists():
+        target_fixed_test_path = Path(fixed_test_ids_path)
+    elif (Path(output_dir) / "test_image_ids.json").exists():
+        target_fixed_test_path = Path(output_dir) / "test_image_ids.json"
+
+    fixed_test_set = set()
+    if target_fixed_test_path and target_fixed_test_path.exists():
+        try:
+            with open(target_fixed_test_path, "r", encoding="utf-8") as f:
+                loaded_ids = json.load(f)
+            fixed_test_set = {int(x) if str(x).isdigit() else str(x) for x in loaded_ids}
+            print(f"--> Using fixed test set with {len(fixed_test_set)} IDs from: {target_fixed_test_path}")
+        except Exception as e:
+            print(f"⚠️ Warning reading {target_fixed_test_path}: {e}")
+
     setup_directories(output_dir, clean_output=clean_output)
     paired_files = get_paired_files(images_dir, labels_dir)
 
@@ -173,8 +205,12 @@ def split_dataset(
         print("No paired files found. Please check your input directories.")
         return {"train": 0, "val": 0, "test": 0}
 
-    # First split: Separate test set if test_ratio > 0
-    if test_ratio > 0:
+    # First split: Separate test set (using fixed test set if available)
+    if fixed_test_set:
+        test_pairs = [p for p in paired_files if resolve_image_id(p[0]) in fixed_test_set]
+        temp_pairs = [p for p in paired_files if resolve_image_id(p[0]) not in fixed_test_set]
+        print(f"--> Successfully matched {len(test_pairs)} exact test pairs using fixed test IDs.")
+    elif test_ratio > 0:
         temp_pairs, test_pairs = train_test_split(
             paired_files, test_size=test_ratio, random_state=seed
         )
@@ -200,18 +236,6 @@ def split_dataset(
         "val": len(val_pairs),
         "test": len(test_pairs),
     }
-
-    # Load Label Studio task ID mapping if available
-    ls_mapping = load_label_studio_mapping(export_json_path=export_json_path)
-
-    def resolve_image_id(file_path: str):
-        stem = Path(file_path).stem
-        name = Path(file_path).name
-        if stem in ls_mapping:
-            return ls_mapping[stem]
-        if name in ls_mapping:
-            return ls_mapping[name]
-        return int(stem) if stem.isdigit() else stem
 
     # Extract and save validation and test image ID arrays (Label Studio IDs)
     val_ids = sorted(
@@ -305,6 +329,12 @@ def main():
         default="data/exports/export.json",
         help="Path to Label Studio JSON export file to map image filenames to Label Studio task IDs.",
     )
+    parser.add_argument(
+        "--test-ids-file",
+        type=str,
+        default=None,
+        help="Path to JSON file containing exact test image IDs to isolate for the test split.",
+    )
 
     args = parser.parse_args()
 
@@ -318,6 +348,7 @@ def main():
         seed=args.seed,
         clean_output=args.clean_output,
         export_json_path=args.export_json_path,
+        fixed_test_ids_path=args.test_ids_file,
     )
 
 
