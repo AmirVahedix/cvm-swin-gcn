@@ -284,6 +284,52 @@ class TestLandmarkMetricsLogging(unittest.TestCase):
         self.assertIn("CANVAS METRIC (PIXELS)", table)
         self.assertIn("SDR @ 2.0 mm (Clinical Standard)", table)
 
+    def test_sample_adaptive_pixel_spacing_computation(self):
+        """Verify that compute_pixel_spacing_for_sample correctly scales based on image dimensions."""
+        from src.data.loaders.dataset import compute_pixel_spacing_for_sample
+        from src.eval import compute_metrics
+
+        # 1. Standard ISBI cephalogram (1935x2400) on 640 canvas
+        s_isbi = compute_pixel_spacing_for_sample(1935, 2400, canvas_size=640, base_pixel_spacing=0.1)
+        self.assertAlmostEqual(s_isbi, 0.375, places=4)
+
+        # 2. Pre-resized cephalogram (640x640) on 640 canvas (represents full 2400-tall scan)
+        s_640 = compute_pixel_spacing_for_sample(640, 640, canvas_size=640, base_pixel_spacing=0.1)
+        self.assertAlmostEqual(s_640, 0.375, places=4)
+
+        # 3. TUMS landscape cephalogram (2091x1676) on 640 canvas
+        s_tums = compute_pixel_spacing_for_sample(2091, 1676, canvas_size=640, base_pixel_spacing=0.1)
+        self.assertAlmostEqual(s_tums, 0.1 / (640.0 / 2091.0), places=4)
+
+        # 4. Per-sample vector spacing in compute_metrics
+        num_samples = 2
+        img_size = 640
+        gt_coords = np.full((num_samples, NUM_LANDMARKS, 2), 0.5, dtype=np.float32)
+        pred_coords = gt_coords.copy()
+
+        # Both samples have 10 px error along X on landmark 0
+        pred_coords[:, 0, 0] += 10.0 / img_size
+
+        # Sample 0 has spacing 0.2 mm/px -> 10 px = 2.0 mm
+        # Sample 1 has spacing 0.3 mm/px -> 10 px = 3.0 mm
+        spacings = np.array([0.2, 0.3], dtype=np.float32)
+
+        summary, landmarks, errors = compute_metrics(
+            pred_coords=pred_coords,
+            gt_coords=gt_coords,
+            img_size=img_size,
+            pixel_spacing=spacings,
+        )
+
+        self.assertEqual(summary["pixel_spacing_mode"], "adaptive_sample_level")
+        self.assertAlmostEqual(summary["pixel_spacing_mm_per_px"], 0.25, places=4)
+        # Landmark 0: sample 0 has 2.0 mm (<= 2.0mm -> True), sample 1 has 3.0 mm (<= 2.0mm -> False)
+        # So SDR@2.0mm on landmark 0 should be 50.0%
+        lm0 = landmarks[0]
+        self.assertEqual(lm0["sdr_2.0mm"], 50.0)
+        # For SDR@3.0mm, both sample 0 (2.0mm) and sample 1 (3.0mm) pass -> 100.0%
+        self.assertEqual(lm0["sdr_3.0mm"], 100.0)
+
 
 if __name__ == "__main__":
     unittest.main()

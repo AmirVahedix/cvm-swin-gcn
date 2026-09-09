@@ -9,6 +9,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 import torch
+from torch.utils.data import DataLoader
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -149,7 +150,7 @@ def compute_metrics(
     pred_coords: np.ndarray,
     gt_coords: np.ndarray,
     img_size: int = 640,
-    pixel_spacing: float = 0.1,
+    pixel_spacing: float | np.ndarray = 0.1,
     threshold_px: float = 2.5,
 ) -> tuple[dict, list[dict], np.ndarray]:
     """
@@ -159,7 +160,7 @@ def compute_metrics(
         pred_coords: Array of shape (N, 13, 2) in normalized [0, 1] range.
         gt_coords: Array of shape (N, 13, 2) in normalized [0, 1] range (-1.0 for missing).
         img_size: Image dimension in pixels (default 640).
-        pixel_spacing: Physical spacing in mm per pixel (default 0.1 mm/px).
+        pixel_spacing: Physical spacing in mm per pixel (float scalar or 1D array of shape (N,)).
         threshold_px: Tolerance threshold in pixels for binary detection metrics.
 
     Returns:
@@ -198,8 +199,17 @@ def compute_metrics(
     min_err = float(np.min(valid_radial_errors))
     max_err = float(np.max(valid_radial_errors))
 
-    # 2. Physical Millimeter Metrics
-    valid_radial_errors_mm = valid_radial_errors * pixel_spacing
+    # 2. Physical Millimeter Metrics (Sample-level adaptive or uniform)
+    if isinstance(pixel_spacing, np.ndarray):
+        radial_errors_mm = radial_errors * pixel_spacing[:, None]
+        valid_radial_errors_mm = radial_errors_mm[valid_mask]
+        spacing_report_val = float(np.mean(pixel_spacing))
+        spacing_mode = "adaptive_sample_level"
+    else:
+        valid_radial_errors_mm = valid_radial_errors * pixel_spacing
+        spacing_report_val = float(pixel_spacing)
+        spacing_mode = "uniform_fixed"
+
     mre_mm = float(np.mean(valid_radial_errors_mm))
     rmse_mm = float(np.sqrt(np.mean(valid_radial_errors_mm ** 2)))
     medre_mm = float(np.median(valid_radial_errors_mm))
@@ -226,7 +236,8 @@ def compute_metrics(
     summary_metrics = {
         "total_samples": int(pred_coords.shape[0]),
         "total_valid_landmarks": total_valid,
-        "pixel_spacing_mm_per_px": pixel_spacing,
+        "pixel_spacing_mm_per_px": spacing_report_val,
+        "pixel_spacing_mode": spacing_mode,
         "img_size": img_size,
         # Physical Millimeter Metrics (Primary Clinical)
         "mre_mm": mre_mm,
@@ -269,7 +280,10 @@ def compute_metrics(
         l_sdre = float(np.std(l_radial)) if len(l_radial) > 1 else 0.0
 
         # Millimeters
-        l_radial_mm = l_radial * pixel_spacing
+        if isinstance(pixel_spacing, np.ndarray):
+            l_radial_mm = l_radial * pixel_spacing[l_mask]
+        else:
+            l_radial_mm = l_radial * pixel_spacing
         l_mre_mm = float(np.mean(l_radial_mm))
         l_rmse_mm = float(np.sqrt(np.mean(l_radial_mm ** 2)))
         l_medre_mm = float(np.median(l_radial_mm))
@@ -391,7 +405,7 @@ def generate_evaluation_charts(
     summary_metrics: dict,
     landmark_metrics: list[dict],
     valid_radial_errors: np.ndarray,
-    pixel_spacing: float = 0.1,
+    pixel_spacing: float | np.ndarray = 0.1,
     save_dir: Path | str | None = None,
     log_to_mlflow: bool = True,
 ) -> dict[str, str]:
@@ -409,6 +423,7 @@ def generate_evaluation_charts(
         target_dir.mkdir(parents=True, exist_ok=True)
 
     generated_charts = {}
+    eff_spacing = float(np.mean(pixel_spacing)) if isinstance(pixel_spacing, np.ndarray) else float(pixel_spacing)
 
     try:
         plt.style.use("seaborn-v0_8-whitegrid" if "seaborn-v0_8-whitegrid" in plt.style.available else "default")
@@ -420,8 +435,8 @@ def generate_evaluation_charts(
 
         # 1. Landmark Errors Bar Chart (MRE mm vs RMSE mm)
         fig1, ax1 = plt.subplots(figsize=(10, 5), dpi=300)
-        mre_mm_vals = [lm.get("mre_mm", lm["mre_px"] * pixel_spacing) for lm in landmark_metrics]
-        rmse_mm_vals = [lm.get("rmse_mm", lm["rmse_px"] * pixel_spacing) for lm in landmark_metrics]
+        mre_mm_vals = [lm.get("mre_mm", lm["mre_px"] * eff_spacing) for lm in landmark_metrics]
+        rmse_mm_vals = [lm.get("rmse_mm", lm["rmse_px"] * eff_spacing) for lm in landmark_metrics]
 
         ax1.bar(lm_indices - width / 2, mre_mm_vals, width, label="MRE (mm)", color="#e76f51", alpha=0.9)
         ax1.bar(lm_indices + width / 2, rmse_mm_vals, width, label="RMSE (mm)", color="#457b9d", alpha=0.9)
@@ -465,7 +480,7 @@ def generate_evaluation_charts(
         # 3. SDR Threshold Curve (Cumulative Detection Rate in mm)
         fig3, ax3 = plt.subplots(figsize=(8, 5), dpi=300)
         th_mm = [1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0]
-        valid_radial_errors_mm = valid_radial_errors * pixel_spacing
+        valid_radial_errors_mm = valid_radial_errors * eff_spacing
         sdr_values = [
             summary_metrics.get(f"sdr_{th}mm", float(np.mean(valid_radial_errors_mm <= th) * 100.0))
             for th in th_mm
@@ -608,53 +623,95 @@ def draw_landmarks_on_image(
         cv2.circle(vis_img, (abs_x, abs_y), 4, color_bgr, -1)
         cv2.circle(vis_img, (abs_x, abs_y), 5, (0, 0, 0), 1)
 
-    # Add rectangular guide box on top-right section
-    draw_legend_box(vis_img, len(pred_coords))
+    # Draw Top-Right Landmark Legend Guide Box
+    legend_x = w - 145
+    legend_y = 12
+    legend_w = 135
+    legend_h = len(LANDMARK_CLASSES) * 16 + 10
+
+    overlay = vis_img.copy()
+    cv2.rectangle(
+        overlay,
+        (legend_x, legend_y),
+        (legend_x + legend_w, legend_y + legend_h),
+        (20, 20, 20),
+        -1,
+    )
+    cv2.addWeighted(overlay, 0.75, vis_img, 0.25, 0, vis_img)
+    cv2.rectangle(
+        vis_img,
+        (legend_x, legend_y),
+        (legend_x + legend_w, legend_y + legend_h),
+        (180, 180, 180),
+        1,
+    )
+
+    for i, name in enumerate(LANDMARK_CLASSES):
+        item_y = legend_y + 14 + (i * 16)
+        color_bgr = LANDMARK_COLORS_BGR[i % len(LANDMARK_COLORS_BGR)]
+        cv2.circle(vis_img, (legend_x + 10, item_y - 4), 4, color_bgr, -1)
+        cv2.circle(vis_img, (legend_x + 10, item_y - 4), 5, (255, 255, 255), 1)
+        cv2.putText(
+            vis_img,
+            f"{i:02d}: {name}",
+            (legend_x + 20, item_y),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.35,
+            (255, 255, 255),
+            1,
+            cv2.LINE_AA,
+        )
 
     return vis_img
 
 
 def visualize_batch_and_save(
-    test_loader: torch.utils.data.DataLoader,
+    test_loader: DataLoader,
     model: torch.nn.Module,
     device: torch.device,
     save_dir: Path,
     num_samples: int = 8,
-    img_size: int = 1024,
+    img_size: int = 640,
     test_img_dir: str = "dataset/test/images",
-):
+) -> None:
     """
-    Runs model on a batch of test data and saves visualized PNG images into save_dir.
+    Renders visual ground truth vs. predicted landmark comparisons on un-normalized
+    original test images and exports high-resolution PNGs to the run subfolder.
     """
     save_dir.mkdir(parents=True, exist_ok=True)
     saved_count = 0
 
-    pbar = tqdm(test_loader, desc="Generating Visualizations", leave=False)
     with torch.no_grad():
-        for batch in pbar:
+        for batch in test_loader:
+            if saved_count >= num_samples:
+                break
+
             images = batch["image"].to(device)
-            gt_coords = batch["coords"].cpu().numpy()  # (B, 13, 2)
+            gt_coords = batch["coords"].cpu().numpy()
             filenames = batch["filename"]
 
             _, pred_coords = model(images)
-            pred_coords = pred_coords.cpu().numpy()  # (B, 13, 2)
+            pred_coords = pred_coords.cpu().numpy()
 
             for i in range(len(filenames)):
                 if saved_count >= num_samples:
-                    return
+                    break
 
                 fname = filenames[i]
                 orig_img_path = Path(test_img_dir) / fname
+
                 if orig_img_path.exists():
                     raw_bgr = cv2.imread(str(orig_img_path))
                     raw_rgb = cv2.cvtColor(raw_bgr, cv2.COLOR_BGR2RGB)
+                    # Resize to target canvas for visualization
+                    canvas_img = cv2.resize(raw_rgb, (img_size, img_size))
                 else:
-                    raw_tensor = images[i].cpu().permute(1, 2, 0).numpy()
-                    raw_rgb = ((raw_tensor - raw_tensor.min()) / (raw_tensor.max() - raw_tensor.min() + 1e-8) * 255).astype(np.uint8)
+                    # Fallback to reconstructing from input tensor
+                    tensor_np = images[i].cpu().numpy().transpose(1, 2, 0)
+                    canvas_img = (np.clip(tensor_np, 0, 1) * 255).astype(np.uint8)
 
-                # Overlay landmarks
                 vis_rgb = draw_landmarks_on_image(
-                    image=raw_rgb,
+                    image=canvas_img,
                     pred_coords=pred_coords[i],
                     gt_coords=gt_coords[i],
                     img_size=img_size,
@@ -735,12 +792,14 @@ def run_evaluation(
         test_npz_dir=test_npz_dir,
         batch_size=batch_size,
         img_size=img_size,
+        pixel_spacing=pixel_spacing,
         num_workers=0,  # Safety for cross-platform evaluation
     )
 
     # 3. Aggregate all predictions and ground truth targets
     all_preds = []
     all_gts = []
+    all_spacings = []
 
     with torch.no_grad():
         for batch in test_loader:
@@ -750,16 +809,22 @@ def run_evaluation(
 
             all_preds.append(pred_coords.cpu().numpy())
             all_gts.append(gt_coords)
+            if "pixel_spacing" in batch:
+                all_spacings.append(batch["pixel_spacing"].cpu().numpy())
 
     pred_array = np.concatenate(all_preds, axis=0)  # (N, 13, 2)
     gt_array = np.concatenate(all_gts, axis=0)      # (N, 13, 2)
+    if len(all_spacings) > 0:
+        spacings_array = np.concatenate(all_spacings, axis=0)
+    else:
+        spacings_array = pixel_spacing
 
     # 4. Compute metrics
     summary_metrics, landmark_metrics, valid_radial_errors = compute_metrics(
         pred_coords=pred_array,
         gt_coords=gt_array,
         img_size=img_size,
-        pixel_spacing=pixel_spacing,
+        pixel_spacing=spacings_array,
         threshold_px=threshold_px,
     )
 
@@ -768,7 +833,7 @@ def run_evaluation(
         summary_metrics=summary_metrics,
         landmark_metrics=landmark_metrics,
         valid_radial_errors=valid_radial_errors,
-        pixel_spacing=pixel_spacing,
+        pixel_spacing=spacings_array,
         save_dir=run_folder / "charts",
         log_to_mlflow=False,  # We handle comprehensive MLflow logging below
     )

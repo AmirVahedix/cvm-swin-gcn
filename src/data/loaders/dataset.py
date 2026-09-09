@@ -2,7 +2,80 @@ import os
 import cv2
 import numpy as np
 import torch
+import json
+from pathlib import Path
 from torch.utils.data import Dataset
+
+
+def get_image_dimensions_map(json_path: str = "data/image_dimensions.json") -> dict:
+    """
+    Loads or creates the image dimensions map mapping image filenames to their original (W, H).
+    """
+    path = Path(json_path)
+    if path.exists():
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+
+    # Search common alternative locations
+    alt_paths = [
+        Path("data/raw/exports/project_1_export_20260904_084223.json"),
+        Path("data/exports/export.json"),
+    ]
+    meta = {}
+    for p in alt_paths:
+        if p.exists():
+            try:
+                with open(p, "r", encoding="utf-8") as f:
+                    tasks = json.load(f)
+                for t in tasks:
+                    img_url = t.get("data", {}).get("img") or t.get("file_upload", "")
+                    if not img_url:
+                        continue
+                    clean_name = (
+                        img_url.split("-", 1)[1]
+                        if "-" in img_url.split("/")[-1]
+                        else img_url.split("/")[-1]
+                    )
+                    ann = t.get("annotations", [])
+                    if ann and ann[0].get("result"):
+                        res = ann[0]["result"][0]
+                        w = res.get("original_width")
+                        h = res.get("original_height")
+                        if w and h and clean_name not in meta:
+                            meta[clean_name] = {"orig_w": int(w), "orig_h": int(h)}
+                if meta:
+                    break
+            except Exception:
+                continue
+
+    return meta
+
+
+def compute_pixel_spacing_for_sample(
+    orig_w: int,
+    orig_h: int,
+    canvas_size: int = 640,
+    base_pixel_spacing: float = 0.1,
+    standard_ceph_height: float = 2400.0,
+) -> float:
+    """
+    Computes effective physical pixel spacing (mm/pixel) on the network canvas
+    for a given lateral cephalometric radiograph, accounting for original scanner dimensions
+    and letterbox scaling.
+    """
+    max_dim = max(orig_w, orig_h)
+    # If the image was pre-resized to a smaller resolution (e.g., 640x640),
+    # it represents a full cephalogram whose native sensor height was standard_ceph_height (2400 px at 0.1 mm/px = 240 mm).
+    if max_dim <= 1000:
+        effective_orig_dim = standard_ceph_height
+    else:
+        effective_orig_dim = float(max_dim)
+
+    scale = canvas_size / effective_orig_dim
+    return float(base_pixel_spacing / scale)
 
 
 def generate_gaussian_heatmaps(coords_px: np.ndarray, img_size: int = 640, sigma: float = 4.0) -> torch.Tensor:
@@ -41,7 +114,15 @@ def generate_gaussian_heatmaps(coords_px: np.ndarray, img_size: int = 640, sigma
 
 class CVMDataset(Dataset):
     def __init__(
-        self, image_dir, npz_dir, image_filenames, transform=None, img_size=640, sigma=4.0
+        self,
+        image_dir,
+        npz_dir,
+        image_filenames,
+        transform=None,
+        img_size=640,
+        sigma=4.0,
+        pixel_spacing=0.1,
+        dimensions_map=None,
     ):
         """
         Args:
@@ -49,8 +130,10 @@ class CVMDataset(Dataset):
             npz_dir (str): Path to directory containing .npz files.
             image_filenames (list): List of image filenames allocated for this split.
             transform (albumentations.Compose): Spatial and pixel augmentations.
-            img_size (int): Expected target pixel size (1024).
+            img_size (int): Expected target pixel size (640).
             sigma (float): Gaussian heatmap sigma in pixels.
+            pixel_spacing (float): Base physical pixel spacing in mm/px (default 0.1).
+            dimensions_map (dict, optional): Mapping of filenames to original dimensions.
         """
         self.image_dir = image_dir
         self.npz_dir = npz_dir
@@ -58,6 +141,10 @@ class CVMDataset(Dataset):
         self.transform = transform
         self.img_size = img_size
         self.sigma = sigma
+        self.pixel_spacing = float(pixel_spacing)
+        self.dimensions_map = (
+            dimensions_map if dimensions_map is not None else get_image_dimensions_map()
+        )
 
     def __len__(self):
         return len(self.image_filenames)
@@ -122,10 +209,26 @@ class CVMDataset(Dataset):
 
         coords_tensor = torch.tensor(coords_normalized, dtype=torch.float32)
 
+        # 8. Determine sample-specific pixel spacing based on original scanner dimensions
+        dim_info = self.dimensions_map.get(img_name) if self.dimensions_map else None
+        if dim_info:
+            w_orig = dim_info.get("orig_w", self.img_size)
+            h_orig = dim_info.get("orig_h", self.img_size)
+        else:
+            w_orig, h_orig = self.img_size, self.img_size
+
+        sample_spacing = compute_pixel_spacing_for_sample(
+            orig_w=w_orig,
+            orig_h=h_orig,
+            canvas_size=self.img_size,
+            base_pixel_spacing=self.pixel_spacing,
+        )
+
         return {
             "image": image_tensor,
             "heatmaps": heatmaps_tensor,
             "coords": coords_tensor,
             "filename": img_name,
+            "pixel_spacing": torch.tensor(sample_spacing, dtype=torch.float32),
         }
 

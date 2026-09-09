@@ -203,7 +203,7 @@ def compute_per_landmark_metrics(
     pred_coords: torch.Tensor | np.ndarray,
     gt_coords: torch.Tensor | np.ndarray,
     img_size: int = DEFAULT_IMG_SIZE,
-    pixel_spacing: float = DEFAULT_PIXEL_SPACING,
+    pixel_spacing: float | np.ndarray = DEFAULT_PIXEL_SPACING,
 ) -> list[dict]:
     """
     Computes detailed per-landmark performance metrics in both millimeters (mm) and pixels (px).
@@ -212,7 +212,7 @@ def compute_per_landmark_metrics(
         pred_coords: Array or Tensor of shape (N, NUM_LANDMARKS, 2) in normalized [0, 1] range.
         gt_coords: Array or Tensor of shape (N, NUM_LANDMARKS, 2) in normalized [0, 1] range (-1 for missing).
         img_size: Target square image dimension in pixels (default 640).
-        pixel_spacing: Physical spacing in mm per pixel (default 0.1).
+        pixel_spacing: Physical spacing in mm per pixel (float scalar or 1D array of shape (N,)).
 
     Returns:
         List of dicts with performance metrics for each landmark.
@@ -270,7 +270,11 @@ def compute_per_landmark_metrics(
             continue
 
         l_radial = radial_errors[:, i][l_mask]
-        l_radial_mm = l_radial * pixel_spacing
+        if isinstance(pixel_spacing, np.ndarray):
+            l_radial_mm = l_radial * pixel_spacing[l_mask]
+        else:
+            l_radial_mm = l_radial * pixel_spacing
+
         l_dx = dx[:, i][l_mask]
         l_dy = dy[:, i][l_mask]
         l_abs_dx = abs_dx[:, i][l_mask]
@@ -350,6 +354,7 @@ def validate_epoch(
     all_radial_errors = []
     all_pred_coords = []
     all_gt_coords = []
+    all_spacings = []
 
     pbar = tqdm(
         dataloader,
@@ -364,6 +369,9 @@ def validate_epoch(
             images = batch["image"].to(device)
             gt_heatmaps = batch["heatmaps"].to(device)
             gt_coords = batch["coords"].to(device)
+            sample_spacing = batch.get("pixel_spacing")
+            if sample_spacing is not None:
+                all_spacings.append(sample_spacing.cpu())
 
             with torch.amp.autocast(device_type=device_type, dtype=torch.float16, enabled=amp_enabled):
                 pred_heatmaps, pred_coords = model(images)
@@ -391,6 +399,11 @@ def validate_epoch(
         all_preds = torch.cat(all_pred_coords, dim=0)
         all_gts = torch.cat(all_gt_coords, dim=0)
 
+        if len(all_spacings) > 0:
+            spacings_tensor = torch.cat(all_spacings, dim=0)  # [Total_Samples]
+        else:
+            spacings_tensor = torch.full((all_errors.size(0),), pixel_spacing, dtype=torch.float32)
+
         # Valid mask for GT coordinates (excluding missing landmarks marked with negative coordinates)
         valid_mask = (all_gts[:, :, 0] >= 0) & (all_gts[:, :, 1] >= 0)
         if valid_mask.any():
@@ -402,7 +415,9 @@ def validate_epoch(
             sdr_3_0 = (valid_errors <= 3.0).float().mean().item() * 100.0
             sdr_4_0 = (valid_errors <= 4.0).float().mean().item() * 100.0
 
-            valid_errors_mm = valid_errors * pixel_spacing
+            # Compute sample-specific physical millimeter errors
+            all_errors_mm = all_errors * spacings_tensor.unsqueeze(-1)
+            valid_errors_mm = all_errors_mm[valid_mask]
             val_mre_mm = valid_errors_mm.mean().item()
             val_rmse_mm = torch.sqrt((valid_errors_mm ** 2).mean()).item()
             sdr_2_0mm = (valid_errors_mm <= 2.0).float().mean().item() * 100.0
@@ -414,7 +429,7 @@ def validate_epoch(
             val_mre_mm, val_rmse_mm, sdr_2_0mm, sdr_2_5mm, sdr_3_0mm, sdr_4_0mm = 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
 
         per_landmark_metrics = compute_per_landmark_metrics(
-            all_preds, all_gts, img_size=img_size, pixel_spacing=pixel_spacing
+            all_preds, all_gts, img_size=img_size, pixel_spacing=spacings_tensor.numpy()
         )
     else:
         val_mae, val_rmse, sdr_2_0, sdr_2_5, sdr_3_0, sdr_4_0 = 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
@@ -826,6 +841,7 @@ def main(
         val_npz_dir=val_npz_dir,
         batch_size=batch_size,
         img_size=img_size,
+        pixel_spacing=pixel_spacing,
     )
 
     model = CephalometricSwinGCN(num_landmarks=NUM_LANDMARKS, img_size=img_size).to(device)
