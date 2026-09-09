@@ -44,6 +44,7 @@ LAMBDA_GRAPH = 1.0
 EARLY_STOPPING_PATIENCE = 40
 WARMUP_COORD_EPOCHS = 5
 SAVE_PATH = "./artifacts/best.pth"
+FULL_CHECKPOINT_PATH = "./artifacts/best_full_checkpoint.pth"
 DEFAULT_IMG_SIZE = 640
 DEFAULT_PIXEL_SPACING = float(os.getenv("PIXEL_SPACING", 0.1))  # 0.1 mm per pixel (standard cephalometric calibration)
 
@@ -741,6 +742,14 @@ def log_best_per_landmark_metrics_to_mlflow(
         "step": int(epoch),
         "timestamp": datetime.now().isoformat(),
         "summary": {
+            # Physical Millimeters (Clinical)
+            "best_val_mre_mm": float(metrics.get("mre_mm", 0.0)),
+            "best_val_rmse_mm": float(metrics.get("rmse_mm", 0.0)),
+            "best_val_sdr_2_0mm": float(metrics.get("sdr_2_0mm", 0.0)),
+            "best_val_sdr_2_5mm": float(metrics.get("sdr_2_5mm", 0.0)),
+            "best_val_sdr_3_0mm": float(metrics.get("sdr_3_0mm", 0.0)),
+            "best_val_sdr_4_0mm": float(metrics.get("sdr_4_0mm", 0.0)),
+            # Canvas Pixels (Secondary)
             "best_val_loss": float(best_val_loss),
             "best_val_mae": float(best_val_mae),
             "best_val_rmse": float(metrics.get("rmse", 0.0)),
@@ -801,7 +810,7 @@ def main(
     ftp_remote_dir: str | None = None,
     ftp_tls: bool | None = None,
     skip_ftp: bool = False,
-    save_optimizer: bool = False,
+    save_optimizer: bool = True,
     use_amp: bool = True,
     compile_model: bool = False,
     warmup_coord_epochs: int = WARMUP_COORD_EPOCHS,
@@ -1062,12 +1071,18 @@ def main(
                 best_val_loss = val_loss
                 patience_counter = 0
                 os.makedirs(os.path.dirname(SAVE_PATH), exist_ok=True)
+                # 1. Clean model weights (~420 MB state_dict) for inference and MLflow logging
+                torch.save(model.state_dict(), SAVE_PATH)
+
+                # 2. Full checkpoint bundle (~1.3 GB) saved locally on VPS (NOT sent to MLflow)
+                full_ckpt_path = os.path.join(os.path.dirname(SAVE_PATH), "best_full_checkpoint.pth")
                 if save_optimizer:
                     torch.save(
                         {
                             "epoch": epoch,
                             "model_state_dict": model.state_dict(),
                             "optimizer_state_dict": optimizer.state_dict(),
+                            "scheduler_state_dict": scheduler.state_dict() if scheduler is not None else None,
                             "val_loss": best_val_loss,
                             "val_mre_mm": best_val_mre_mm,
                             "val_rmse_mm": metrics["rmse_mm"],
@@ -1082,15 +1097,16 @@ def main(
                             "pixel_spacing": pixel_spacing,
                             "img_size": img_size,
                         },
-                        SAVE_PATH,
+                        full_ckpt_path,
                     )
+                    full_size_mb = os.path.getsize(full_ckpt_path) / (1024 * 1024)
+                    full_status_str = f"& full checkpoint [{full_size_mb:.1f} MB -> {full_ckpt_path}] (local VPS only, not sent to MLflow) "
                 else:
-                    # Save state_dict only (reduces file size from ~1.5GB to ~420MB)
-                    torch.save(model.state_dict(), SAVE_PATH)
+                    full_status_str = ""
 
                 saved_size_mb = os.path.getsize(SAVE_PATH) / (1024 * 1024)
                 print(
-                    f"--> Saved new best model weights locally [{saved_size_mb:.1f} MB] "
+                    f"--> Saved new best model weights locally [{saved_size_mb:.1f} MB -> {SAVE_PATH}] {full_status_str}"
                     f"(SDR@2.0mm: {best_val_sdr_2_0mm:.1f}%, SDR@2.5mm: {best_val_sdr_2_5mm:.1f}%, "
                     f"MRE: {best_val_mre_mm:.2f} mm [{best_val_mae_px:.2f} px], Val Loss: {best_val_loss:.4f})"
                 )
@@ -1283,6 +1299,21 @@ def main(
                     print(f"--> Successfully logged evaluation visualization PNGs to MLflow artifact path 'evaluation/visualizations'.")
                 except Exception as ml_err:
                     print(f"⚠️ Warning: Could not log evaluation visualizations to MLflow: {ml_err}")
+        else:
+            # Fallback: Check for any existing evaluation/ charts and visualizations to log BEFORE best.pth
+            eval_base = Path("evaluation")
+            if eval_base.exists():
+                found_charts = sorted(
+                    eval_base.glob("**/charts"),
+                    key=lambda p: p.stat().st_mtime,
+                    reverse=True,
+                )
+                if found_charts and found_charts[0].is_dir():
+                    try:
+                        mlflow.log_artifacts(str(found_charts[0]), artifact_path="evaluation/charts")
+                        print(f"--> Successfully logged fallback evaluation charts from '{found_charts[0]}' to MLflow artifact path 'evaluation/charts'.")
+                    except Exception as ml_err:
+                        print(f"⚠️ Warning: Could not log fallback evaluation charts to MLflow: {ml_err}")
 
         # --- STEP 3: AFTER THAT, UPLOAD LARGE MODEL FILE ---
         print("\n[Step 3/3] --- Uploading Large Model Checkpoint File ---")
@@ -1339,8 +1370,16 @@ if __name__ == "__main__":
     parser.add_argument("--skip-ftp", action="store_true", help="Skip uploading model and metrics to FTP server")
     parser.add_argument(
         "--save-optimizer",
+        dest="save_optimizer",
         action="store_true",
-        help="Also save optimizer state dict in checkpoint (increases file size from ~420MB to ~1.5GB, useful only if resuming training)",
+        default=True,
+        help="Also save full checkpoint with optimizer/scheduler states locally to ./artifacts/best_full_checkpoint.pth (~1.3GB, local VPS only, not sent to MLflow; default: True)",
+    )
+    parser.add_argument(
+        "--no-save-optimizer",
+        dest="save_optimizer",
+        action="store_false",
+        help="Do not save the large full checkpoint locally (only save clean weights in best.pth)",
     )
     parser.add_argument(
         "--img-size",

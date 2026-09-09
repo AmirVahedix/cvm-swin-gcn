@@ -191,8 +191,16 @@ def main():
     )
     parser.add_argument(
         "--save-optimizer",
+        dest="save_optimizer",
         action="store_true",
-        help="Save optimizer state dict along with model weights (useful only for resuming training, adds ~900MB).",
+        default=True,
+        help="Also save full checkpoint with optimizer state locally on VPS (not sent to MLflow, default: True).",
+    )
+    parser.add_argument(
+        "--no-save-optimizer",
+        dest="save_optimizer",
+        action="store_false",
+        help="Do not save full checkpoint with optimizer state locally.",
     )
     parser.add_argument(
         "--amp",

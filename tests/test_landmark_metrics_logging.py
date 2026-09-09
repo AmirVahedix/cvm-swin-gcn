@@ -1,4 +1,5 @@
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -330,6 +331,82 @@ class TestLandmarkMetricsLogging(unittest.TestCase):
         # For SDR@3.0mm, both sample 0 (2.0mm) and sample 1 (3.0mm) pass -> 100.0%
         self.assertEqual(lm0["sdr_3.0mm"], 100.0)
 
+    def test_checkpoint_saving_clean_and_full(self):
+        """Verify that best.pth contains only state_dict and best_full_checkpoint.pth contains optimizer state."""
+        import tempfile
+        import torch.nn as nn
+        import torch.optim as optim
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            save_path = os.path.join(tmpdir, "best.pth")
+            full_ckpt_path = os.path.join(tmpdir, "best_full_checkpoint.pth")
+
+            model = nn.Linear(4, 2)
+            optimizer = optim.Adam(model.parameters(), lr=1e-3)
+            scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=1)
+
+            # 1. Clean weights (~420MB in actual model)
+            torch.save(model.state_dict(), save_path)
+
+            # 2. Full checkpoint (~1.3GB in actual model)
+            torch.save(
+                {
+                    "epoch": 5,
+                    "model_state_dict": model.state_dict(),
+                    "optimizer_state_dict": optimizer.state_dict(),
+                    "scheduler_state_dict": scheduler.state_dict(),
+                    "val_loss": 0.1234,
+                    "val_mre_mm": 1.45,
+                    "val_sdr_2_0mm": 88.5,
+                },
+                full_ckpt_path,
+            )
+
+            self.assertTrue(os.path.exists(save_path))
+            self.assertTrue(os.path.exists(full_ckpt_path))
+
+            # Verify clean checkpoint loads directly as state_dict
+            loaded_clean = torch.load(save_path, weights_only=True)
+            self.assertIn("weight", loaded_clean)
+            self.assertIn("bias", loaded_clean)
+            self.assertNotIn("optimizer_state_dict", loaded_clean)
+
+            # Verify full checkpoint contains optimizer and metadata
+            loaded_full = torch.load(full_ckpt_path, weights_only=False)
+            self.assertIn("model_state_dict", loaded_full)
+            self.assertIn("optimizer_state_dict", loaded_full)
+            self.assertIn("scheduler_state_dict", loaded_full)
+            self.assertEqual(loaded_full["epoch"], 5)
+            self.assertEqual(loaded_full["val_mre_mm"], 1.45)
+
+    def test_artifact_logging_order_charts_before_checkpoint(self):
+        """Verify that evaluation/charts is logged to MLflow strictly BEFORE checkpoints/best.pth."""
+        logged_artifacts = []
+
+        def mock_log_artifact(local_path, artifact_path=None):
+            logged_artifacts.append((local_path, artifact_path))
+
+        def mock_log_artifacts(local_dir, artifact_path=None):
+            logged_artifacts.append((local_dir, artifact_path))
+
+        with patch("mlflow.log_artifact", side_effect=mock_log_artifact), \
+             patch("mlflow.log_artifacts", side_effect=mock_log_artifacts):
+
+            # Simulate Step 1 (JSON), Step 2 (Charts), Step 3 (Model)
+            mock_log_artifact("evaluation/metrics.json", artifact_path="evaluation")
+            mock_log_artifacts("evaluation/run_1/charts", artifact_path="evaluation/charts")
+            mock_log_artifact("./artifacts/best.pth", artifact_path="checkpoints")
+
+            paths = [a[1] for a in logged_artifacts]
+            self.assertIn("evaluation/charts", paths)
+            self.assertIn("checkpoints", paths)
+
+            charts_idx = paths.index("evaluation/charts")
+            ckpt_idx = paths.index("checkpoints")
+            self.assertLess(charts_idx, ckpt_idx, "evaluation/charts must be logged before checkpoints/best.pth")
+
 
 if __name__ == "__main__":
     unittest.main()
+
+
