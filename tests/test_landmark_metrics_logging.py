@@ -36,36 +36,46 @@ class TestLandmarkMetricsLogging(unittest.TestCase):
         # Landmark 1: exactly 4.0 pixels error along Y
         pred_coords[:, 1, 1] += 4.0 / img_size
 
-        metrics_list = compute_per_landmark_metrics(pred_coords, gt_coords, img_size=img_size)
+        metrics_list = compute_per_landmark_metrics(pred_coords, gt_coords, img_size=img_size, pixel_spacing=0.1)
 
         self.assertEqual(len(metrics_list), num_landmarks)
 
-        # Test Landmark 0 (2.0 px radial error)
+        # Test Landmark 0 (2.0 px radial error = 0.2 mm)
         lm0 = metrics_list[0]
         self.assertEqual(lm0["id"], 0)
         self.assertEqual(lm0["name"], LANDMARK_CLASSES[0])
         self.assertEqual(lm0["count"], num_samples)
         self.assertAlmostEqual(lm0["mre_px"], 2.0, places=4)
         self.assertAlmostEqual(lm0["rmse_px"], 2.0, places=4)
+        self.assertAlmostEqual(lm0["mre_mm"], 0.2, places=4)
+        self.assertAlmostEqual(lm0["rmse_mm"], 0.2, places=4)
+        self.assertEqual(lm0["sdr_2.0mm"], 100.0)
+        self.assertEqual(lm0["sdr_2.5mm"], 100.0)
         self.assertEqual(lm0["sdr_2.0px"], 100.0)
         self.assertEqual(lm0["sdr_2.5px"], 100.0)
         self.assertEqual(lm0["sdr_3.0px"], 100.0)
 
-        # Test Landmark 1 (4.0 px radial error)
+        # Test Landmark 1 (4.0 px radial error = 0.4 mm)
         lm1 = metrics_list[1]
         self.assertEqual(lm1["id"], 1)
         self.assertEqual(lm1["name"], LANDMARK_CLASSES[1])
         self.assertEqual(lm1["count"], num_samples)
         self.assertAlmostEqual(lm1["mre_px"], 4.0, places=4)
         self.assertAlmostEqual(lm1["rmse_px"], 4.0, places=4)
-        self.assertEqual(lm1["sdr_2.0px"], 0.0)
+        self.assertAlmostEqual(lm1["mre_mm"], 0.4, places=4)
+        self.assertAlmostEqual(lm1["rmse_mm"], 0.4, places=4)
+        self.assertEqual(lm1["sdr_2.0mm"], 100.0)  # 0.4 mm <= 2.0 mm
+        self.assertEqual(lm1["sdr_2.5mm"], 100.0)
+        self.assertEqual(lm1["sdr_2.0px"], 0.0)    # 4.0 px > 2.0 px
         self.assertEqual(lm1["sdr_2.5px"], 0.0)
         self.assertEqual(lm1["sdr_3.0px"], 0.0)
         self.assertEqual(lm1["sdr_4.0px"], 100.0)
 
-        # Test Landmark 2 (0 px error)
+        # Test Landmark 2 (0 px error = 0 mm)
         lm2 = metrics_list[2]
         self.assertAlmostEqual(lm2["mre_px"], 0.0, places=4)
+        self.assertAlmostEqual(lm2["mre_mm"], 0.0, places=4)
+        self.assertEqual(lm2["sdr_2.0mm"], 100.0)
         self.assertEqual(lm2["sdr_2.0px"], 100.0)
 
     def test_compute_per_landmark_metrics_torch_tensor_input(self):
@@ -225,7 +235,54 @@ class TestLandmarkMetricsLogging(unittest.TestCase):
         self.assertIn("per_landmark", metrics)
         self.assertEqual(len(metrics["per_landmark"]), NUM_LANDMARKS)
         self.assertAlmostEqual(metrics["per_landmark"][0]["mre_px"], 0.0, places=4)
+        self.assertAlmostEqual(metrics["per_landmark"][0]["mre_mm"], 0.0, places=4)
+        self.assertEqual(metrics["per_landmark"][0]["sdr_2.0mm"], 100.0)
         self.assertEqual(metrics["per_landmark"][0]["sdr_2.5px"], 100.0)
+
+    def test_eval_compute_metrics_millimeter_and_pixel_reporting(self):
+        """Verify that src.eval.compute_metrics correctly computes clinical mm and canvas px metrics."""
+        from src.eval import compute_metrics, format_metrics_table
+
+        num_samples = 4
+        img_size = 640
+        pixel_spacing = 0.1  # 0.1 mm per pixel
+
+        gt_coords = np.full((num_samples, NUM_LANDMARKS, 2), 0.5, dtype=np.float32)
+        pred_coords = gt_coords.copy()
+
+        # Add 10 px radial error (1.0 mm) to landmark 0
+        pred_coords[:, 0, 0] += 10.0 / img_size
+
+        summary, landmarks, errors = compute_metrics(
+            pred_coords=pred_coords,
+            gt_coords=gt_coords,
+            img_size=img_size,
+            pixel_spacing=pixel_spacing,
+        )
+
+        # Total valid landmarks = 4 samples * 13 landmarks = 52
+        # 4 landmarks have 10 px (1.0 mm) error, 48 landmarks have 0 px (0.0 mm) error
+        # Mean error = (4 * 1.0) / 52 = 0.07692 mm (or in px: 40/52 = 0.7692 px)
+        self.assertIn("mre_mm", summary)
+        self.assertIn("rmse_mm", summary)
+        self.assertIn("sdr_2.0mm", summary)
+        self.assertIn("sdr_2.5mm", summary)
+        self.assertIn("sdr_4.0mm", summary)
+        self.assertIn("mre_pixels", summary)
+        self.assertIn("sdr_2.5px", summary)
+
+        self.assertAlmostEqual(summary["mre_mm"], summary["mre_pixels"] * pixel_spacing, places=5)
+        # All 52 landmarks have error <= 1.0 mm, which is <= 2.0 mm
+        self.assertEqual(summary["sdr_2.0mm"], 100.0)
+        self.assertEqual(summary["sdr_2.5mm"], 100.0)
+        # In px: 4 landmarks have 10 px error (> 2.5 px), so 48/52 = 92.31%
+        self.assertAlmostEqual(summary["sdr_2.5px"], (48.0 / 52.0) * 100.0, places=2)
+
+        # Verify ASCII table generation contains clinical mm header
+        table = format_metrics_table(summary, landmarks, run_name="test_run", weights_path="best.pth")
+        self.assertIn("CLINICAL METRIC (MILLIMETERS)", table)
+        self.assertIn("CANVAS METRIC (PIXELS)", table)
+        self.assertIn("SDR @ 2.0 mm (Clinical Standard)", table)
 
 
 if __name__ == "__main__":

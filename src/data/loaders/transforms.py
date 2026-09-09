@@ -3,7 +3,7 @@ from albumentations.pytorch import ToTensorV2
 import cv2
 
 
-def get_transforms(img_size=1024):
+def get_transforms(img_size=640):
     """
     Defines the training and validation augmentation pipelines.
     Note: Horizontal flip is excluded as lateral cephalometric images

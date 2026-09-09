@@ -44,6 +44,8 @@ LAMBDA_GRAPH = 1.0
 EARLY_STOPPING_PATIENCE = 40
 WARMUP_COORD_EPOCHS = 5
 SAVE_PATH = "./artifacts/best.pth"
+DEFAULT_IMG_SIZE = 640
+DEFAULT_PIXEL_SPACING = float(os.getenv("PIXEL_SPACING", 0.1))  # 0.1 mm per pixel (standard cephalometric calibration)
 
 
 def get_coord_loss_warmup_factor(epoch: int, warmup_epochs: int) -> float:
@@ -200,15 +202,17 @@ def train_epoch(
 def compute_per_landmark_metrics(
     pred_coords: torch.Tensor | np.ndarray,
     gt_coords: torch.Tensor | np.ndarray,
-    img_size: int = 1024,
+    img_size: int = DEFAULT_IMG_SIZE,
+    pixel_spacing: float = DEFAULT_PIXEL_SPACING,
 ) -> list[dict]:
     """
-    Computes detailed per-landmark performance metrics.
+    Computes detailed per-landmark performance metrics in both millimeters (mm) and pixels (px).
 
     Args:
         pred_coords: Array or Tensor of shape (N, NUM_LANDMARKS, 2) in normalized [0, 1] range.
         gt_coords: Array or Tensor of shape (N, NUM_LANDMARKS, 2) in normalized [0, 1] range (-1 for missing).
-        img_size: Target square image dimension in pixels (default 1024).
+        img_size: Target square image dimension in pixels (default 640).
+        pixel_spacing: Physical spacing in mm per pixel (default 0.1).
 
     Returns:
         List of dicts with performance metrics for each landmark.
@@ -254,10 +258,19 @@ def compute_per_landmark_metrics(
                 "sdr_2.5px": 0.0,
                 "sdr_3.0px": 0.0,
                 "sdr_4.0px": 0.0,
+                "mre_mm": 0.0,
+                "rmse_mm": 0.0,
+                "medre_mm": 0.0,
+                "sdre_mm": 0.0,
+                "sdr_2.0mm": 0.0,
+                "sdr_2.5mm": 0.0,
+                "sdr_3.0mm": 0.0,
+                "sdr_4.0mm": 0.0,
             })
             continue
 
         l_radial = radial_errors[:, i][l_mask]
+        l_radial_mm = l_radial * pixel_spacing
         l_dx = dx[:, i][l_mask]
         l_dy = dy[:, i][l_mask]
         l_abs_dx = abs_dx[:, i][l_mask]
@@ -271,10 +284,21 @@ def compute_per_landmark_metrics(
         l_min = float(np.min(l_radial))
         l_max = float(np.max(l_radial))
 
+        # Pixel thresholds
         l_sdr2_0 = float(np.mean(l_radial <= 2.0) * 100.0)
         l_sdr2_5 = float(np.mean(l_radial <= 2.5) * 100.0)
         l_sdr3_0 = float(np.mean(l_radial <= 3.0) * 100.0)
         l_sdr4_0 = float(np.mean(l_radial <= 4.0) * 100.0)
+
+        # Physical Millimeter (mm) thresholds
+        l_mre_mm = float(np.mean(l_radial_mm))
+        l_rmse_mm = float(np.sqrt(np.mean((l_radial_mm) ** 2)))
+        l_medre_mm = float(np.median(l_radial_mm))
+        l_sdre_mm = float(np.std(l_radial_mm)) if count > 1 else 0.0
+        l_sdr2_0mm = float(np.mean(l_radial_mm <= 2.0) * 100.0)
+        l_sdr2_5mm = float(np.mean(l_radial_mm <= 2.5) * 100.0)
+        l_sdr3_0mm = float(np.mean(l_radial_mm <= 3.0) * 100.0)
+        l_sdr4_0mm = float(np.mean(l_radial_mm <= 4.0) * 100.0)
 
         landmark_metrics.append({
             "id": i,
@@ -291,6 +315,14 @@ def compute_per_landmark_metrics(
             "sdr_2.5px": l_sdr2_5,
             "sdr_3.0px": l_sdr3_0,
             "sdr_4.0px": l_sdr4_0,
+            "mre_mm": l_mre_mm,
+            "rmse_mm": l_rmse_mm,
+            "medre_mm": l_medre_mm,
+            "sdre_mm": l_sdre_mm,
+            "sdr_2.0mm": l_sdr2_0mm,
+            "sdr_2.5mm": l_sdr2_5mm,
+            "sdr_3.0mm": l_sdr3_0mm,
+            "sdr_4.0mm": l_sdr4_0mm,
         })
 
     return landmark_metrics
@@ -307,7 +339,8 @@ def validate_epoch(
     lambda_cd,
     lambda_graph,
     device,
-    img_size=1024,
+    img_size=DEFAULT_IMG_SIZE,
+    pixel_spacing: float = DEFAULT_PIXEL_SPACING,
     epoch: int = 1,
     epochs: int = 1,
     use_amp: bool = True,
@@ -368,12 +401,24 @@ def validate_epoch(
             sdr_2_5 = (valid_errors <= 2.5).float().mean().item() * 100.0
             sdr_3_0 = (valid_errors <= 3.0).float().mean().item() * 100.0
             sdr_4_0 = (valid_errors <= 4.0).float().mean().item() * 100.0
+
+            valid_errors_mm = valid_errors * pixel_spacing
+            val_mre_mm = valid_errors_mm.mean().item()
+            val_rmse_mm = torch.sqrt((valid_errors_mm ** 2).mean()).item()
+            sdr_2_0mm = (valid_errors_mm <= 2.0).float().mean().item() * 100.0
+            sdr_2_5mm = (valid_errors_mm <= 2.5).float().mean().item() * 100.0
+            sdr_3_0mm = (valid_errors_mm <= 3.0).float().mean().item() * 100.0
+            sdr_4_0mm = (valid_errors_mm <= 4.0).float().mean().item() * 100.0
         else:
             val_mae, val_rmse, sdr_2_0, sdr_2_5, sdr_3_0, sdr_4_0 = 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+            val_mre_mm, val_rmse_mm, sdr_2_0mm, sdr_2_5mm, sdr_3_0mm, sdr_4_0mm = 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
 
-        per_landmark_metrics = compute_per_landmark_metrics(all_preds, all_gts, img_size=img_size)
+        per_landmark_metrics = compute_per_landmark_metrics(
+            all_preds, all_gts, img_size=img_size, pixel_spacing=pixel_spacing
+        )
     else:
         val_mae, val_rmse, sdr_2_0, sdr_2_5, sdr_3_0, sdr_4_0 = 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+        val_mre_mm, val_rmse_mm, sdr_2_0mm, sdr_2_5mm, sdr_3_0mm, sdr_4_0mm = 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
         per_landmark_metrics = []
 
     metrics = {
@@ -383,6 +428,12 @@ def validate_epoch(
         "sdr_2_5": sdr_2_5,
         "sdr_3_0": sdr_3_0,
         "sdr_4_0": sdr_4_0,
+        "mre_mm": val_mre_mm,
+        "rmse_mm": val_rmse_mm,
+        "sdr_2_0mm": sdr_2_0mm,
+        "sdr_2_5mm": sdr_2_5mm,
+        "sdr_3_0mm": sdr_3_0mm,
+        "sdr_4_0mm": sdr_4_0mm,
         "per_landmark": per_landmark_metrics,
     }
 
@@ -421,40 +472,54 @@ def generate_and_log_training_charts(history: dict, log_to_mlflow: bool = True):
         fig1.savefig(target_dir / "chart_training_val_loss.png", bbox_inches="tight")
         plt.close(fig1)
 
-        # 2. Validation MAE Chart
+        # 2. Validation MRE Chart (mm)
         fig2, ax2 = plt.subplots(figsize=(8, 4.5), dpi=300)
-        ax2.plot(epochs, history.get("val_mae", []), label="Val MAE (px)", color="#e63946", linewidth=2, marker="o", markersize=4)
+        mre_data = history.get("val_mre_mm") or history.get("val_mae", [])
+        mre_label = "Val MRE (mm)" if "val_mre_mm" in history else "Val MAE (px)"
+        mre_unit = "mm" if "val_mre_mm" in history else "Pixels"
+        ax2.plot(epochs, mre_data, label=mre_label, color="#e63946", linewidth=2, marker="o", markersize=4)
         ax2.set_xlabel("Epoch")
-        ax2.set_ylabel("MAE (Pixels)")
-        ax2.set_title("Validation Mean Absolute Error (MAE) Over Epochs", fontsize=12, fontweight="bold")
+        ax2.set_ylabel(f"Mean Radial Error ({mre_unit})")
+        ax2.set_title(f"Validation Mean Radial Error ({mre_unit}) Over Epochs", fontsize=12, fontweight="bold")
         ax2.legend(loc="upper right")
         ax2.grid(True, linestyle="--", alpha=0.5)
         plt.tight_layout()
+        fig2.savefig(target_dir / "chart_val_mre.png", bbox_inches="tight")
         fig2.savefig(target_dir / "chart_val_mae.png", bbox_inches="tight")
         plt.close(fig2)
 
-        # 3. Validation RMSE Chart
+        # 3. Validation RMSE Chart (mm)
         fig3, ax3 = plt.subplots(figsize=(8, 4.5), dpi=300)
-        ax3.plot(epochs, history.get("val_rmse", []), label="Val RMSE (px)", color="#457b9d", linewidth=2, marker="s", markersize=4)
+        rmse_data = history.get("val_rmse_mm") or history.get("val_rmse", [])
+        rmse_label = "Val RMSE (mm)" if "val_rmse_mm" in history else "Val RMSE (px)"
+        rmse_unit = "mm" if "val_rmse_mm" in history else "Pixels"
+        ax3.plot(epochs, rmse_data, label=rmse_label, color="#457b9d", linewidth=2, marker="s", markersize=4)
         ax3.set_xlabel("Epoch")
-        ax3.set_ylabel("RMSE (Pixels)")
-        ax3.set_title("Validation Root Mean Squared Error (RMSE) Over Epochs", fontsize=12, fontweight="bold")
+        ax3.set_ylabel(f"RMSE ({rmse_unit})")
+        ax3.set_title(f"Validation Root Mean Squared Error ({rmse_unit}) Over Epochs", fontsize=12, fontweight="bold")
         ax3.legend(loc="upper right")
         ax3.grid(True, linestyle="--", alpha=0.5)
         plt.tight_layout()
         fig3.savefig(target_dir / "chart_val_rmse.png", bbox_inches="tight")
         plt.close(fig3)
 
-        # 4. Validation SDR Chart
+        # 4. Validation SDR Chart (Clinical mm thresholds)
         fig4, ax4 = plt.subplots(figsize=(8, 4.5), dpi=300)
-        ax4.plot(epochs, history.get("val_sdr_2_0", []), label="SDR @ 2.0px", color="#d62828", linewidth=1.8)
-        ax4.plot(epochs, history.get("val_sdr_2_5", []), label="SDR @ 2.5px", color="#f77f00", linewidth=2.0)
-        ax4.plot(epochs, history.get("val_sdr_3_0", []), label="SDR @ 3.0px", color="#fcbf49", linewidth=1.8)
-        ax4.plot(epochs, history.get("val_sdr_4_0", []), label="SDR @ 4.0px", color="#003049", linewidth=1.8)
+        has_mm_sdr = "val_sdr_2_0mm" in history
+        sdr2_0 = history.get("val_sdr_2_0mm", history.get("val_sdr_2_0", []))
+        sdr2_5 = history.get("val_sdr_2_5mm", history.get("val_sdr_2_5", []))
+        sdr3_0 = history.get("val_sdr_3_0mm", history.get("val_sdr_3_0", []))
+        sdr4_0 = history.get("val_sdr_4_0mm", history.get("val_sdr_4_0", []))
+        suffix = "mm" if has_mm_sdr else "px"
+
+        ax4.plot(epochs, sdr2_0, label=f"SDR @ 2.0{suffix}", color="#d62828", linewidth=2.0)
+        ax4.plot(epochs, sdr2_5, label=f"SDR @ 2.5{suffix}", color="#f77f00", linewidth=2.0)
+        ax4.plot(epochs, sdr3_0, label=f"SDR @ 3.0{suffix}", color="#fcbf49", linewidth=1.8)
+        ax4.plot(epochs, sdr4_0, label=f"SDR @ 4.0{suffix}", color="#003049", linewidth=1.8)
         ax4.set_xlabel("Epoch")
         ax4.set_ylabel("Successful Detection Rate (%)")
         ax4.set_ylim(0, 105)
-        ax4.set_title("Validation Successful Detection Rates (SDR) Over Epochs", fontsize=12, fontweight="bold")
+        ax4.set_title(f"Validation Successful Detection Rates (SDR @ {suffix}) Over Epochs", fontsize=12, fontweight="bold")
         ax4.legend(loc="lower right")
         ax4.grid(True, linestyle="--", alpha=0.5)
         plt.tight_layout()
@@ -483,21 +548,21 @@ def generate_and_log_training_charts(history: dict, log_to_mlflow: bool = True):
         axes[0, 0].legend(fontsize=8)
         axes[0, 0].grid(True, linestyle="--", alpha=0.5)
 
-        axes[0, 1].plot(epochs, history.get("val_mae", []), label="Val MAE", color="#e63946")
-        axes[0, 1].set_title("Validation MAE (px)", fontweight="bold", fontsize=10)
+        axes[0, 1].plot(epochs, mre_data, label=mre_label, color="#e63946")
+        axes[0, 1].set_title(f"Validation Error ({mre_unit})", fontweight="bold", fontsize=10)
         axes[0, 1].set_xlabel("Epoch", fontsize=8)
         axes[0, 1].grid(True, linestyle="--", alpha=0.5)
 
-        axes[0, 2].plot(epochs, history.get("val_rmse", []), label="Val RMSE", color="#457b9d")
-        axes[0, 2].set_title("Validation RMSE (px)", fontweight="bold", fontsize=10)
+        axes[0, 2].plot(epochs, rmse_data, label=rmse_label, color="#457b9d")
+        axes[0, 2].set_title(f"Validation RMSE ({rmse_unit})", fontweight="bold", fontsize=10)
         axes[0, 2].set_xlabel("Epoch", fontsize=8)
         axes[0, 2].grid(True, linestyle="--", alpha=0.5)
 
-        axes[1, 0].plot(epochs, history.get("val_sdr_2_0", []), label="SDR 2.0px", color="#d62828")
-        axes[1, 0].plot(epochs, history.get("val_sdr_2_5", []), label="SDR 2.5px", color="#f77f00")
-        axes[1, 0].plot(epochs, history.get("val_sdr_3_0", []), label="SDR 3.0px", color="#fcbf49")
-        axes[1, 0].plot(epochs, history.get("val_sdr_4_0", []), label="SDR 4.0px", color="#003049")
-        axes[1, 0].set_title("Validation SDR (%)", fontweight="bold", fontsize=10)
+        axes[1, 0].plot(epochs, sdr2_0, label=f"SDR 2.0{suffix}", color="#d62828")
+        axes[1, 0].plot(epochs, sdr2_5, label=f"SDR 2.5{suffix}", color="#f77f00")
+        axes[1, 0].plot(epochs, sdr3_0, label=f"SDR 3.0{suffix}", color="#fcbf49")
+        axes[1, 0].plot(epochs, sdr4_0, label=f"SDR 4.0{suffix}", color="#003049")
+        axes[1, 0].set_title(f"Validation SDR ({suffix})", fontweight="bold", fontsize=10)
         axes[1, 0].set_xlabel("Epoch", fontsize=8)
         axes[1, 0].legend(fontsize=8)
         axes[1, 0].grid(True, linestyle="--", alpha=0.5)
@@ -706,7 +771,8 @@ def main(
     val_img_dir: str = VAL_IMG_DIR,
     val_npz_dir: str = VAL_NPZ_DIR,
     test_img_dir: str = TEST_IMG_DIR,
-    img_size: int = 1024,
+    img_size: int = DEFAULT_IMG_SIZE,
+    pixel_spacing: float = DEFAULT_PIXEL_SPACING,
     experiment_name: str | None = None,
     tracking_uri: str | None = None,
     run_name: str | None = None,
@@ -804,8 +870,10 @@ def main(
     landmark_weights = get_landmark_weights(device)
 
     best_val_loss = float("inf")
-    best_val_sdr = 0.0
-    best_val_mae = float("inf")
+    best_val_sdr_2_0mm = 0.0
+    best_val_sdr_2_5mm = 0.0
+    best_val_mre_mm = float("inf")
+    best_val_mae_px = float("inf")
     patience_counter = 0
 
     print(f"Starting training with MLflow experiment '{exp_name}'...")
@@ -825,6 +893,7 @@ def main(
                 "early_stopping_patience": patience,
                 "save_path": SAVE_PATH,
                 "img_size": img_size,
+                "pixel_spacing": pixel_spacing,
                 "num_landmarks": NUM_LANDMARKS,
                 "optimizer": "AdamW-LLRD",
                 "scheduler": "CosineAnnealingWithWarmup",
@@ -847,6 +916,12 @@ def main(
             "epochs": [],
             "train_loss": [],
             "val_loss": [],
+            "val_mre_mm": [],
+            "val_rmse_mm": [],
+            "val_sdr_2_0mm": [],
+            "val_sdr_2_5mm": [],
+            "val_sdr_3_0mm": [],
+            "val_sdr_4_0mm": [],
             "val_mae": [],
             "val_rmse": [],
             "val_sdr_2_0": [],
@@ -895,6 +970,7 @@ def main(
                 effective_lambda_graph,
                 device,
                 img_size=img_size,
+                pixel_spacing=pixel_spacing,
                 epoch=epoch + 1,
                 epochs=epochs,
                 use_amp=use_amp,
@@ -910,6 +986,12 @@ def main(
             history["epochs"].append(epoch + 1)
             history["train_loss"].append(float(train_loss))
             history["val_loss"].append(float(val_loss))
+            history["val_mre_mm"].append(float(metrics["mre_mm"]))
+            history["val_rmse_mm"].append(float(metrics["rmse_mm"]))
+            history["val_sdr_2_0mm"].append(float(metrics["sdr_2_0mm"]))
+            history["val_sdr_2_5mm"].append(float(metrics["sdr_2_5mm"]))
+            history["val_sdr_3_0mm"].append(float(metrics["sdr_3_0mm"]))
+            history["val_sdr_4_0mm"].append(float(metrics["sdr_4_0mm"]))
             history["val_mae"].append(float(metrics["mae"]))
             history["val_rmse"].append(float(metrics["rmse"]))
             history["val_sdr_2_0"].append(float(metrics["sdr_2_0"]))
@@ -924,12 +1006,18 @@ def main(
                 {
                     "train_loss": train_loss,
                     "val_loss": val_loss,
-                    "val_mae": metrics["mae"],
-                    "val_rmse": metrics["rmse"],
-                    "val_sdr_2_0": metrics["sdr_2_0"],
-                    "val_sdr_2_5": metrics["sdr_2_5"],
-                    "val_sdr_3_0": metrics["sdr_3_0"],
-                    "val_sdr_4_0": metrics["sdr_4_0"],
+                    "val_mre_mm": metrics["mre_mm"],
+                    "val_rmse_mm": metrics["rmse_mm"],
+                    "val_sdr_2_0mm": metrics["sdr_2_0mm"],
+                    "val_sdr_2_5mm": metrics["sdr_2_5mm"],
+                    "val_sdr_3_0mm": metrics["sdr_3_0mm"],
+                    "val_sdr_4_0mm": metrics["sdr_4_0mm"],
+                    "val_mae_px": metrics["mae"],
+                    "val_rmse_px": metrics["rmse"],
+                    "val_sdr_2_0px": metrics["sdr_2_0"],
+                    "val_sdr_2_5px": metrics["sdr_2_5"],
+                    "val_sdr_3_0px": metrics["sdr_3_0"],
+                    "val_sdr_4_0px": metrics["sdr_4_0"],
                     "learning_rate": current_lr,
                     "epoch_time_seconds": epoch_time,
                     "lambda_coord": effective_lambda_cd,
@@ -941,18 +1029,20 @@ def main(
             print(
                 f"Epoch [{epoch + 1}/{epochs}] | Time: {epoch_time:.2f}s | "
                 f"Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | "
-                f"MAE: {metrics['mae']:.2f} px | RMSE: {metrics['rmse']:.2f} px | "
-                f"SDR@2.0px: {metrics['sdr_2_0']:.1f}% | SDR@2.5px: {metrics['sdr_2_5']:.1f}% | "
+                f"MRE: {metrics['mre_mm']:.2f} mm ({metrics['mae']:.2f} px) | "
+                f"SDR@2.0mm: {metrics['sdr_2_0mm']:.1f}% | SDR@2.5mm: {metrics['sdr_2_5mm']:.1f}% | SDR@4.0mm: {metrics['sdr_4_0mm']:.1f}% | "
                 f"λ_cd: {effective_lambda_cd:.2f}"
             )
 
-            # Checkpoint Saving & Early Stopping based on SDR & MAE
-            is_best_sdr = metrics["sdr_2_5"] > best_val_sdr
-            is_tied_sdr_better_mae = (abs(metrics["sdr_2_5"] - best_val_sdr) < 1e-4) and (metrics["mae"] < best_val_mae)
+            # Checkpoint Saving & Early Stopping based on primary clinical criteria (SDR@2.0mm & MRE mm)
+            is_best_sdr = metrics["sdr_2_0mm"] > best_val_sdr_2_0mm
+            is_tied_sdr_better_mre = (abs(metrics["sdr_2_0mm"] - best_val_sdr_2_0mm) < 1e-4) and (metrics["mre_mm"] < best_val_mre_mm)
 
-            if is_best_sdr or is_tied_sdr_better_mae:
-                best_val_sdr = metrics["sdr_2_5"]
-                best_val_mae = metrics["mae"]
+            if is_best_sdr or is_tied_sdr_better_mre:
+                best_val_sdr_2_0mm = metrics["sdr_2_0mm"]
+                best_val_sdr_2_5mm = metrics["sdr_2_5mm"]
+                best_val_mre_mm = metrics["mre_mm"]
+                best_val_mae_px = metrics["mae"]
                 best_val_loss = val_loss
                 patience_counter = 0
                 os.makedirs(os.path.dirname(SAVE_PATH), exist_ok=True)
@@ -963,10 +1053,18 @@ def main(
                             "model_state_dict": model.state_dict(),
                             "optimizer_state_dict": optimizer.state_dict(),
                             "val_loss": best_val_loss,
-                            "val_mae": metrics["mae"],
-                            "val_rmse": metrics["rmse"],
-                            "val_sdr_2_5": metrics["sdr_2_5"],
-                            "val_sdr_2_0": metrics["sdr_2_0"],
+                            "val_mre_mm": best_val_mre_mm,
+                            "val_rmse_mm": metrics["rmse_mm"],
+                            "val_sdr_2_0mm": best_val_sdr_2_0mm,
+                            "val_sdr_2_5mm": best_val_sdr_2_5mm,
+                            "val_sdr_3_0mm": metrics["sdr_3_0mm"],
+                            "val_sdr_4_0mm": metrics["sdr_4_0mm"],
+                            "val_mae_px": best_val_mae_px,
+                            "val_rmse_px": metrics["rmse"],
+                            "val_sdr_2_5px": metrics["sdr_2_5"],
+                            "val_sdr_2_0px": metrics["sdr_2_0"],
+                            "pixel_spacing": pixel_spacing,
+                            "img_size": img_size,
                         },
                         SAVE_PATH,
                     )
@@ -976,18 +1074,25 @@ def main(
 
                 saved_size_mb = os.path.getsize(SAVE_PATH) / (1024 * 1024)
                 print(
-                    f"--> Saved new best model weights locally [{saved_size_mb:.1f} MB] (SDR@2.5px: {best_val_sdr:.1f}%, "
-                    f"MAE: {best_val_mae:.2f} px, RMSE: {metrics['rmse']:.2f} px, Val Loss: {best_val_loss:.4f})"
+                    f"--> Saved new best model weights locally [{saved_size_mb:.1f} MB] "
+                    f"(SDR@2.0mm: {best_val_sdr_2_0mm:.1f}%, SDR@2.5mm: {best_val_sdr_2_5mm:.1f}%, "
+                    f"MRE: {best_val_mre_mm:.2f} mm [{best_val_mae_px:.2f} px], Val Loss: {best_val_loss:.4f})"
                 )
 
                 # Log best metrics to MLflow
                 mlflow.log_metrics(
                     {
                         "best_val_loss": best_val_loss,
-                        "best_val_mae": best_val_mae,
-                        "best_val_rmse": metrics["rmse"],
-                        "best_val_sdr_2_5": best_val_sdr,
-                        "best_val_sdr_2_0": metrics["sdr_2_0"],
+                        "best_val_mre_mm": best_val_mre_mm,
+                        "best_val_rmse_mm": metrics["rmse_mm"],
+                        "best_val_sdr_2_0mm": best_val_sdr_2_0mm,
+                        "best_val_sdr_2_5mm": best_val_sdr_2_5mm,
+                        "best_val_sdr_3_0mm": metrics["sdr_3_0mm"],
+                        "best_val_sdr_4_0mm": metrics["sdr_4_0mm"],
+                        "best_val_mae_px": best_val_mae_px,
+                        "best_val_rmse_px": metrics["rmse"],
+                        "best_val_sdr_2_5px": metrics["sdr_2_5"],
+                        "best_val_sdr_2_0px": metrics["sdr_2_0"],
                     },
                     step=epoch + 1,
                 )
@@ -998,8 +1103,8 @@ def main(
                         landmark_metrics=metrics["per_landmark"],
                         epoch=epoch + 1,
                         metrics=metrics,
-                        best_val_sdr=best_val_sdr,
-                        best_val_mae=best_val_mae,
+                        best_val_sdr=best_val_sdr_2_0mm,
+                        best_val_mae=best_val_mae_px,
                         best_val_loss=best_val_loss,
                         save_dir=os.path.dirname(SAVE_PATH),
                     )
@@ -1025,8 +1130,12 @@ def main(
                 json.dump(
                     {
                         "best_val_loss": best_val_loss,
-                        "best_val_sdr_2_5": best_val_sdr,
-                        "best_val_mae": best_val_mae,
+                        "best_val_sdr_2_0mm": best_val_sdr_2_0mm,
+                        "best_val_sdr_2_5mm": best_val_sdr_2_5mm,
+                        "best_val_mre_mm": best_val_mre_mm,
+                        "best_val_mae_px": best_val_mae_px,
+                        "pixel_spacing": pixel_spacing,
+                        "img_size": img_size,
                         "total_epochs_completed": len(history["epochs"]),
                         "history": history,
                     },
@@ -1051,6 +1160,7 @@ def main(
                         test_npz_dir=test_npz_dir,
                         output_dir="evaluation",
                         img_size=img_size,
+                        pixel_spacing=pixel_spacing,
                         log_to_mlflow=False,
                     )
 
@@ -1219,8 +1329,14 @@ if __name__ == "__main__":
     parser.add_argument(
         "--img-size",
         type=int,
-        default=1024,
-        help="Input image resolution in pixels (default: 1024)",
+        default=DEFAULT_IMG_SIZE,
+        help=f"Input image resolution in pixels (default: {DEFAULT_IMG_SIZE})",
+    )
+    parser.add_argument(
+        "--pixel-spacing",
+        type=float,
+        default=DEFAULT_PIXEL_SPACING,
+        help=f"Physical spacing in mm per pixel (default: {DEFAULT_PIXEL_SPACING})",
     )
     parser.add_argument(
         "--amp",
@@ -1263,6 +1379,7 @@ if __name__ == "__main__":
         lr=args.lr,
         llrd_decay_rate=args.llrd_decay_rate,
         img_size=args.img_size,
+        pixel_spacing=args.pixel_spacing,
         experiment_name=args.experiment_name,
         tracking_uri=args.tracking_uri,
         run_name=args.run_name,

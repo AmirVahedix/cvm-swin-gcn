@@ -159,7 +159,7 @@ class CephalometricSwinGCN(nn.Module):
         self,
         num_landmarks: int = 13,
         pretrained: bool = True,
-        img_size: int = 1024,
+        img_size: int = 640,
         init_temperature: float = 0.1,
         window_radius: int | None = None,  # Kept for backward compatibility
     ):

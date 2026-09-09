@@ -67,8 +67,14 @@ def main():
     parser.add_argument(
         "--target-size",
         type=int,
-        default=1024,
-        help="Target square image dimension (default: 1024).",
+        default=640,
+        help="Target square image dimension (default: 640).",
+    )
+    parser.add_argument(
+        "--pixel-spacing",
+        type=float,
+        default=float(os.getenv("PIXEL_SPACING", 0.1)),
+        help="Physical spacing in mm per pixel (default: 0.1 or $PIXEL_SPACING).",
     )
     parser.add_argument(
         "--sigma",
@@ -339,6 +345,7 @@ def main():
             lr=args.lr,
             llrd_decay_rate=args.llrd_decay_rate,
             img_size=args.target_size,
+            pixel_spacing=args.pixel_spacing,
             experiment_name=args.mlflow_experiment_name,
             tracking_uri=args.mlflow_tracking_uri,
             run_name=args.mlflow_run_name,
@@ -368,6 +375,7 @@ def main():
                 test_npz_dir="dataset/test/labels",
                 output_dir="evaluation",
                 img_size=args.target_size,
+                pixel_spacing=args.pixel_spacing,
                 num_samples=args.eval_samples,
                 threshold_px=args.threshold_px,
                 tracking_uri=args.mlflow_tracking_uri,

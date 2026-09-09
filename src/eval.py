@@ -148,21 +148,24 @@ def load_model(weights_path: str, device: torch.device, img_size: int = 1024) ->
 def compute_metrics(
     pred_coords: np.ndarray,
     gt_coords: np.ndarray,
-    img_size: int = 1024,
+    img_size: int = 640,
+    pixel_spacing: float = 0.1,
     threshold_px: float = 2.5,
-) -> tuple[dict, list[dict]]:
+) -> tuple[dict, list[dict], np.ndarray]:
     """
-    Computes overall summary metrics and per-landmark metrics breakdown.
+    Computes overall summary metrics and per-landmark metrics breakdown in both millimeters and pixels.
 
     Args:
         pred_coords: Array of shape (N, 13, 2) in normalized [0, 1] range.
         gt_coords: Array of shape (N, 13, 2) in normalized [0, 1] range (-1.0 for missing).
-        img_size: Image dimension in pixels (e.g. 640).
+        img_size: Image dimension in pixels (default 640).
+        pixel_spacing: Physical spacing in mm per pixel (default 0.1 mm/px).
         threshold_px: Tolerance threshold in pixels for binary detection metrics.
 
     Returns:
         summary_metrics: Dict of overall dataset evaluation metrics.
         landmark_metrics: List of dicts with metrics per landmark.
+        valid_radial_errors: Array of radial errors in pixels for valid landmarks.
     """
     # Convert normalized coordinates to absolute pixel scale
     pred_px = pred_coords * img_size
@@ -175,7 +178,7 @@ def compute_metrics(
     dy = pred_px[:, :, 1] - gt_px[:, :, 1]
     abs_dx = np.abs(dx)
     abs_dy = np.abs(dy)
-    radial_errors = np.sqrt(dx**2 + dy**2)  # Shape: (N, 13)
+    radial_errors = np.sqrt(dx**2 + dy**2)  # Shape: (N, 13) in pixels
 
     valid_radial_errors = radial_errors[valid_mask]
     valid_abs_dx = abs_dx[valid_mask]
@@ -184,7 +187,7 @@ def compute_metrics(
     if len(valid_radial_errors) == 0:
         raise ValueError("No valid ground truth landmarks found for metric calculation.")
 
-    # 1. Regression Metrics
+    # 1. Pixel Regression Metrics
     mae_x = float(np.mean(valid_abs_dx))
     mae_y = float(np.mean(valid_abs_dy))
     mae = float(np.mean((valid_abs_dx + valid_abs_dy) / 2.0))
@@ -195,7 +198,23 @@ def compute_metrics(
     min_err = float(np.min(valid_radial_errors))
     max_err = float(np.max(valid_radial_errors))
 
-    # 2. SDR (Successful Detection Rate) at various radial thresholds in pixels
+    # 2. Physical Millimeter Metrics
+    valid_radial_errors_mm = valid_radial_errors * pixel_spacing
+    mre_mm = float(np.mean(valid_radial_errors_mm))
+    rmse_mm = float(np.sqrt(np.mean(valid_radial_errors_mm ** 2)))
+    medre_mm = float(np.median(valid_radial_errors_mm))
+    sdre_mm = float(np.std(valid_radial_errors_mm))
+    min_err_mm = float(np.min(valid_radial_errors_mm))
+    max_err_mm = float(np.max(valid_radial_errors_mm))
+
+    # 3. Clinical SDR Thresholds in Millimeters (Orthodontic Standards)
+    sdr_mm_thresholds = [2.0, 2.5, 3.0, 4.0]
+    sdr_mm_dict = {}
+    for th in sdr_mm_thresholds:
+        sdr_val = float(np.mean(valid_radial_errors_mm <= th) * 100.0)
+        sdr_mm_dict[f"sdr_{th}mm"] = sdr_val
+
+    # 4. SDR at various radial thresholds in pixels
     sdr_thresholds = [2.0, 2.5, 3.0, 4.0, 5.0, 10.0]
     sdr_dict = {}
     for th in sdr_thresholds:
@@ -207,6 +226,17 @@ def compute_metrics(
     summary_metrics = {
         "total_samples": int(pred_coords.shape[0]),
         "total_valid_landmarks": total_valid,
+        "pixel_spacing_mm_per_px": pixel_spacing,
+        "img_size": img_size,
+        # Physical Millimeter Metrics (Primary Clinical)
+        "mre_mm": mre_mm,
+        "rmse_mm": rmse_mm,
+        "medre_mm": medre_mm,
+        "sdre_mm": sdre_mm,
+        "min_error_mm": min_err_mm,
+        "max_error_mm": max_err_mm,
+        **sdr_mm_dict,
+        # Canvas Pixel Metrics (Secondary)
         "mae_pixels": mae,
         "mae_x_pixels": mae_x,
         "mae_y_pixels": mae_y,
@@ -219,7 +249,7 @@ def compute_metrics(
         **sdr_dict,
     }
 
-    # 3. Per-landmark Breakdown
+    # 5. Per-landmark Breakdown
     landmark_metrics = []
     for i, name in enumerate(LANDMARK_CLASSES):
         l_mask = valid_mask[:, i]
@@ -236,21 +266,47 @@ def compute_metrics(
         l_rmse = float(np.sqrt(np.mean(l_dx**2 + l_dy**2)))
         l_mre = float(np.mean(l_radial))
         l_medre = float(np.median(l_radial))
-        l_sdre = float(np.std(l_radial))
+        l_sdre = float(np.std(l_radial)) if len(l_radial) > 1 else 0.0
 
+        # Millimeters
+        l_radial_mm = l_radial * pixel_spacing
+        l_mre_mm = float(np.mean(l_radial_mm))
+        l_rmse_mm = float(np.sqrt(np.mean(l_radial_mm ** 2)))
+        l_medre_mm = float(np.median(l_radial_mm))
+        l_sdre_mm = float(np.std(l_radial_mm)) if len(l_radial_mm) > 1 else 0.0
+        l_sdr2_0mm = float(np.mean(l_radial_mm <= 2.0) * 100.0)
+        l_sdr2_5mm = float(np.mean(l_radial_mm <= 2.5) * 100.0)
+        l_sdr3_0mm = float(np.mean(l_radial_mm <= 3.0) * 100.0)
+        l_sdr4_0mm = float(np.mean(l_radial_mm <= 4.0) * 100.0)
+
+        # Pixels
+        l_sdr2_0 = float(np.mean(l_radial <= 2.0) * 100.0)
         l_sdr2_5 = float(np.mean(l_radial <= 2.5) * 100.0)
+        l_sdr3_0 = float(np.mean(l_radial <= 3.0) * 100.0)
         l_sdr4_0 = float(np.mean(l_radial <= 4.0) * 100.0)
 
         landmark_metrics.append({
             "id": i,
             "name": name,
             "count": int(np.sum(l_mask)),
+            # Millimeters
+            "mre_mm": l_mre_mm,
+            "rmse_mm": l_rmse_mm,
+            "medre_mm": l_medre_mm,
+            "sdre_mm": l_sdre_mm,
+            "sdr_2.0mm": l_sdr2_0mm,
+            "sdr_2.5mm": l_sdr2_5mm,
+            "sdr_3.0mm": l_sdr3_0mm,
+            "sdr_4.0mm": l_sdr4_0mm,
+            # Pixels
             "mae_px": l_mae,
             "rmse_px": l_rmse,
             "mre_px": l_mre,
             "medre_px": l_medre,
             "sdre_px": l_sdre,
+            "sdr_2.0px": l_sdr2_0,
             "sdr_2.5px": l_sdr2_5,
+            "sdr_3.0px": l_sdr3_0,
             "sdr_4.0px": l_sdr4_0,
         })
 
@@ -264,53 +320,69 @@ def format_metrics_table(
     weights_path: str,
 ) -> str:
     """
-    Formats the evaluation results into ASCII terminal tables.
+    Formats the evaluation results into publication-ready ASCII terminal tables.
     """
     lines = []
-    lines.append("=" * 80)
-    lines.append(f" SWIN-GCN MODEL EVALUATION REPORT | RUN: {run_name}")
-    lines.append("=" * 80)
+    lines.append("=" * 96)
+    lines.append(f" SWIN-GCN CLINICAL MODEL EVALUATION REPORT | RUN: {run_name}")
+    lines.append("=" * 96)
     lines.append(f"Checkpoint Weights: {weights_path}")
+    lines.append(f"Pixel Spacing: {summary.get('pixel_spacing_mm_per_px', 0.1)} mm/px | Image Size: {summary.get('img_size', 640)}x{summary.get('img_size', 640)}")
     lines.append(f"Total Test Images: {summary['total_samples']} | Total Valid Landmarks: {summary['total_valid_landmarks']}")
-    lines.append("-" * 80)
+    lines.append("-" * 96)
 
-    # 1. Overall Summary Table
-    lines.append("\n" + "+" + "-" * 42 + "+" + "-" * 35 + "+")
-    lines.append(f"| {'EVALUATION METRIC':<40} | {'VALUE':<33} |")
-    lines.append("+" + "-" * 42 + "+" + "-" * 35 + "+")
+    # 1. Physical Millimeter Metrics Table (Primary Clinical)
+    lines.append("\n" + "+" + "-" * 50 + "+" + "-" * 43 + "+")
+    lines.append(f"| {'CLINICAL METRIC (MILLIMETERS)':<48} | {'VALUE':<41} |")
+    lines.append("+" + "-" * 50 + "+" + "-" * 43 + "+")
     
-    summary_rows = [
-        ("MAE (Pixels)", f"{summary['mae_pixels']:.4f} px"),
-        ("RMSE (Pixels)", f"{summary['rmse_pixels']:.4f} px"),
-        ("MRE (Mean Radial Error)", f"{summary['mre_pixels']:.4f} px"),
-        ("MedRE (Median Radial Error)", f"{summary['medre_pixels']:.4f} px"),
-        ("SDRE (Std Dev Radial Error)", f"{summary['sdre_pixels']:.4f} px"),
-        ("Min Radial Error", f"{summary['min_error_pixels']:.4f} px"),
-        ("Max Radial Error", f"{summary['max_error_pixels']:.4f} px"),
-        ("SDR @ 2.0 px", f"{summary['sdr_2.0px']:.2f} %"),
-        ("SDR @ 2.5 px", f"{summary['sdr_2.5px']:.2f} %"),
-        ("SDR @ 3.0 px", f"{summary['sdr_3.0px']:.2f} %"),
-        ("SDR @ 4.0 px", f"{summary['sdr_4.0px']:.2f} %"),
-        ("SDR @ 5.0 px", f"{summary['sdr_5.0px']:.2f} %"),
-        ("SDR @ 10.0 px", f"{summary['sdr_10.0px']:.2f} %"),
+    mm_rows = [
+        ("MRE (Mean Radial Error)", f"{summary.get('mre_mm', 0.0):.3f} mm"),
+        ("MedRE (Median Radial Error)", f"{summary.get('medre_mm', 0.0):.3f} mm"),
+        ("RMSE (Root Mean Squared Error)", f"{summary.get('rmse_mm', 0.0):.3f} mm"),
+        ("SDRE (Std Dev Radial Error)", f"{summary.get('sdre_mm', 0.0):.3f} mm"),
+        ("Min Radial Error", f"{summary.get('min_error_mm', 0.0):.3f} mm"),
+        ("Max Radial Error", f"{summary.get('max_error_mm', 0.0):.3f} mm"),
+        ("SDR @ 2.0 mm (Clinical Standard)", f"{summary.get('sdr_2.0mm', 0.0):.2f} %"),
+        ("SDR @ 2.5 mm (Challenge Benchmark)", f"{summary.get('sdr_2.5mm', 0.0):.2f} %"),
+        ("SDR @ 3.0 mm", f"{summary.get('sdr_3.0mm', 0.0):.2f} %"),
+        ("SDR @ 4.0 mm (Coarse Localization)", f"{summary.get('sdr_4.0mm', 0.0):.2f} %"),
     ]
+    for label, val in mm_rows:
+        lines.append(f"| {label:<48} | {val:<41} |")
+    lines.append("+" + "-" * 50 + "+" + "-" * 43 + "+")
 
-    for label, val in summary_rows:
-        lines.append(f"| {label:<40} | {val:<33} |")
-    lines.append("+" + "-" * 42 + "+" + "-" * 35 + "+")
+    # 2. Pixel Scale Metrics Table (Secondary Reference)
+    lines.append("\n" + "+" + "-" * 50 + "+" + "-" * 43 + "+")
+    lines.append(f"| {'CANVAS METRIC (PIXELS)':<48} | {'VALUE':<41} |")
+    lines.append("+" + "-" * 50 + "+" + "-" * 43 + "+")
+    px_rows = [
+        ("MAE (Pixels)", f"{summary['mae_pixels']:.2f} px"),
+        ("RMSE (Pixels)", f"{summary['rmse_pixels']:.2f} px"),
+        ("MRE (Pixels)", f"{summary['mre_pixels']:.2f} px"),
+        ("SDR @ 2.0 px", f"{summary.get('sdr_2.0px', 0.0):.2f} %"),
+        ("SDR @ 2.5 px", f"{summary.get('sdr_2.5px', 0.0):.2f} %"),
+        ("SDR @ 4.0 px", f"{summary.get('sdr_4.0px', 0.0):.2f} %"),
+        ("SDR @ 10.0 px", f"{summary.get('sdr_10.0px', 0.0):.2f} %"),
+    ]
+    for label, val in px_rows:
+        lines.append(f"| {label:<48} | {val:<41} |")
+    lines.append("+" + "-" * 50 + "+" + "-" * 43 + "+")
 
-    # 2. Per-Landmark Breakdown Table
-    lines.append("\n" + "+" + "-" * 88 + "+")
-    lines.append(f"| {'PER-LANDMARK METRICS BREAKDOWN':^86} |")
-    lines.append("+" + "-" * 4 + "+" + "-" * 12 + "+" + "-" * 10 + "+" + "-" * 11 + "+" + "-" * 10 + "+" + "-" * 11 + "+" + "-" * 11 + "+" + "-" * 11 + "+")
-    lines.append(f"| {'ID':<2} | {'Landmark':<10} | {'MAE (px)':<8} | {'RMSE (px)':<9} | {'MRE (px)':<8} | {'MedRE(px)':<9} | {'SDR@2.5px':<9} | {'SDR@4.0px':<9} |")
-    lines.append("+" + "-" * 4 + "+" + "-" * 12 + "+" + "-" * 10 + "+" + "-" * 11 + "+" + "-" * 10 + "+" + "-" * 11 + "+" + "-" * 11 + "+" + "-" * 11 + "+")
+    # 3. Per-Landmark Breakdown Table
+    lines.append("\n" + "+" + "-" * 96 + "+")
+    lines.append(f"| {'PER-LANDMARK CLINICAL PERFORMANCE BREAKDOWN':^94} |")
+    lines.append("+" + "-" * 4 + "+" + "-" * 11 + "+" + "-" * 11 + "+" + "-" * 11 + "+" + "-" * 12 + "+" + "-" * 12 + "+" + "-" * 12 + "+" + "-" * 10 + "+" + "-" * 11 + "+")
+    lines.append(f"| {'ID':<2} | {'Landmark':<9} | {'MRE (mm)':<9} | {'RMSE (mm)':<9} | {'SDR@2.0mm':<10} | {'SDR@2.5mm':<10} | {'SDR@4.0mm':<10} | {'MAE(px)':<8} | {'SDR@2.5px':<9} |")
+    lines.append("+" + "-" * 4 + "+" + "-" * 11 + "+" + "-" * 11 + "+" + "-" * 11 + "+" + "-" * 12 + "+" + "-" * 12 + "+" + "-" * 12 + "+" + "-" * 10 + "+" + "-" * 11 + "+")
 
     for lm in landmarks:
         lines.append(
-            f"| {lm['id']:<2} | {lm['name']:<10} | {lm['mae_px']:<8.2f} | {lm['rmse_px']:<9.2f} | {lm['mre_px']:<8.2f} | {lm['medre_px']:<9.2f} | {lm['sdr_2.5px']:<8.1f}% | {lm['sdr_4.0px']:<8.1f}% |"
+            f"| {lm['id']:<2} | {lm['name']:<9} | {lm.get('mre_mm', 0.0):<9.2f} | {lm.get('rmse_mm', 0.0):<9.2f} | "
+            f"{lm.get('sdr_2.0mm', 0.0):<9.1f}% | {lm.get('sdr_2.5mm', 0.0):<9.1f}% | {lm.get('sdr_4.0mm', 0.0):<9.1f}% | "
+            f"{lm['mae_px']:<8.2f} | {lm.get('sdr_2.5px', 0.0):<8.1f}% |"
         )
-    lines.append("+" + "-" * 4 + "+" + "-" * 12 + "+" + "-" * 10 + "+" + "-" * 11 + "+" + "-" * 10 + "+" + "-" * 11 + "+" + "-" * 11 + "+" + "-" * 11 + "+")
+    lines.append("+" + "-" * 4 + "+" + "-" * 11 + "+" + "-" * 11 + "+" + "-" * 11 + "+" + "-" * 12 + "+" + "-" * 12 + "+" + "-" * 12 + "+" + "-" * 10 + "+" + "-" * 11 + "+")
 
     return "\n".join(lines)
 
@@ -319,11 +391,13 @@ def generate_evaluation_charts(
     summary_metrics: dict,
     landmark_metrics: list[dict],
     valid_radial_errors: np.ndarray,
+    pixel_spacing: float = 0.1,
     save_dir: Path | str | None = None,
     log_to_mlflow: bool = True,
 ) -> dict[str, str]:
     """
-    Generates PNG diagram charts for all evaluation metrics and logs them as artifacts to MLflow.
+    Generates PNG diagram charts for all evaluation metrics (physical mm and canvas px)
+    and logs them as artifacts to MLflow.
     """
     use_temp = save_dir is None
     temp_dir_obj = None
@@ -340,25 +414,22 @@ def generate_evaluation_charts(
         plt.style.use("seaborn-v0_8-whitegrid" if "seaborn-v0_8-whitegrid" in plt.style.available else "default")
         plt.rcParams.update({"font.sans-serif": "DejaVu Sans", "font.family": "sans-serif"})
 
-        group_colors = {"C2": "#e63946", "C3": "#2a9d8f", "C4": "#457b9d"}
         lm_names = [lm["name"] for lm in landmark_metrics]
         lm_indices = np.arange(len(landmark_metrics))
-        width = 0.25
+        width = 0.35
 
-        # 1. Landmark Errors Bar Chart (MAE, RMSE, MRE)
+        # 1. Landmark Errors Bar Chart (MRE mm vs RMSE mm)
         fig1, ax1 = plt.subplots(figsize=(10, 5), dpi=300)
-        mre_vals = [lm["mre_px"] for lm in landmark_metrics]
-        mae_vals = [lm["mae_px"] for lm in landmark_metrics]
-        rmse_vals = [lm["rmse_px"] for lm in landmark_metrics]
+        mre_mm_vals = [lm.get("mre_mm", lm["mre_px"] * pixel_spacing) for lm in landmark_metrics]
+        rmse_mm_vals = [lm.get("rmse_mm", lm["rmse_px"] * pixel_spacing) for lm in landmark_metrics]
 
-        ax1.bar(lm_indices - width, mre_vals, width, label="MRE (px)", color="#e76f51", alpha=0.9)
-        ax1.bar(lm_indices, mae_vals, width, label="MAE (px)", color="#2a9d8f", alpha=0.9)
-        ax1.bar(lm_indices + width, rmse_vals, width, label="RMSE (px)", color="#457b9d", alpha=0.9)
+        ax1.bar(lm_indices - width / 2, mre_mm_vals, width, label="MRE (mm)", color="#e76f51", alpha=0.9)
+        ax1.bar(lm_indices + width / 2, rmse_mm_vals, width, label="RMSE (mm)", color="#457b9d", alpha=0.9)
 
         ax1.set_xticks(lm_indices)
         ax1.set_xticklabels(lm_names, rotation=45, ha="right")
-        ax1.set_ylabel("Error (Pixels)")
-        ax1.set_title("Per-Landmark Errors Breakdown (MRE / MAE / RMSE)", fontsize=12, fontweight="bold")
+        ax1.set_ylabel("Error (Millimeters)")
+        ax1.set_title("Per-Landmark Clinical Errors Breakdown (MRE mm vs RMSE mm)", fontsize=12, fontweight="bold")
         ax1.legend(loc="upper right")
         ax1.grid(True, linestyle="--", alpha=0.5)
         plt.tight_layout()
@@ -367,19 +438,22 @@ def generate_evaluation_charts(
         plt.close(fig1)
         generated_charts["landmark_errors"] = str(p1)
 
-        # 2. Per-Landmark SDR Bar Chart (SDR@2.5px vs SDR@4.0px)
-        fig2, ax2 = plt.subplots(figsize=(10, 5), dpi=300)
-        sdr2_5 = [lm["sdr_2.5px"] for lm in landmark_metrics]
-        sdr4_0 = [lm["sdr_4.0px"] for lm in landmark_metrics]
+        # 2. Per-Landmark SDR Bar Chart (SDR@2.0mm vs SDR@2.5mm vs SDR@4.0mm)
+        fig2, ax2 = plt.subplots(figsize=(11, 5), dpi=300)
+        w3 = 0.25
+        sdr2_0 = [lm.get("sdr_2.0mm", 0.0) for lm in landmark_metrics]
+        sdr2_5 = [lm.get("sdr_2.5mm", 0.0) for lm in landmark_metrics]
+        sdr4_0 = [lm.get("sdr_4.0mm", 0.0) for lm in landmark_metrics]
 
-        ax2.bar(lm_indices - width / 2, sdr2_5, width, label="SDR @ 2.5px (%)", color="#3a86ff", alpha=0.9)
-        ax2.bar(lm_indices + width / 2, sdr4_0, width, label="SDR @ 4.0px (%)", color="#8338ec", alpha=0.9)
+        ax2.bar(lm_indices - w3, sdr2_0, w3, label="SDR @ 2.0mm (Clinical Standard)", color="#2a9d8f", alpha=0.9)
+        ax2.bar(lm_indices, sdr2_5, w3, label="SDR @ 2.5mm (Challenge Benchmark)", color="#3a86ff", alpha=0.9)
+        ax2.bar(lm_indices + w3, sdr4_0, w3, label="SDR @ 4.0mm (Coarse)", color="#8338ec", alpha=0.9)
 
         ax2.set_xticks(lm_indices)
         ax2.set_xticklabels(lm_names, rotation=45, ha="right")
         ax2.set_ylabel("Detection Rate (%)")
         ax2.set_ylim(0, 105)
-        ax2.set_title("Per-Landmark SDR Comparison (SDR@2.5px vs SDR@4.0px)", fontsize=12, fontweight="bold")
+        ax2.set_title("Per-Landmark SDR Comparison (2.0mm / 2.5mm / 4.0mm)", fontsize=12, fontweight="bold")
         ax2.legend(loc="lower right")
         ax2.grid(True, linestyle="--", alpha=0.5)
         plt.tight_layout()
@@ -388,19 +462,23 @@ def generate_evaluation_charts(
         plt.close(fig2)
         generated_charts["landmark_sdr"] = str(p2)
 
-        # 3. SDR Threshold Curve (Cumulative Detection Rate)
+        # 3. SDR Threshold Curve (Cumulative Detection Rate in mm)
         fig3, ax3 = plt.subplots(figsize=(8, 5), dpi=300)
-        thresholds = [2.0, 2.5, 3.0, 4.0, 5.0, 10.0]
-        sdr_values = [summary_metrics.get(f"sdr_{th}px", 0.0) for th in thresholds]
+        th_mm = [1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0]
+        valid_radial_errors_mm = valid_radial_errors * pixel_spacing
+        sdr_values = [
+            summary_metrics.get(f"sdr_{th}mm", float(np.mean(valid_radial_errors_mm <= th) * 100.0))
+            for th in th_mm
+        ]
 
-        ax3.plot(thresholds, sdr_values, marker="o", linewidth=2.5, color="#ff006e", markersize=8)
-        for th, val in zip(thresholds, sdr_values):
+        ax3.plot(th_mm, sdr_values, marker="o", linewidth=2.5, color="#ff006e", markersize=8)
+        for th, val in zip(th_mm, sdr_values):
             ax3.annotate(f"{val:.1f}%", (th, val), textcoords="offset points", xytext=(0, 8), ha="center", fontsize=9, fontweight="bold")
 
-        ax3.set_xlabel("Radius Threshold (Pixels)")
+        ax3.set_xlabel("Radius Threshold (Millimeters)")
         ax3.set_ylabel("Successful Detection Rate (%)")
         ax3.set_ylim(0, 108)
-        ax3.set_title("Cumulative SDR Curve Across Distance Thresholds", fontsize=12, fontweight="bold")
+        ax3.set_title("Cumulative SDR Curve Across Clinical Distance Thresholds (mm)", fontsize=12, fontweight="bold")
         ax3.grid(True, linestyle="--", alpha=0.5)
         plt.tight_layout()
         p3 = target_dir / "chart_sdr_thresholds.png"
@@ -408,19 +486,19 @@ def generate_evaluation_charts(
         plt.close(fig3)
         generated_charts["sdr_thresholds"] = str(p3)
 
-        # 4. Radial Error Distribution Histogram
+        # 4. Radial Error Distribution Histogram (mm)
         fig4, ax4 = plt.subplots(figsize=(8, 4.5), dpi=300)
-        ax4.hist(valid_radial_errors, bins=30, color="#fb8500", edgecolor="black", alpha=0.7, density=True, label="Radial Error (px)")
+        ax4.hist(valid_radial_errors_mm, bins=30, color="#fb8500", edgecolor="black", alpha=0.7, density=True, label="Radial Error (mm)")
 
-        mean_err = summary_metrics.get("mre_pixels", np.mean(valid_radial_errors))
-        med_err = summary_metrics.get("medre_pixels", np.median(valid_radial_errors))
+        mean_err_mm = summary_metrics.get("mre_mm", np.mean(valid_radial_errors_mm))
+        med_err_mm = summary_metrics.get("medre_mm", np.median(valid_radial_errors_mm))
 
-        ax4.axvline(mean_err, color="red", linestyle="--", linewidth=2, label=f"Mean (MRE): {mean_err:.2f}px")
-        ax4.axvline(med_err, color="green", linestyle="-.", linewidth=2, label=f"Median (MedRE): {med_err:.2f}px")
+        ax4.axvline(mean_err_mm, color="red", linestyle="--", linewidth=2, label=f"Mean (MRE): {mean_err_mm:.2f} mm")
+        ax4.axvline(med_err_mm, color="green", linestyle="-.", linewidth=2, label=f"Median (MedRE): {med_err_mm:.2f} mm")
 
-        ax4.set_xlabel("Radial Error (Pixels)")
+        ax4.set_xlabel("Radial Error (Millimeters)")
         ax4.set_ylabel("Density")
-        ax4.set_title("Radial Error Distribution Across All Test Samples", fontsize=12, fontweight="bold")
+        ax4.set_title("Radial Error Distribution Across All Test Samples (mm)", fontsize=12, fontweight="bold")
         ax4.legend(loc="upper right")
         ax4.grid(True, linestyle="--", alpha=0.5)
         plt.tight_layout()
@@ -433,39 +511,41 @@ def generate_evaluation_charts(
         fig5, axes = plt.subplots(2, 2, figsize=(14, 10), dpi=300)
 
         # Subplot (0,0): Landmark Errors
-        axes[0, 0].bar(lm_indices - width, mre_vals, width, label="MRE", color="#e76f51")
-        axes[0, 0].bar(lm_indices, mae_vals, width, label="MAE", color="#2a9d8f")
-        axes[0, 0].bar(lm_indices + width, rmse_vals, width, label="RMSE", color="#457b9d")
+        axes[0, 0].bar(lm_indices - width / 2, mre_mm_vals, width, label="MRE (mm)", color="#e76f51")
+        axes[0, 0].bar(lm_indices + width / 2, rmse_mm_vals, width, label="RMSE (mm)", color="#457b9d")
         axes[0, 0].set_xticks(lm_indices)
         axes[0, 0].set_xticklabels(lm_names, rotation=45, ha="right", fontsize=8)
-        axes[0, 0].set_title("Landmark Errors Breakdown", fontsize=10, fontweight="bold")
+        axes[0, 0].set_ylabel("Error (mm)")
+        axes[0, 0].set_title("Landmark Clinical Errors Breakdown (mm)", fontsize=10, fontweight="bold")
         axes[0, 0].legend(fontsize=8)
         axes[0, 0].grid(True, linestyle="--", alpha=0.5)
 
         # Subplot (0,1): Per-Landmark SDR
-        axes[0, 1].bar(lm_indices - width / 2, sdr2_5, width, label="SDR@2.5px", color="#3a86ff")
-        axes[0, 1].bar(lm_indices + width / 2, sdr4_0, width, label="SDR@4.0px", color="#8338ec")
+        axes[0, 1].bar(lm_indices - w3, sdr2_0, w3, label="SDR@2.0mm", color="#2a9d8f")
+        axes[0, 1].bar(lm_indices, sdr2_5, w3, label="SDR@2.5mm", color="#3a86ff")
+        axes[0, 1].bar(lm_indices + w3, sdr4_0, w3, label="SDR@4.0mm", color="#8338ec")
         axes[0, 1].set_xticks(lm_indices)
         axes[0, 1].set_xticklabels(lm_names, rotation=45, ha="right", fontsize=8)
-        axes[0, 1].set_title("Per-Landmark SDR", fontsize=10, fontweight="bold")
+        axes[0, 1].set_ylabel("SDR (%)")
+        axes[0, 1].set_title("Per-Landmark SDR (Clinical mm)", fontsize=10, fontweight="bold")
         axes[0, 1].legend(fontsize=8)
         axes[0, 1].grid(True, linestyle="--", alpha=0.5)
 
         # Subplot (1,0): SDR Curve
-        axes[1, 0].plot(thresholds, sdr_values, marker="o", color="#ff006e", linewidth=2)
-        axes[1, 0].set_title("Cumulative SDR Curve", fontsize=10, fontweight="bold")
-        axes[1, 0].set_xlabel("Threshold (px)", fontsize=9)
+        axes[1, 0].plot(th_mm, sdr_values, marker="o", color="#ff006e", linewidth=2)
+        axes[1, 0].set_title("Cumulative SDR Curve (mm)", fontsize=10, fontweight="bold")
+        axes[1, 0].set_xlabel("Threshold (mm)", fontsize=9)
         axes[1, 0].set_ylabel("SDR (%)", fontsize=9)
         axes[1, 0].grid(True, linestyle="--", alpha=0.5)
 
         # Subplot (1,1): Error Distribution
-        axes[1, 1].hist(valid_radial_errors, bins=25, color="#fb8500", alpha=0.7, density=True)
-        axes[1, 1].axvline(mean_err, color="red", linestyle="--", label=f"MRE: {mean_err:.2f}")
-        axes[1, 1].set_title("Radial Error Distribution", fontsize=10, fontweight="bold")
+        axes[1, 1].hist(valid_radial_errors_mm, bins=25, color="#fb8500", alpha=0.7, density=True)
+        axes[1, 1].axvline(mean_err_mm, color="red", linestyle="--", label=f"MRE: {mean_err_mm:.2f}mm")
+        axes[1, 1].set_title("Radial Error Distribution (mm)", fontsize=10, fontweight="bold")
         axes[1, 1].legend(fontsize=8)
         axes[1, 1].grid(True, linestyle="--", alpha=0.5)
 
-        plt.suptitle("SWIN-GCN EVALUATION METRICS DASHBOARD", fontsize=14, fontweight="bold")
+        plt.suptitle("SWIN-GCN CLINICAL EVALUATION METRICS DASHBOARD", fontsize=14, fontweight="bold")
         plt.tight_layout()
         p5 = target_dir / "chart_evaluation_dashboard.png"
         fig5.savefig(p5, bbox_inches="tight")
@@ -493,7 +573,7 @@ def draw_landmarks_on_image(
     image: np.ndarray,
     pred_coords: np.ndarray,
     gt_coords: np.ndarray | None = None,
-    img_size: int = 1024,
+    img_size: int = 640,
 ) -> np.ndarray:
     """
     Renders predicted landmarks (and optionally ground truth) onto an RGB image.
@@ -593,7 +673,8 @@ def run_evaluation(
     output_dir: str = "evaluation",
     run_name: str | None = None,
     batch_size: int = 8,
-    img_size: int = 1024,
+    img_size: int = 640,
+    pixel_spacing: float = 0.1,
     num_samples: int = 8,
     threshold_px: float = 2.5,
     device_str: str | None = None,
@@ -678,6 +759,7 @@ def run_evaluation(
         pred_coords=pred_array,
         gt_coords=gt_array,
         img_size=img_size,
+        pixel_spacing=pixel_spacing,
         threshold_px=threshold_px,
     )
 
@@ -686,6 +768,7 @@ def run_evaluation(
         summary_metrics=summary_metrics,
         landmark_metrics=landmark_metrics,
         valid_radial_errors=valid_radial_errors,
+        pixel_spacing=pixel_spacing,
         save_dir=run_folder / "charts",
         log_to_mlflow=False,  # We handle comprehensive MLflow logging below
     )
@@ -770,6 +853,7 @@ def run_evaluation(
                     mlflow.log_params({
                         "eval_weights_path": weights_path,
                         "eval_img_size": img_size,
+                        "eval_pixel_spacing": pixel_spacing,
                         "eval_threshold_px": threshold_px,
                         "eval_batch_size": batch_size,
                     })
@@ -829,8 +913,14 @@ def main():
     parser.add_argument(
         "--img-size",
         type=int,
-        default=1024,
-        help="Target image dimension in pixels (default: 1024).",
+        default=640,
+        help="Target image dimension in pixels (default: 640).",
+    )
+    parser.add_argument(
+        "--pixel-spacing",
+        type=float,
+        default=0.1,
+        help="Physical spacing in mm per pixel (default: 0.1 mm/px).",
     )
     parser.add_argument(
         "--num-samples",
@@ -892,6 +982,7 @@ def main():
         run_name=args.run_name,
         batch_size=args.batch_size,
         img_size=args.img_size,
+        pixel_spacing=args.pixel_spacing,
         num_samples=args.num_samples,
         threshold_px=args.threshold_px,
         log_to_mlflow=not args.no_mlflow,
