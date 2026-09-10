@@ -127,16 +127,27 @@ def get_llrd_param_groups(
 def get_landmark_weights(device: torch.device) -> torch.Tensor:
     """
     Constructs landmark loss weights prioritizing empirically difficult landmarks
-    identified from test evaluation (C4_PS, C3_AS, C2_IC, C3_IC, C3_PS, C4_AS).
+    identified from test evaluation (C2_AI, C3_AS, C2_IC, C4_AI, C4_PS, C3_PS, etc.).
     """
     weights = torch.ones(NUM_LANDMARKS, dtype=torch.float32, device=device)
-    weights[8] = 2.0   # C4_PS (lowest SDR@2.5px: 72.1%, RMSE: 5.17 px)
-    weights[4] = 2.0   # C3_AS (SDR@2.5px: 74.8%, RMSE: 3.81 px)
-    weights[1] = 1.8   # C2_IC (SDR@2.5px: 74.8%, concavity)
-    weights[6] = 1.8   # C3_IC (SDR@2.5px: 76.9%, concavity)
-    weights[3] = 1.6   # C3_PS (SDR@2.5px: 79.6%, RMSE: 3.98 px)
-    weights[9] = 1.5   # C4_AS (SDR@2.5px: 83.0%, RMSE: 6.07 px)
-    weights[11] = 1.2  # C4_IC (SDR@2.5px: 85.0%, concavity)
+    # Tier 1: Lagging landmarks (<80% SDR @ 2.0mm & highest MRE on test set)
+    weights[2] = 2.5   # C2_AI (Test SDR: 79.59%, MRE: 1.47 mm)
+    weights[4] = 2.5   # C3_AS (Test SDR: 79.59%, MRE: 1.49 mm)
+
+    # Tier 2: Challenging landmarks (82% - 86% SDR @ 2.0mm)
+    weights[1] = 2.0   # C2_IC (Test SDR: 82.99%, MRE: 1.29 mm, concavity)
+    weights[12] = 2.0  # C4_AI (Test SDR: 85.71%, MRE: 1.32 mm)
+    weights[0] = 1.8   # C2_PI (Test SDR: 83.67%, MRE: 1.28 mm)
+    weights[8] = 1.8   # C4_PS (Test SDR: 84.35%, MRE: 1.26 mm)
+    weights[3] = 1.6   # C3_PS (Test SDR: 85.71%, MRE: 1.23 mm)
+    weights[10] = 1.5  # C4_PI (Test SDR: 86.39%, MRE: 1.33 mm)
+
+    # Tier 3: Moderate landmarks
+    weights[7] = 1.3   # C3_AI (Test SDR: 87.76%, MRE: 1.25 mm)
+    weights[9] = 1.2   # C4_AS (Test SDR: 89.12%, MRE: 1.29 mm)
+    weights[6] = 1.2   # C3_IC (Test SDR: 89.80%, MRE: 1.14 mm)
+
+    # Landmarks with >91% SDR @ 2.0mm (C3_PI: 91.16%, C4_IC: 91.16%) remain at baseline 1.0
     return weights
 
 
@@ -178,7 +189,7 @@ def train_epoch(
         with torch.amp.autocast(device_type=device_type, dtype=torch.float16, enabled=amp_enabled):
             pred_heatmaps, pred_coords = model(images)
             # Ensure float32 for loss computation to maintain numerical stability
-            loss_hm = awl_loss(pred_heatmaps.float(), gt_heatmaps.float())
+            loss_hm = awl_loss(pred_heatmaps.float(), gt_heatmaps.float(), landmark_weights=landmark_weights)
             loss_cd = wing_loss(pred_coords.float(), gt_coords.float(), landmark_weights=landmark_weights)
             loss_g = graph_loss(pred_coords.float(), gt_coords.float())
             total_loss = (lambda_hm * loss_hm) + (lambda_cd * loss_cd) + (lambda_graph * loss_g)
@@ -376,7 +387,7 @@ def validate_epoch(
 
             with torch.amp.autocast(device_type=device_type, dtype=torch.float16, enabled=amp_enabled):
                 pred_heatmaps, pred_coords = model(images)
-                loss_hm = awl_loss(pred_heatmaps.float(), gt_heatmaps.float())
+                loss_hm = awl_loss(pred_heatmaps.float(), gt_heatmaps.float(), landmark_weights=landmark_weights)
                 loss_cd = wing_loss(pred_coords.float(), gt_coords.float(), landmark_weights=landmark_weights)
                 loss_g = graph_loss(pred_coords.float(), gt_coords.float())
                 total_loss = (lambda_hm * loss_hm) + (lambda_cd * loss_cd) + (lambda_graph * loss_g)

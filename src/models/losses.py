@@ -18,11 +18,12 @@ class AdaptiveWingLoss(nn.Module):
         self.epsilon = epsilon
         self.alpha = alpha
 
-    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    def forward(self, pred: torch.Tensor, target: torch.Tensor, landmark_weights: torch.Tensor | None = None) -> torch.Tensor:
         """
         Args:
             pred: Predicted heatmaps of shape [B, N, H, W]
             target: Ground truth heatmaps of shape [B, N, H, W]
+            landmark_weights: Optional per-landmark weights of shape [N] or [1, N]
         """
         delta = (target - pred).abs().clamp(min=1e-8)
 
@@ -37,7 +38,13 @@ class AdaptiveWingLoss(nn.Module):
         loss[mask_small] = self.omega * torch.log(1.0 + torch.pow(delta[mask_small] / self.epsilon, self.alpha - target[mask_small]))
         loss[mask_large] = (A[mask_large] * delta[mask_large]) - C[mask_large]
 
-        return loss.mean()
+        # Average across spatial dimensions [H, W] -> shape [B, N]
+        per_landmark_loss = loss.mean(dim=(-2, -1))
+
+        if landmark_weights is not None:
+            per_landmark_loss = per_landmark_loss * landmark_weights.unsqueeze(0).to(delta.device)
+
+        return per_landmark_loss.mean()
 
 
 class WingLoss(nn.Module):
