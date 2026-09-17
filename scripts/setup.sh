@@ -11,6 +11,7 @@ NC='\033[0m' # No Color
 ONLY_PULL=false
 AUTO_CONFIRM=false
 RUN_PIPELINE=false
+BRANCH_ARG=""
 PIPELINE_ARGS=()
 
 while [[ $# -gt 0 ]]; do
@@ -22,6 +23,10 @@ while [[ $# -gt 0 ]]; do
         -y|--yes|--force)
             AUTO_CONFIRM=true
             shift
+            ;;
+        -b|--branch)
+            BRANCH_ARG="$2"
+            shift 2
             ;;
         --run-pipeline)
             RUN_PIPELINE=true
@@ -77,6 +82,9 @@ else
     echo -e "${YELLOW}⚠️ .env file not found. Relying on system env vars...${NC}"
 fi
 # ----------------------
+# Priority: CLI argument (-b/--branch) > GIT_BRANCH / BRANCH env var > default: main
+TARGET_BRANCH="${BRANCH_ARG:-${GIT_BRANCH:-${BRANCH:-main}}}"
+echo -e "${BLUE}🌿 Target Git Branch: ${TARGET_BRANCH}${NC}"
 
 # --- Only Pull Mode ---
 if [ "$ONLY_PULL" = true ]; then
@@ -87,12 +95,14 @@ if [ "$ONLY_PULL" = true ]; then
     fi
 
     if [ -d "$TARGET_DIR" ]; then
-        echo -e "${BLUE}🔄 Pulling latest changes into ${TARGET_DIR}...${NC}"
+        echo -e "${BLUE}🔄 Pulling latest changes from branch '${TARGET_BRANCH}' into ${TARGET_DIR}...${NC}"
         cd "$TARGET_DIR" || exit 1
-        git pull
-        echo -e "${GREEN}✅ Successfully pulled latest repository changes without touching existing data.${NC}"
+        git fetch origin
+        git checkout "$TARGET_BRANCH" 2>/dev/null || git checkout -b "$TARGET_BRANCH" "origin/$TARGET_BRANCH"
+        git pull origin "$TARGET_BRANCH"
+        echo -e "${GREEN}✅ Successfully pulled latest repository changes on branch '${TARGET_BRANCH}' without touching existing data.${NC}"
     else
-        echo -e "${BLUE}📥 Repository not found. Cloning repository into ${PROJECT_DIR}...${NC}"
+        echo -e "${BLUE}📥 Repository not found. Cloning branch '${TARGET_BRANCH}' into ${PROJECT_DIR}...${NC}"
         if [ -z "${GITHUB_TOKEN// }" ] || [ -z "${GITHUB_USER// }" ]; then
             echo -e "${RED}❌ GITHUB_TOKEN or GITHUB_USER missing in environment variables${NC}"
             exit 1
@@ -100,11 +110,11 @@ if [ "$ONLY_PULL" = true ]; then
         REPO_URL="https://${GITHUB_TOKEN}@github.com/${GITHUB_USER}/${REPO_NAME}.git"
         mkdir -p "$WORKSPACE"
         cd "$WORKSPACE" || exit 1
-        if ! git clone "$REPO_URL" "$PROJECT_DIR" 2>&1 | sed "s|${GITHUB_TOKEN}|***HIDDEN_TOKEN***|g"; then
+        if ! git clone -b "$TARGET_BRANCH" "$REPO_URL" "$PROJECT_DIR" 2>&1 | sed "s|${GITHUB_TOKEN}|***HIDDEN_TOKEN***|g"; then
             echo -e "${RED}❌ Failed to clone repository.${NC}"
             exit 1
         fi
-        echo -e "${GREEN}✅ Successfully cloned repository.${NC}"
+        echo -e "${GREEN}✅ Successfully cloned repository on branch '${TARGET_BRANCH}'.${NC}"
     fi
 
     if [ -n "$ENV_FILE" ] && [ -f "$ENV_FILE" ] && [ "$ENV_FILE" != "${TARGET_DIR}/.env" ]; then
@@ -146,11 +156,13 @@ export UV_PYTHON_DOWNLOADS=never
 # 4. Clone or update the repository
 if [ -d "$PROJECT_DIR" ]; then
     cd "$PROJECT_DIR" || exit
-    echo -e "${BLUE}🔄 Fetching and resetting existing repository...${NC}"
-    git fetch origin && git reset --hard origin/main && git clean -fd
+    echo -e "${BLUE}🔄 Fetching and resetting repository to 'origin/${TARGET_BRANCH}'...${NC}"
+    git fetch origin
+    git checkout "$TARGET_BRANCH" 2>/dev/null || git checkout -b "$TARGET_BRANCH" "origin/$TARGET_BRANCH"
+    git reset --hard "origin/${TARGET_BRANCH}" && git clean -fd
 else
-    echo -e "${BLUE}📥 Cloning repository...${NC}"
-    if ! git clone "$REPO_URL" "$PROJECT_DIR" 2>&1 | sed "s|${GITHUB_TOKEN}|***HIDDEN_TOKEN***|g"; then
+    echo -e "${BLUE}📥 Cloning repository on branch '${TARGET_BRANCH}'...${NC}"
+    if ! git clone -b "$TARGET_BRANCH" "$REPO_URL" "$PROJECT_DIR" 2>&1 | sed "s|${GITHUB_TOKEN}|***HIDDEN_TOKEN***|g"; then
         echo -e "${RED}❌ Failed to clone repository. Check your token and permissions.${NC}"
         exit 1
     fi
