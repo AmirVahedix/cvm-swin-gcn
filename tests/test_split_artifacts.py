@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from src.data.preprocessing.split_dataset import split_dataset, load_label_studio_mapping
+from src.data.preprocessing.split_dataset import split_dataset, load_label_studio_mapping, load_fixed_id_set
 from src.train import log_split_image_ids_to_mlflow
 
 
@@ -173,6 +173,124 @@ class TestSplitArtifacts(unittest.TestCase):
 
             self.assertEqual(val_ids, [1])
             self.assertEqual(test_ids, [2])
+
+    def test_load_fixed_id_set_scalars_and_objects(self):
+        """Verify that load_fixed_id_set correctly handles scalar arrays and arrays of dicts/objects."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+
+            scalar_json = tmp_path / "scalars.json"
+            with open(scalar_json, "w", encoding="utf-8") as f:
+                json.dump([10, "20", 30], f)
+
+            obj_json = tmp_path / "objects.json"
+            with open(obj_json, "w", encoding="utf-8") as f:
+                json.dump([
+                    {"id": 40, "name": "sample_a"},
+                    {"task_id": 50, "extra": "info"},
+                    {"image_id": 60},
+                    {"id": "70"},
+                ], f)
+
+            scalar_ids = load_fixed_id_set(scalar_json)
+            self.assertEqual(scalar_ids, {10, 20, 30})
+
+            obj_ids = load_fixed_id_set(obj_json)
+            self.assertEqual(obj_ids, {40, 50, 60, 70})
+
+    def test_split_dataset_fixed_test_and_val(self):
+        """Verify that providing both fixed test and fixed val IDs allocates train, val, and test deterministically."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            images_dir = tmp_path / "images"
+            labels_dir = tmp_path / "labels"
+            output_dir = tmp_path / "output_dataset"
+            export_file = tmp_path / "export.json"
+
+            images_dir.mkdir()
+            labels_dir.mkdir()
+
+            # Create 10 dummy pairs: 0001 to 0010, tasks 601 to 610
+            mock_tasks = []
+            for i in range(1, 11):
+                stem = f"{i:04d}"
+                (images_dir / f"{stem}.jpg").write_bytes(b"dummy image")
+                (labels_dir / f"{stem}.npz").write_bytes(b"dummy npz")
+                mock_tasks.append({
+                    "id": 600 + i,
+                    "data": {"img": f"cvm-images/{stem}.jpg"}
+                })
+
+            with open(export_file, "w", encoding="utf-8") as f:
+                json.dump(mock_tasks, f)
+
+            test_ids_file = tmp_path / "test_ids.json"
+            with open(test_ids_file, "w", encoding="utf-8") as f:
+                json.dump([601, 602], f)
+
+            val_ids_file = tmp_path / "val_ids.json"
+            with open(val_ids_file, "w", encoding="utf-8") as f:
+                json.dump([{"id": 603}, {"id": 604}], f)
+
+            counts = split_dataset(
+                images_dir=str(images_dir),
+                labels_dir=str(labels_dir),
+                output_dir=str(output_dir),
+                export_json_path=str(export_file),
+                fixed_test_ids_path=str(test_ids_file),
+                fixed_val_ids_path=str(val_ids_file),
+                clean_output=True,
+            )
+
+            self.assertEqual(counts["test"], 2)
+            self.assertEqual(counts["val"], 2)
+            self.assertEqual(counts["train"], 6)
+
+            self.assertEqual(counts["test_ids"], [601, 602])
+            self.assertEqual(counts["val_ids"], [603, 604])
+
+            # Check files on disk in train, val, and test dirs
+            train_imgs = {f.stem for f in (output_dir / "train" / "images").iterdir()}
+            val_imgs = {f.stem for f in (output_dir / "val" / "images").iterdir()}
+            test_imgs = {f.stem for f in (output_dir / "test" / "images").iterdir()}
+
+            self.assertEqual(test_imgs, {"0001", "0002"})
+            self.assertEqual(val_imgs, {"0003", "0004"})
+            self.assertEqual(train_imgs, {"0005", "0006", "0007", "0008", "0009", "0010"})
+
+            # Ensure all subsets are completely disjoint
+            self.assertEqual(len(test_imgs.intersection(val_imgs)), 0)
+            self.assertEqual(len(train_imgs.intersection(val_imgs)), 0)
+            self.assertEqual(len(train_imgs.intersection(test_imgs)), 0)
+
+    def test_split_dataset_overlap_detection(self):
+        """Verify that an overlap between fixed test and val IDs raises a ValueError data leak error."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            images_dir = tmp_path / "images"
+            labels_dir = tmp_path / "labels"
+            output_dir = tmp_path / "output_dataset"
+
+            images_dir.mkdir()
+            labels_dir.mkdir()
+
+            test_ids_file = tmp_path / "test_ids.json"
+            val_ids_file = tmp_path / "val_ids.json"
+
+            with open(test_ids_file, "w", encoding="utf-8") as f:
+                json.dump([1, 2, 3], f)
+            with open(val_ids_file, "w", encoding="utf-8") as f:
+                json.dump([3, 4, 5], f)
+
+            with self.assertRaises(ValueError) as ctx:
+                split_dataset(
+                    images_dir=str(images_dir),
+                    labels_dir=str(labels_dir),
+                    output_dir=str(output_dir),
+                    fixed_test_ids_path=str(test_ids_file),
+                    fixed_val_ids_path=str(val_ids_file),
+                )
+            self.assertIn("Data leakage detected", str(ctx.exception))
 
 
 if __name__ == "__main__":

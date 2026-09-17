@@ -234,6 +234,18 @@ def main():
         default=5,
         help="Number of initial epochs to linearly ramp coordinate/graph losses from 0.0 to full weight (default: 5).",
     )
+    parser.add_argument(
+        "--test-ids-file",
+        type=str,
+        default=None,
+        help="Path to JSON file containing exact test image IDs to isolate for the test split (default: check dataset/test_image_ids.json).",
+    )
+    parser.add_argument(
+        "--val-ids-file",
+        type=str,
+        default=None,
+        help="Path to JSON file containing exact validation image IDs to isolate for the val split (default: check dataset/val_image_ids.json).",
+    )
 
     args = parser.parse_args()
 
@@ -335,6 +347,8 @@ def main():
                 val_ratio=0.15,
                 test_ratio=0.15,
                 seed=42,
+                fixed_test_ids_path=args.test_ids_file,
+                fixed_val_ids_path=args.val_ids_file,
             )
             val_cnt = len(split_info.get("val_ids", []))
             test_cnt = len(split_info.get("test_ids", []))
