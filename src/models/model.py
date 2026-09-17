@@ -149,11 +149,13 @@ class UNetUpBlock(nn.Module):
 
 class CephalometricSwinGCN(nn.Module):
     """
-    Upgraded Cephalometric Swin-GCN Network featuring:
+    Ablation Study Variant (ablation-Lgraph):
+    Cephalometric Swin Network trained WITHOUT Graph Loss (L_graph).
+    Features:
     1. Multi-scale Swin Backbone with U-Net feature pyramid skip-connections.
     2. Sigmoid normalized heatmaps [0, 1] matching ground-truth Gaussian targets.
     3. Global differentiable Soft-Argmax coordinate regression with learnable temperature.
-    4. Graph Loss structural alignment via anatomical adjacency buffering.
+    4. Graph Loss ablation: No active anatomical graph loss or required graph buffers.
     """
     def __init__(
         self,
@@ -162,6 +164,7 @@ class CephalometricSwinGCN(nn.Module):
         img_size: int = 640,
         init_temperature: float = 0.1,
         window_radius: int | None = None,  # Kept for backward compatibility
+        include_adj: bool = False,         # Ablation: graph loss buffer disabled by default
     ):
         super().__init__()
         self.num_landmarks = num_landmarks
@@ -192,7 +195,10 @@ class CephalometricSwinGCN(nn.Module):
             num_landmarks=num_landmarks, init_temperature=init_temperature
         )
 
-        self.register_buffer("adj_matrix", self._build_adjacency())
+        if include_adj:
+            self.register_buffer("adj_matrix", self._build_adjacency())
+        else:
+            self.adj_matrix = None
 
     def _build_adjacency(self) -> torch.Tensor:
         adj = torch.eye(13)
@@ -250,3 +256,5 @@ class CephalometricSwinGCN(nn.Module):
         return heatmaps, coords
 
 
+# Alias for ablation study naming
+CephalometricSwin = CephalometricSwinGCN

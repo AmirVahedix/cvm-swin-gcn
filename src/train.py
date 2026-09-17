@@ -40,7 +40,7 @@ LR = float(os.getenv("LEARNING_RATE", 1e-4))
 LLRD_DECAY_RATE = float(os.getenv("LLRD_DECAY_RATE", 0.8))
 LAMBDA_HM = 1.0
 LAMBDA_CD = 5.0
-LAMBDA_GRAPH = 1.0
+LAMBDA_GRAPH = 0.0  # Ablation study: graph loss removed (weight = 0.0)
 EARLY_STOPPING_PATIENCE = 40
 WARMUP_COORD_EPOCHS = 5
 SAVE_PATH = "./artifacts/best.pth"
@@ -51,9 +51,9 @@ DEFAULT_PIXEL_SPACING = float(os.getenv("PIXEL_SPACING", 0.1))  # 0.1 mm per pix
 
 def get_coord_loss_warmup_factor(epoch: int, warmup_epochs: int) -> float:
     """
-    Ramps coordinate and graph loss weights linearly from 0.0 to 1.0 across warmup_epochs.
+    Ramps coordinate loss weight linearly from 0.0 to 1.0 across warmup_epochs.
     Allows heatmaps to establish coarse localization during early epochs before
-    activating strong direct coordinate and graph structural losses.
+    activating strong direct coordinate losses.
     """
     if warmup_epochs <= 0:
         return 1.0
@@ -157,12 +157,12 @@ def train_epoch(
     optimizer,
     awl_loss,
     wing_loss,
-    graph_loss,
-    landmark_weights,
-    lambda_hm,
-    lambda_cd,
-    lambda_graph,
-    device,
+    graph_loss=None,
+    landmark_weights=None,
+    lambda_hm: float = 1.0,
+    lambda_cd: float = 5.0,
+    lambda_graph: float = 0.0,
+    device=None,
     epoch: int = 1,
     epochs: int = 1,
     scaler: torch.amp.GradScaler | None = None,
@@ -191,8 +191,10 @@ def train_epoch(
             # Ensure float32 for loss computation to maintain numerical stability
             loss_hm = awl_loss(pred_heatmaps.float(), gt_heatmaps.float(), landmark_weights=landmark_weights)
             loss_cd = wing_loss(pred_coords.float(), gt_coords.float(), landmark_weights=landmark_weights)
-            loss_g = graph_loss(pred_coords.float(), gt_coords.float())
-            total_loss = (lambda_hm * loss_hm) + (lambda_cd * loss_cd) + (lambda_graph * loss_g)
+            total_loss = (lambda_hm * loss_hm) + (lambda_cd * loss_cd)
+            if graph_loss is not None and lambda_graph > 0.0:
+                loss_g = graph_loss(pred_coords.float(), gt_coords.float())
+                total_loss = total_loss + (lambda_graph * loss_g)
 
         if scaler is not None and amp_enabled:
             scaler.scale(total_loss).backward()
@@ -349,12 +351,12 @@ def validate_epoch(
     dataloader,
     awl_loss,
     wing_loss,
-    graph_loss,
-    landmark_weights,
-    lambda_hm,
-    lambda_cd,
-    lambda_graph,
-    device,
+    graph_loss=None,
+    landmark_weights=None,
+    lambda_hm: float = 1.0,
+    lambda_cd: float = 5.0,
+    lambda_graph: float = 0.0,
+    device=None,
     img_size=DEFAULT_IMG_SIZE,
     pixel_spacing: float = DEFAULT_PIXEL_SPACING,
     epoch: int = 1,
@@ -389,8 +391,10 @@ def validate_epoch(
                 pred_heatmaps, pred_coords = model(images)
                 loss_hm = awl_loss(pred_heatmaps.float(), gt_heatmaps.float(), landmark_weights=landmark_weights)
                 loss_cd = wing_loss(pred_coords.float(), gt_coords.float(), landmark_weights=landmark_weights)
-                loss_g = graph_loss(pred_coords.float(), gt_coords.float())
-                total_loss = (lambda_hm * loss_hm) + (lambda_cd * loss_cd) + (lambda_graph * loss_g)
+                total_loss = (lambda_hm * loss_hm) + (lambda_cd * loss_cd)
+                if graph_loss is not None and lambda_graph > 0.0:
+                    loss_g = graph_loss(pred_coords.float(), gt_coords.float())
+                    total_loss = total_loss + (lambda_graph * loss_g)
 
             epoch_loss += total_loss.item()
 
@@ -902,7 +906,7 @@ def main(
     # Losses & Landmark Weights
     awl_loss = AdaptiveWingLoss().to(device)
     wing_loss = WingLoss(img_size=float(img_size)).to(device)
-    graph_loss = AnatomicalGraphLoss(model.adj_matrix).to(device)
+    graph_loss = None  # Ablation study: graph loss removed
     landmark_weights = get_landmark_weights(device)
 
     best_val_loss = float("inf")
@@ -924,7 +928,7 @@ def main(
                 "llrd_decay_rate": llrd_decay_rate,
                 "lambda_heatmap": LAMBDA_HM,
                 "lambda_coord": LAMBDA_CD,
-                "lambda_graph": LAMBDA_GRAPH,
+                "lambda_graph": 0.0,
                 "warmup_coord_epochs": warmup_coord_epochs,
                 "early_stopping_patience": patience,
                 "save_path": SAVE_PATH,
@@ -935,7 +939,8 @@ def main(
                 "scheduler": "CosineAnnealingWithWarmup",
                 "heatmap_loss": "AdaptiveWingLoss",
                 "coord_loss": "WingLoss",
-                "graph_loss": "AnatomicalGraphLoss",
+                "graph_loss": "None (Ablation: -L_graph)",
+                "ablation_study": "no_graph_loss (ablation-Lgraph)",
                 "device": str(device),
                 "use_amp": use_amp,
                 "compile_model": compile_model,
@@ -971,10 +976,10 @@ def main(
         for epoch in range(epochs):
             start_time = time.time()
 
-            # Dynamic coordinate & graph loss warmup factor
+            # Dynamic coordinate loss warmup factor
             coord_warmup_factor = get_coord_loss_warmup_factor(epoch + 1, warmup_coord_epochs)
             effective_lambda_cd = LAMBDA_CD * coord_warmup_factor
-            effective_lambda_graph = LAMBDA_GRAPH * coord_warmup_factor
+            effective_lambda_graph = 0.0
 
             train_loss = train_epoch(
                 model,
@@ -982,12 +987,12 @@ def main(
                 optimizer,
                 awl_loss,
                 wing_loss,
-                graph_loss,
-                landmark_weights,
-                LAMBDA_HM,
-                effective_lambda_cd,
-                effective_lambda_graph,
-                device,
+                graph_loss=None,
+                landmark_weights=landmark_weights,
+                lambda_hm=LAMBDA_HM,
+                lambda_cd=effective_lambda_cd,
+                lambda_graph=0.0,
+                device=device,
                 epoch=epoch + 1,
                 epochs=epochs,
                 scaler=scaler,
@@ -999,12 +1004,12 @@ def main(
                 val_loader,
                 awl_loss,
                 wing_loss,
-                graph_loss,
-                landmark_weights,
-                LAMBDA_HM,
-                effective_lambda_cd,
-                effective_lambda_graph,
-                device,
+                graph_loss=None,
+                landmark_weights=landmark_weights,
+                lambda_hm=LAMBDA_HM,
+                lambda_cd=effective_lambda_cd,
+                lambda_graph=0.0,
+                device=device,
                 img_size=img_size,
                 pixel_spacing=pixel_spacing,
                 epoch=epoch + 1,
@@ -1437,7 +1442,7 @@ if __name__ == "__main__":
         "--warmup-coord-epochs",
         type=int,
         default=WARMUP_COORD_EPOCHS,
-        help=f"Number of initial epochs to linearly ramp coordinate/graph losses from 0.0 to full weight (default: {WARMUP_COORD_EPOCHS})",
+        help=f"Number of initial epochs to linearly ramp coordinate loss from 0.0 to full weight (default: {WARMUP_COORD_EPOCHS})",
     )
 
     args = parser.parse_args()

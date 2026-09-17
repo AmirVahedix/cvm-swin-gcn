@@ -178,7 +178,8 @@ def compute_metrics(
     img_size: int = 640,
     pixel_spacing: float | np.ndarray = 0.1,
     threshold_px: float = 2.5,
-) -> tuple[dict, list[dict], np.ndarray]:
+    return_arrays: bool = False,
+) -> tuple:
     """
     Computes overall summary metrics and per-landmark metrics breakdown in both millimeters and pixels.
 
@@ -350,6 +351,8 @@ def compute_metrics(
             "sdr_4.0px": l_sdr4_0,
         })
 
+    if return_arrays:
+        return summary_metrics, landmark_metrics, valid_radial_errors, radial_errors_mm, valid_mask
     return summary_metrics, landmark_metrics, valid_radial_errors
 
 
@@ -434,6 +437,8 @@ def generate_evaluation_charts(
     pixel_spacing: float | np.ndarray = 0.1,
     save_dir: Path | str | None = None,
     log_to_mlflow: bool = True,
+    radial_errors_mm: np.ndarray | None = None,
+    valid_mask: np.ndarray | None = None,
 ) -> dict[str, str]:
     """
     Generates PNG diagram charts for all evaluation metrics (physical mm and canvas px)
@@ -592,6 +597,33 @@ def generate_evaluation_charts(
         fig5.savefig(p5, bbox_inches="tight")
         plt.close(fig5)
         generated_charts["evaluation_dashboard"] = str(p5)
+
+        # 6. Advanced Clinical Publication Charts (CED Curve, Grouped Bar, Boxplot/Violin, Dashboard)
+        try:
+            from scripts.generate_clinical_charts import (
+                plot_ced_curve,
+                plot_per_landmark_sdr_bar_chart,
+                plot_radial_error_boxplot,
+                generate_publication_dashboard,
+            )
+            report_dict = {"run_name": "Evaluation", "summary": summary_metrics, "landmarks": landmark_metrics}
+            p_ced = target_dir / "chart_ced_sdr_curve.png"
+            plot_ced_curve(radial_errors_mm, valid_mask, report_dict, output_path=p_ced)
+            generated_charts["ced_sdr_curve"] = str(p_ced)
+
+            p_bar = target_dir / "chart_per_landmark_sdr_grouped.png"
+            plot_per_landmark_sdr_bar_chart(report_dict, output_path=p_bar, radial_errors_mm=radial_errors_mm, valid_mask=valid_mask)
+            generated_charts["per_landmark_sdr_grouped"] = str(p_bar)
+
+            p_box = target_dir / "chart_radial_error_boxplot_violin.png"
+            plot_radial_error_boxplot(radial_errors_mm, valid_mask, report_dict, output_path=p_box)
+            generated_charts["radial_error_boxplot_violin"] = str(p_box)
+
+            p_pub = target_dir / "chart_clinical_publication_dashboard.png"
+            generate_publication_dashboard(radial_errors_mm, valid_mask, report_dict, output_path=p_pub)
+            generated_charts["clinical_publication_dashboard"] = str(p_pub)
+        except Exception as chart_err:
+            print(f"⚠️ Warning: Could not generate publication clinical charts: {chart_err}")
 
         # Log artifacts to MLflow if tracking is active
         if log_to_mlflow:
@@ -846,15 +878,27 @@ def run_evaluation(
         spacings_array = pixel_spacing
 
     # 4. Compute metrics
-    summary_metrics, landmark_metrics, valid_radial_errors = compute_metrics(
+    summary_metrics, landmark_metrics, valid_radial_errors, radial_errors_mm, valid_mask = compute_metrics(
         pred_coords=pred_array,
         gt_coords=gt_array,
         img_size=img_size,
         pixel_spacing=spacings_array,
         threshold_px=threshold_px,
+        return_arrays=True,
     )
 
-    # 4b. Generate metric PNG charts
+    # 4b. Save raw radial errors NPZ for downstream distribution and boxplot analysis
+    raw_errors_path = run_folder / "raw_radial_errors.npz"
+    np.savez(
+        raw_errors_path,
+        radial_errors_mm=radial_errors_mm,
+        radial_errors_px=valid_radial_errors,
+        valid_mask=valid_mask,
+        pixel_spacing=spacings_array,
+    )
+    print(f"--> Saved per-sample raw radial errors NPZ to '{raw_errors_path}'")
+
+    # 4c. Generate metric PNG charts
     generate_evaluation_charts(
         summary_metrics=summary_metrics,
         landmark_metrics=landmark_metrics,
@@ -862,6 +906,8 @@ def run_evaluation(
         pixel_spacing=spacings_array,
         save_dir=run_folder / "charts",
         log_to_mlflow=False,  # We handle comprehensive MLflow logging below
+        radial_errors_mm=radial_errors_mm,
+        valid_mask=valid_mask,
     )
 
     # 5. Format & print table
@@ -917,6 +963,9 @@ def run_evaluation(
             if (run_folder / "metrics.json").exists():
                 mlflow.log_artifact(str(run_folder / "metrics.json"), artifact_path="evaluation")
                 print(f"--> Successfully logged 'metrics.json' to MLflow artifact path 'evaluation'.")
+            if (run_folder / "raw_radial_errors.npz").exists():
+                mlflow.log_artifact(str(run_folder / "raw_radial_errors.npz"), artifact_path="evaluation")
+                print(f"--> Successfully logged 'raw_radial_errors.npz' to MLflow artifact path 'evaluation'.")
             if (run_folder / "summary_report.txt").exists():
                 mlflow.log_artifact(str(run_folder / "summary_report.txt"), artifact_path="evaluation")
 
