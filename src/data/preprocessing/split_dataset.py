@@ -143,6 +143,43 @@ def load_label_studio_mapping(export_json_path=None) -> dict[str, int]:
     return mapping
 
 
+def load_fixed_id_set(file_path) -> set:
+    """
+    Loads fixed IDs from a JSON file. Supports:
+    1. Flat list: [1, 2, 3] or ["1", "2"]
+    2. List of dicts/objects: [{"id": 1, ...}], [{"task_id": 1, ...}], [{"image_id": 1, ...}]
+    """
+    if not file_path:
+        return set()
+    p = Path(file_path)
+    if not p.exists() or not p.is_file():
+        return set()
+
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, list):
+            print(f"⚠️ Warning: {file_path} does not contain a JSON array/list.")
+            return set()
+
+        id_set = set()
+        for item in data:
+            if isinstance(item, dict):
+                val = item.get("id")
+                if val is None:
+                    val = item.get("task_id")
+                if val is None:
+                    val = item.get("image_id")
+            else:
+                val = item
+            if val is not None:
+                id_set.add(int(val) if str(val).isdigit() else str(val))
+        return id_set
+    except Exception as e:
+        print(f"⚠️ Warning reading fixed ID file {file_path}: {e}")
+        return set()
+
+
 def split_dataset(
     images_dir="data/images",
     labels_dir="data/labels",
@@ -154,11 +191,15 @@ def split_dataset(
     clean_output=True,
     export_json_path="data/exports/export.json",
     fixed_test_ids_path=None,
+    fixed_val_ids_path=None,
 ):
     """
     Creates train-val-test splits for image/label pairs and copies them into output_dir structure.
     If fixed_test_ids_path is specified (or test_image_ids.json exists in output_dir),
     the test set will strictly contain those exact IDs.
+    If fixed_val_ids_path is specified (or val_image_ids.json exists in output_dir),
+    the validation set will strictly contain those exact IDs, and all remaining data
+    will be allocated to the training set.
 
     Returns:
         dict: Counts of dataset split pairs {"train": int, "val": int, "test": int}.
@@ -169,7 +210,7 @@ def split_dataset(
             f"Train, val, and test ratios must sum to 1.0. Current sum: {total_ratio}"
         )
 
-    # Load Label Studio task ID mapping early to support fixed test set assignment
+    # Load Label Studio task ID mapping early to support fixed test/val set assignment
     ls_mapping = load_label_studio_mapping(export_json_path=export_json_path)
 
     def resolve_image_id(file_path: str):
@@ -188,15 +229,27 @@ def split_dataset(
     elif (Path(output_dir) / "test_image_ids.json").exists():
         target_fixed_test_path = Path(output_dir) / "test_image_ids.json"
 
-    fixed_test_set = set()
-    if target_fixed_test_path and target_fixed_test_path.exists():
-        try:
-            with open(target_fixed_test_path, "r", encoding="utf-8") as f:
-                loaded_ids = json.load(f)
-            fixed_test_set = {int(x) if str(x).isdigit() else str(x) for x in loaded_ids}
-            print(f"--> Using fixed test set with {len(fixed_test_set)} IDs from: {target_fixed_test_path}")
-        except Exception as e:
-            print(f"⚠️ Warning reading {target_fixed_test_path}: {e}")
+    fixed_test_set = load_fixed_id_set(target_fixed_test_path)
+    if fixed_test_set:
+        print(f"--> Using fixed test set with {len(fixed_test_set)} IDs from: {target_fixed_test_path}")
+
+    # Check for fixed val IDs
+    target_fixed_val_path = None
+    if fixed_val_ids_path and Path(fixed_val_ids_path).exists():
+        target_fixed_val_path = Path(fixed_val_ids_path)
+    elif (Path(output_dir) / "val_image_ids.json").exists():
+        target_fixed_val_path = Path(output_dir) / "val_image_ids.json"
+
+    fixed_val_set = load_fixed_id_set(target_fixed_val_path)
+    if fixed_val_set:
+        print(f"--> Using fixed val set with {len(fixed_val_set)} IDs from: {target_fixed_val_path}")
+
+    # Check for overlap between fixed test and val sets
+    overlap = fixed_test_set.intersection(fixed_val_set)
+    if overlap:
+        raise ValueError(
+            f"Data leakage detected! Fixed test and validation sets share {len(overlap)} overlapping IDs: {overlap}"
+        )
 
     setup_directories(output_dir, clean_output=clean_output)
     paired_files = get_paired_files(images_dir, labels_dir)
@@ -217,8 +270,13 @@ def split_dataset(
     else:
         temp_pairs, test_pairs = paired_files, []
 
-    # Second split: Separate train and validation sets
-    if val_ratio > 0:
+    # Second split: Separate train and validation sets (using fixed val set if available)
+    if fixed_val_set:
+        val_pairs = [p for p in temp_pairs if resolve_image_id(p[0]) in fixed_val_set]
+        train_pairs = [p for p in temp_pairs if resolve_image_id(p[0]) not in fixed_val_set]
+        print(f"--> Successfully matched {len(val_pairs)} exact validation pairs using fixed val IDs.")
+        print(f"--> Remaining {len(train_pairs)} pairs assigned to training set (zero randomness).")
+    elif val_ratio > 0:
         relative_val_ratio = val_ratio / (train_ratio + val_ratio)
         train_pairs, val_pairs = train_test_split(
             temp_pairs, test_size=relative_val_ratio, random_state=seed
@@ -335,6 +393,12 @@ def main():
         default=None,
         help="Path to JSON file containing exact test image IDs to isolate for the test split.",
     )
+    parser.add_argument(
+        "--val-ids-file",
+        type=str,
+        default=None,
+        help="Path to JSON file containing exact validation image IDs to isolate for the validation split.",
+    )
 
     args = parser.parse_args()
 
@@ -349,6 +413,7 @@ def main():
         clean_output=args.clean_output,
         export_json_path=args.export_json_path,
         fixed_test_ids_path=args.test_ids_file,
+        fixed_val_ids_path=args.val_ids_file,
     )
 
 
