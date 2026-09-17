@@ -38,24 +38,26 @@ BATCH_SIZE = 8
 EPOCHS = 100
 LR = float(os.getenv("LEARNING_RATE", 1e-4))
 LLRD_DECAY_RATE = float(os.getenv("LLRD_DECAY_RATE", 0.8))
-LAMBDA_HM = 1.0
+LAMBDA_HM = 0.0  # Ablation study: Adaptive Wing Loss removed (weight = 0.0)
 LAMBDA_CD = 5.0
 LAMBDA_GRAPH = 1.0
 EARLY_STOPPING_PATIENCE = 40
-WARMUP_COORD_EPOCHS = 5
+WARMUP_COORD_EPOCHS = 0  # No heatmap warmup needed since coordinate loss is primary
 SAVE_PATH = "./artifacts/best.pth"
 FULL_CHECKPOINT_PATH = "./artifacts/best_full_checkpoint.pth"
 DEFAULT_IMG_SIZE = 640
 DEFAULT_PIXEL_SPACING = float(os.getenv("PIXEL_SPACING", 0.1))  # 0.1 mm per pixel (standard cephalometric calibration)
 
 
-def get_coord_loss_warmup_factor(epoch: int, warmup_epochs: int) -> float:
+def get_coord_loss_warmup_factor(epoch: int, warmup_epochs: int, lambda_hm: float | None = None) -> float:
     """
     Ramps coordinate and graph loss weights linearly from 0.0 to 1.0 across warmup_epochs.
     Allows heatmaps to establish coarse localization during early epochs before
     activating strong direct coordinate and graph structural losses.
+    If heatmap loss is explicitly disabled (lambda_hm is not None and lambda_hm <= 0.0),
+    returns 1.0 immediately so coordinate and graph losses are active from epoch 1.
     """
-    if warmup_epochs <= 0:
+    if warmup_epochs <= 0 or (lambda_hm is not None and lambda_hm <= 0.0):
         return 1.0
     # epoch is 1-indexed: epoch 1 -> 0.0, epoch warmup_epochs -> 1.0
     return float(min(1.0, max(0.0, (epoch - 1) / max(1, warmup_epochs - 1))))
@@ -155,14 +157,14 @@ def train_epoch(
     model,
     dataloader,
     optimizer,
-    awl_loss,
-    wing_loss,
-    graph_loss,
-    landmark_weights,
-    lambda_hm,
-    lambda_cd,
-    lambda_graph,
-    device,
+    awl_loss=None,
+    wing_loss=None,
+    graph_loss=None,
+    landmark_weights=None,
+    lambda_hm: float = 0.0,
+    lambda_cd: float = 5.0,
+    lambda_graph: float = 1.0,
+    device=None,
     epoch: int = 1,
     epochs: int = 1,
     scaler: torch.amp.GradScaler | None = None,
@@ -181,7 +183,6 @@ def train_epoch(
 
     for step, batch in enumerate(pbar, 1):
         images = batch["image"].to(device)
-        gt_heatmaps = batch["heatmaps"].to(device)
         gt_coords = batch["coords"].to(device)
 
         optimizer.zero_grad()
@@ -189,10 +190,15 @@ def train_epoch(
         with torch.amp.autocast(device_type=device_type, dtype=torch.float16, enabled=amp_enabled):
             pred_heatmaps, pred_coords = model(images)
             # Ensure float32 for loss computation to maintain numerical stability
-            loss_hm = awl_loss(pred_heatmaps.float(), gt_heatmaps.float(), landmark_weights=landmark_weights)
             loss_cd = wing_loss(pred_coords.float(), gt_coords.float(), landmark_weights=landmark_weights)
-            loss_g = graph_loss(pred_coords.float(), gt_coords.float())
-            total_loss = (lambda_hm * loss_hm) + (lambda_cd * loss_cd) + (lambda_graph * loss_g)
+            total_loss = lambda_cd * loss_cd
+            if graph_loss is not None and lambda_graph > 0.0:
+                loss_g = graph_loss(pred_coords.float(), gt_coords.float())
+                total_loss = total_loss + (lambda_graph * loss_g)
+            if awl_loss is not None and lambda_hm > 0.0:
+                gt_heatmaps = batch["heatmaps"].to(device)
+                loss_hm = awl_loss(pred_heatmaps.float(), gt_heatmaps.float(), landmark_weights=landmark_weights)
+                total_loss = total_loss + (lambda_hm * loss_hm)
 
         if scaler is not None and amp_enabled:
             scaler.scale(total_loss).backward()
@@ -347,14 +353,14 @@ def compute_per_landmark_metrics(
 def validate_epoch(
     model,
     dataloader,
-    awl_loss,
-    wing_loss,
-    graph_loss,
-    landmark_weights,
-    lambda_hm,
-    lambda_cd,
-    lambda_graph,
-    device,
+    awl_loss=None,
+    wing_loss=None,
+    graph_loss=None,
+    landmark_weights=None,
+    lambda_hm: float = 0.0,
+    lambda_cd: float = 5.0,
+    lambda_graph: float = 1.0,
+    device=None,
     img_size=DEFAULT_IMG_SIZE,
     pixel_spacing: float = DEFAULT_PIXEL_SPACING,
     epoch: int = 1,
@@ -379,7 +385,6 @@ def validate_epoch(
     with torch.no_grad():
         for step, batch in enumerate(pbar, 1):
             images = batch["image"].to(device)
-            gt_heatmaps = batch["heatmaps"].to(device)
             gt_coords = batch["coords"].to(device)
             sample_spacing = batch.get("pixel_spacing")
             if sample_spacing is not None:
@@ -387,10 +392,15 @@ def validate_epoch(
 
             with torch.amp.autocast(device_type=device_type, dtype=torch.float16, enabled=amp_enabled):
                 pred_heatmaps, pred_coords = model(images)
-                loss_hm = awl_loss(pred_heatmaps.float(), gt_heatmaps.float(), landmark_weights=landmark_weights)
                 loss_cd = wing_loss(pred_coords.float(), gt_coords.float(), landmark_weights=landmark_weights)
-                loss_g = graph_loss(pred_coords.float(), gt_coords.float())
-                total_loss = (lambda_hm * loss_hm) + (lambda_cd * loss_cd) + (lambda_graph * loss_g)
+                total_loss = lambda_cd * loss_cd
+                if graph_loss is not None and lambda_graph > 0.0:
+                    loss_g = graph_loss(pred_coords.float(), gt_coords.float())
+                    total_loss = total_loss + (lambda_graph * loss_g)
+                if awl_loss is not None and lambda_hm > 0.0:
+                    gt_heatmaps = batch["heatmaps"].to(device)
+                    loss_hm = awl_loss(pred_heatmaps.float(), gt_heatmaps.float(), landmark_weights=landmark_weights)
+                    total_loss = total_loss + (lambda_hm * loss_hm)
 
             epoch_loss += total_loss.item()
 
@@ -900,7 +910,7 @@ def main(
     )
 
     # Losses & Landmark Weights
-    awl_loss = AdaptiveWingLoss().to(device)
+    awl_loss = None  # Ablation study: Adaptive Wing Loss removed
     wing_loss = WingLoss(img_size=float(img_size)).to(device)
     graph_loss = AnatomicalGraphLoss(model.adj_matrix).to(device)
     landmark_weights = get_landmark_weights(device)
@@ -933,9 +943,10 @@ def main(
                 "num_landmarks": NUM_LANDMARKS,
                 "optimizer": "AdamW-LLRD",
                 "scheduler": "CosineAnnealingWithWarmup",
-                "heatmap_loss": "AdaptiveWingLoss",
+                "heatmap_loss": "None (Ablation: -L_awl)",
                 "coord_loss": "WingLoss",
                 "graph_loss": "AnatomicalGraphLoss",
+                "ablation_study": "no_adaptive_wing_loss (ablation-Lawl)",
                 "device": str(device),
                 "use_amp": use_amp,
                 "compile_model": compile_model,
@@ -972,22 +983,22 @@ def main(
             start_time = time.time()
 
             # Dynamic coordinate & graph loss warmup factor
-            coord_warmup_factor = get_coord_loss_warmup_factor(epoch + 1, warmup_coord_epochs)
+            coord_warmup_factor = get_coord_loss_warmup_factor(epoch + 1, warmup_coord_epochs, lambda_hm=LAMBDA_HM)
             effective_lambda_cd = LAMBDA_CD * coord_warmup_factor
             effective_lambda_graph = LAMBDA_GRAPH * coord_warmup_factor
 
             train_loss = train_epoch(
-                model,
-                train_loader,
-                optimizer,
-                awl_loss,
-                wing_loss,
-                graph_loss,
-                landmark_weights,
-                LAMBDA_HM,
-                effective_lambda_cd,
-                effective_lambda_graph,
-                device,
+                model=model,
+                dataloader=train_loader,
+                optimizer=optimizer,
+                awl_loss=None,
+                wing_loss=wing_loss,
+                graph_loss=graph_loss,
+                landmark_weights=landmark_weights,
+                lambda_hm=LAMBDA_HM,
+                lambda_cd=effective_lambda_cd,
+                lambda_graph=effective_lambda_graph,
+                device=device,
                 epoch=epoch + 1,
                 epochs=epochs,
                 scaler=scaler,
@@ -995,16 +1006,16 @@ def main(
             )
 
             val_loss, metrics = validate_epoch(
-                model,
-                val_loader,
-                awl_loss,
-                wing_loss,
-                graph_loss,
-                landmark_weights,
-                LAMBDA_HM,
-                effective_lambda_cd,
-                effective_lambda_graph,
-                device,
+                model=model,
+                dataloader=val_loader,
+                awl_loss=None,
+                wing_loss=wing_loss,
+                graph_loss=graph_loss,
+                landmark_weights=landmark_weights,
+                lambda_hm=LAMBDA_HM,
+                lambda_cd=effective_lambda_cd,
+                lambda_graph=effective_lambda_graph,
+                device=device,
                 img_size=img_size,
                 pixel_spacing=pixel_spacing,
                 epoch=epoch + 1,
