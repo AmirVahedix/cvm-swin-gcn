@@ -121,6 +121,11 @@ if [ "$ONLY_PULL" = true ]; then
         cp "$ENV_FILE" "${TARGET_DIR}/.env" 2>/dev/null || true
     fi
 
+    if [ -d "/workspace/dataset" ]; then
+        mkdir -p "${TARGET_DIR}/dataset"
+        cp -r /workspace/dataset/*_image_ids.json "${TARGET_DIR}/dataset/" 2>/dev/null || true
+    fi
+
     exit 0
 fi
 
@@ -172,6 +177,12 @@ fi
 # Ensure .env is placed inside the project root for scripts
 if [ -n "$ENV_FILE" ] && [ -f "$ENV_FILE" ]; then
     cp "$ENV_FILE" "${PROJECT_DIR}/.env" 2>/dev/null || true
+fi
+
+# Ensure fixed split definition files are placed inside project dataset dir if present
+if [ -d "/workspace/dataset" ]; then
+    mkdir -p "${PROJECT_DIR}/dataset"
+    cp -r /workspace/dataset/*_image_ids.json "${PROJECT_DIR}/dataset/" 2>/dev/null || true
 fi
 
 # Clean up any cloned .python-version or strict requires-python that force uv to switch Python runtimes

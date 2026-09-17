@@ -16,4 +16,5 @@ wheels/
 .env
 *.npz
 *.json
+!dataset/*_image_ids.json
 *.txt

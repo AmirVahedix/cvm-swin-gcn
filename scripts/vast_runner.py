@@ -735,6 +735,49 @@ def upload_setup_files(
         ],
         check=True,
     )
+
+    # Sync local dataset split files (test_image_ids.json, val_image_ids.json) if they exist
+    dataset_dir = Path(__file__).resolve().parent.parent / "dataset"
+    split_files = []
+    if dataset_dir.is_dir():
+        for fname in ["test_image_ids.json", "val_image_ids.json"]:
+            sfile = dataset_dir / fname
+            if sfile.is_file():
+                split_files.append(sfile)
+
+    if split_files:
+        print(
+            f"{COLOR_BLUE}📦 Syncing fixed split definition files ({len(split_files)} files) to {user}@{ssh_host}:{ssh_port}:{remote_dest}/dataset/...{COLOR_RESET}"
+        )
+        subprocess.run(
+            [
+                "ssh",
+                "-o",
+                "StrictHostKeyChecking=no",
+                "-o",
+                "UserKnownHostsFile=/dev/null",
+                "-p",
+                str(ssh_port),
+                f"{user}@{ssh_host}",
+                f"mkdir -p {remote_dest}/dataset",
+            ],
+            check=True,
+        )
+        split_scp_cmd = [
+            "scp",
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-o",
+            "UserKnownHostsFile=/dev/null",
+            "-P",
+            str(ssh_port),
+            *[str(f) for f in split_files],
+            f"{user}@{ssh_host}:{remote_dest}/dataset/",
+        ]
+        res_split = subprocess.run(split_scp_cmd)
+        if res_split.returncode == 0:
+            print(f"{COLOR_GREEN}✅ Split definition files successfully deployed.{COLOR_RESET}")
+
     print(f"{COLOR_GREEN}✅ Setup files successfully deployed.{COLOR_RESET}")
 
 
