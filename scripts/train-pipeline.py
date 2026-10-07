@@ -235,6 +235,24 @@ def main():
         help="Number of initial epochs to linearly ramp coordinate/graph losses from 0.0 to full weight (default: 5).",
     )
     parser.add_argument(
+        "--lambda-hm",
+        type=float,
+        default=float(os.getenv("LAMBDA_HM", 1.0)),
+        help="Weight for Adaptive Wing Loss on heatmaps (default: 1.0 or $LAMBDA_HM).",
+    )
+    parser.add_argument(
+        "--lambda-cd",
+        type=float,
+        default=float(os.getenv("LAMBDA_CD", 5.0)),
+        help="Weight for Wing Loss on coordinates (default: 5.0 or $LAMBDA_CD).",
+    )
+    parser.add_argument(
+        "--lambda-graph",
+        type=float,
+        default=float(os.getenv("LAMBDA_GRAPH", 1.0)),
+        help="Weight for Anatomical Graph Loss on landmark edges (default: 1.0 or $LAMBDA_GRAPH).",
+    )
+    parser.add_argument(
         "--test-ids-file",
         type=str,
         default=None,
@@ -366,6 +384,9 @@ def main():
             batch_size=args.batch_size,
             lr=args.lr,
             llrd_decay_rate=args.llrd_decay_rate,
+            lambda_hm=args.lambda_hm,
+            lambda_cd=args.lambda_cd,
+            lambda_graph=args.lambda_graph,
             img_size=args.target_size,
             pixel_spacing=args.pixel_spacing,
             experiment_name=args.mlflow_experiment_name,

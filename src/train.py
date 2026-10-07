@@ -38,11 +38,11 @@ BATCH_SIZE = 8
 EPOCHS = 100
 LR = float(os.getenv("LEARNING_RATE", 1e-4))
 LLRD_DECAY_RATE = float(os.getenv("LLRD_DECAY_RATE", 0.8))
-LAMBDA_HM = 0.0  # Ablation study: Adaptive Wing Loss removed (weight = 0.0)
-LAMBDA_CD = 5.0
-LAMBDA_GRAPH = 1.0
-EARLY_STOPPING_PATIENCE = 40
-WARMUP_COORD_EPOCHS = 0  # No heatmap warmup needed since coordinate loss is primary
+LAMBDA_HM = float(os.getenv("LAMBDA_HM", 1.0))
+LAMBDA_CD = float(os.getenv("LAMBDA_CD", 5.0))
+LAMBDA_GRAPH = float(os.getenv("LAMBDA_GRAPH", 1.0))
+EARLY_STOPPING_PATIENCE = int(os.getenv("EARLY_STOPPING_PATIENCE", 40))
+WARMUP_COORD_EPOCHS = int(os.getenv("WARMUP_COORD_EPOCHS", 5))
 SAVE_PATH = "./artifacts/best.pth"
 FULL_CHECKPOINT_PATH = "./artifacts/best_full_checkpoint.pth"
 DEFAULT_IMG_SIZE = 640
@@ -813,6 +813,9 @@ def main(
     patience: int = EARLY_STOPPING_PATIENCE,
     lr: float = LR,
     llrd_decay_rate: float = LLRD_DECAY_RATE,
+    lambda_hm: float = LAMBDA_HM,
+    lambda_cd: float = LAMBDA_CD,
+    lambda_graph: float = LAMBDA_GRAPH,
     val_img_dir: str = VAL_IMG_DIR,
     val_npz_dir: str = VAL_NPZ_DIR,
     test_img_dir: str = TEST_IMG_DIR,
@@ -910,9 +913,9 @@ def main(
     )
 
     # Losses & Landmark Weights
-    awl_loss = None  # Ablation study: Adaptive Wing Loss removed
+    awl_loss = AdaptiveWingLoss().to(device) if lambda_hm > 0.0 else None
     wing_loss = WingLoss(img_size=float(img_size)).to(device)
-    graph_loss = AnatomicalGraphLoss(model.adj_matrix).to(device)
+    graph_loss = AnatomicalGraphLoss(model.adj_matrix).to(device) if lambda_graph > 0.0 else None
     landmark_weights = get_landmark_weights(device)
 
     best_val_loss = float("inf")
@@ -932,9 +935,9 @@ def main(
                 "batch_size": batch_size,
                 "learning_rate": lr,
                 "llrd_decay_rate": llrd_decay_rate,
-                "lambda_heatmap": LAMBDA_HM,
-                "lambda_coord": LAMBDA_CD,
-                "lambda_graph": LAMBDA_GRAPH,
+                "lambda_heatmap": lambda_hm,
+                "lambda_coord": lambda_cd,
+                "lambda_graph": lambda_graph,
                 "warmup_coord_epochs": warmup_coord_epochs,
                 "early_stopping_patience": patience,
                 "save_path": SAVE_PATH,
@@ -943,10 +946,9 @@ def main(
                 "num_landmarks": NUM_LANDMARKS,
                 "optimizer": "AdamW-LLRD",
                 "scheduler": "CosineAnnealingWithWarmup",
-                "heatmap_loss": "None (Ablation: -L_awl)",
+                "heatmap_loss": "AdaptiveWingLoss" if lambda_hm > 0.0 else "None",
                 "coord_loss": "WingLoss",
-                "graph_loss": "AnatomicalGraphLoss",
-                "ablation_study": "no_adaptive_wing_loss (ablation-Lawl)",
+                "graph_loss": "AnatomicalGraphLoss" if lambda_graph > 0.0 else "None",
                 "device": str(device),
                 "use_amp": use_amp,
                 "compile_model": compile_model,
@@ -983,19 +985,19 @@ def main(
             start_time = time.time()
 
             # Dynamic coordinate & graph loss warmup factor
-            coord_warmup_factor = get_coord_loss_warmup_factor(epoch + 1, warmup_coord_epochs, lambda_hm=LAMBDA_HM)
-            effective_lambda_cd = LAMBDA_CD * coord_warmup_factor
-            effective_lambda_graph = LAMBDA_GRAPH * coord_warmup_factor
+            coord_warmup_factor = get_coord_loss_warmup_factor(epoch + 1, warmup_coord_epochs, lambda_hm=lambda_hm)
+            effective_lambda_cd = lambda_cd * coord_warmup_factor
+            effective_lambda_graph = lambda_graph * coord_warmup_factor
 
             train_loss = train_epoch(
                 model=model,
                 dataloader=train_loader,
                 optimizer=optimizer,
-                awl_loss=None,
+                awl_loss=awl_loss,
                 wing_loss=wing_loss,
                 graph_loss=graph_loss,
                 landmark_weights=landmark_weights,
-                lambda_hm=LAMBDA_HM,
+                lambda_hm=lambda_hm,
                 lambda_cd=effective_lambda_cd,
                 lambda_graph=effective_lambda_graph,
                 device=device,
@@ -1008,11 +1010,11 @@ def main(
             val_loss, metrics = validate_epoch(
                 model=model,
                 dataloader=val_loader,
-                awl_loss=None,
+                awl_loss=awl_loss,
                 wing_loss=wing_loss,
                 graph_loss=graph_loss,
                 landmark_weights=landmark_weights,
-                lambda_hm=LAMBDA_HM,
+                lambda_hm=lambda_hm,
                 lambda_cd=effective_lambda_cd,
                 lambda_graph=effective_lambda_graph,
                 device=device,
@@ -1450,6 +1452,24 @@ if __name__ == "__main__":
         default=WARMUP_COORD_EPOCHS,
         help=f"Number of initial epochs to linearly ramp coordinate/graph losses from 0.0 to full weight (default: {WARMUP_COORD_EPOCHS})",
     )
+    parser.add_argument(
+        "--lambda-hm",
+        type=float,
+        default=LAMBDA_HM,
+        help=f"Weight for Adaptive Wing Loss on heatmaps (default: {LAMBDA_HM})",
+    )
+    parser.add_argument(
+        "--lambda-cd",
+        type=float,
+        default=LAMBDA_CD,
+        help=f"Weight for Wing Loss on coordinates (default: {LAMBDA_CD})",
+    )
+    parser.add_argument(
+        "--lambda-graph",
+        type=float,
+        default=LAMBDA_GRAPH,
+        help=f"Weight for Anatomical Graph Loss on landmark edges (default: {LAMBDA_GRAPH})",
+    )
 
     args = parser.parse_args()
     main(
@@ -1458,6 +1478,9 @@ if __name__ == "__main__":
         patience=args.patience,
         lr=args.lr,
         llrd_decay_rate=args.llrd_decay_rate,
+        lambda_hm=args.lambda_hm,
+        lambda_cd=args.lambda_cd,
+        lambda_graph=args.lambda_graph,
         img_size=args.img_size,
         pixel_spacing=args.pixel_spacing,
         experiment_name=args.experiment_name,

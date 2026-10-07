@@ -3,12 +3,33 @@ import os
 import shutil
 import requests
 import argparse
+from urllib.parse import urlparse, parse_qs
 from datetime import datetime
 from dotenv import load_dotenv
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
 
 load_dotenv()
+
+
+def extract_filename_from_url(img_url: str) -> str:
+    """
+    Extracts a clean image filename from a Label Studio image URL or local-files query.
+    e.g. 'https://.../?d=cvm-images/0015.jpg' -> '0015.jpg'
+    e.g. '/data/upload/1/abc-0015.jpg' -> '0015.jpg'
+    """
+    if "?d=" in img_url:
+        parsed = urlparse(img_url)
+        params = parse_qs(parsed.query)
+        if "d" in params and params["d"]:
+            return os.path.basename(params["d"][0])
+
+    base = os.path.basename(img_url.split("?")[0])
+    if "-" in base:
+        parts = base.split("-", 1)
+        if len(parts) > 1 and len(parts[0]) >= 8:
+            return parts[1]
+    return base
 
 
 def clear_directory(dir_path):
@@ -35,18 +56,15 @@ def process_single_task(task, session, img_dir, ls_url):
     """
     Worker function to process a single image download.
     """
-    img_url = task["data"]["img"]
-    base_name = os.path.splitext(os.path.basename(img_url))[0]
-    clean_name = (
-        img_url.split("-", 1)[1] if "-" in base_name else os.path.basename(img_url)
-    )
-    img_ext = os.path.splitext(clean_name)[1]
-    clean_base_name = os.path.splitext(clean_name)[0]
+    img_url = task.get("data", {}).get("img") or task.get("data", {}).get("image") or task.get("file_upload")
+    if not img_url:
+        return f"⚠️ Skipping task {task.get('id')}: No image URL found"
 
-    img_path = os.path.join(img_dir, f"{clean_base_name}{img_ext}")
+    clean_filename = extract_filename_from_url(img_url)
+    img_path = os.path.join(img_dir, clean_filename)
 
     # Download image
-    full_img_url = img_url if img_url.startswith("http") else f"{ls_url}{img_url}"
+    full_img_url = img_url if img_url.startswith("http") else f"{ls_url.rstrip('/')}/{img_url.lstrip('/')}"
     try:
         response = session.get(full_img_url, stream=True, timeout=15)
         if response.status_code == 200:
@@ -54,20 +72,26 @@ def process_single_task(task, session, img_dir, ls_url):
                 for chunk in response.iter_content(1024):
                     f_img.write(chunk)
         else:
-            return f"⚠️ Skipping {clean_name}: Image download failed (Status {response.status_code})"
+            return f"⚠️ Skipping {clean_filename}: Image download failed (Status {response.status_code})"
     except Exception as e:
-        return f"❌ Network Error on {clean_name}: {e}"
+        return f"❌ Network Error on {clean_filename}: {e}"
 
-    return f"✅ Downloaded {clean_base_name}{img_ext}"
+    return f"✅ Downloaded {clean_filename}"
 
 
 def download_export_and_images(
     export_dir="data/exports", img_dir="data/images"
 ):
-    ls_url = os.getenv("LABEL_STUDIO_URL")
+    ls_url = (os.getenv("LABEL_STUDIO_URL") or "").rstrip("/")
     project_id = os.getenv("LABEL_STUDIO_PROJECT_ID")
+    api_token = os.getenv("LABEL_STUDIO_API_TOKEN")
     username = os.getenv("LABEL_STUDIO_USERNAME")
     password = os.getenv("LABEL_STUDIO_PASSWORD")
+
+    if not ls_url:
+        raise ValueError("LABEL_STUDIO_URL is not set in environment or .env.")
+    if not project_id:
+        raise ValueError("LABEL_STUDIO_PROJECT_ID is not set in environment or .env.")
 
     clear_directory(img_dir)
 
@@ -83,24 +107,48 @@ def download_export_and_images(
     session.mount("http://", adapter)
     session.mount("https://", adapter)
 
-    login_url = f"{ls_url}/user/login/"
-    session.get(login_url)
-    csrf_token = session.cookies.get("csrftoken", "")
+    authenticated = False
 
-    login_data = {
-        "email": username,
-        "password": password,
-        "csrfmiddlewaretoken": csrf_token,
-    }
+    # 1. Primary auth: API Token (recommended, stateless, and reliable)
+    if api_token:
+        session.headers.update({"Authorization": f"Token {api_token}"})
+        try:
+            whoami_resp = session.get(f"{ls_url}/api/current-user/whoami", timeout=10)
+            if whoami_resp.status_code == 200:
+                print("🔑 Authenticated successfully using API Token.")
+                authenticated = True
+            else:
+                print(f"⚠️ API Token check warning (HTTP {whoami_resp.status_code}): {whoami_resp.text[:100]}")
+                # Keep token header just in case whoami endpoint is restricted
+                authenticated = True
+        except Exception as e:
+            print(f"⚠️ Token auth verification error: {e}")
+            authenticated = True
 
-    login_response = session.post(
-        login_url, data=login_data, headers={"Referer": login_url}
-    )
-    if login_response.status_code not in [200, 302]:
-        print("❌ Login failed. Please check your credentials and Label Studio URL.")
-        return
+    # 2. Fallback auth: Username/Password session login
+    if not authenticated and username and password:
+        login_url = f"{ls_url}/user/login/"
+        try:
+            session.get(login_url, timeout=10)
+            csrf_token = session.cookies.get("csrftoken", "")
+            login_data = {
+                "email": username,
+                "password": password,
+                "csrfmiddlewaretoken": csrf_token,
+            }
+            login_response = session.post(
+                login_url, data=login_data, headers={"Referer": login_url}, timeout=10
+            )
+            if login_response.status_code in [200, 302] and ("sessionid" in session.cookies or login_response.status_code == 302):
+                print("🔑 Authenticated successfully via session login.")
+                authenticated = True
+            else:
+                print(f"❌ Session login failed (HTTP {login_response.status_code}).")
+        except Exception as e:
+            print(f"❌ Session login error: {e}")
 
-    print("🔑 Authenticated successfully.")
+    if not authenticated:
+        raise RuntimeError("Failed to authenticate to Label Studio. Please verify LABEL_STUDIO_API_TOKEN or username/password in .env.")
 
     print(f"📥 Fetching latest JSON export for project ID: {project_id}...")
     export_url = f"{ls_url}/api/projects/{project_id}/export?exportType=JSON"

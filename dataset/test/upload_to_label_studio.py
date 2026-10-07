@@ -2,16 +2,14 @@
 """
 dataset/test/upload_to_label_studio.py
 
-Standalone script to split test images from the local 'images' directory
-equally into 3 groups (49 images each) and upload each group to Label Studio
-projects (default project IDs: 5, 6, 7).
+Standalone script to upload all test images from the local 'images' directory
+directly into Label Studio Project ID 4 (or specified project).
 
 Key Features:
 - Reads environment configuration (LABEL_STUDIO_URL, LABEL_STUDIO_API_TOKEN, etc.) from .env
-- Deterministic splitting: Sorts the images and assigns 49 images per project
-- Duplicate Prevention: Checks existing project tasks first and skips already-uploaded images
-- Safe Retries: Does not auto-retry non-idempotent POST requests to avoid duplicates
-- Deduplication: Supports --dedup to clean up any duplicates across the projects
+- Duplicate Prevention: Queries existing project tasks first and skips images already uploaded
+- Deduplication: Provides a --dedup flag to detect and remove duplicate tasks in the project
+- Safe Network Handling: Does NOT auto-retry non-idempotent POST requests to avoid duplicates
 """
 
 import os
@@ -101,7 +99,7 @@ def get_authenticated_session(ls_url: str, api_token: str = None, username: str 
 
 def get_existing_project_tasks(session: requests.Session, ls_url: str, project_id: int):
     """
-    Fetches all tasks currently in the specified project.
+    Fetches all tasks currently in the project.
     Returns a dict mapping clean_filename -> list of task_ids.
     """
     tasks_by_filename = defaultdict(list)
@@ -139,7 +137,7 @@ def get_existing_project_tasks(session: requests.Session, ls_url: str, project_i
 
 def deduplicate_project_tasks(session: requests.Session, ls_url: str, project_id: int, tasks_by_filename: dict):
     """
-    Deletes duplicate tasks in a project, keeping only the earliest task ID for each image.
+    Deletes duplicate tasks in the project, keeping only the earliest task ID for each image.
     """
     to_delete = []
     for fn, tids in tasks_by_filename.items():
@@ -153,7 +151,10 @@ def deduplicate_project_tasks(session: requests.Session, ls_url: str, project_id
         print(f"✨ Project {project_id}: No duplicates found! Every image has exactly one task.")
         return 0
 
-    print(f"\n🔍 Project {project_id}: Found {len(to_delete)} duplicate tasks to remove:")
+    print(f"\n🔍 Project {project_id}: Found {len(to_delete)} duplicate tasks to remove across {len([fn for fn, tids in tasks_by_filename.items() if len(tids) > 1])} images:")
+    for extra_id, fn, keep_id in to_delete:
+        print(f"   - Removing Task ID {extra_id} (duplicate of {keep_id} for '{fn}')")
+
     deleted_count = 0
     for extra_id, fn, keep_id in to_delete:
         try:
@@ -190,31 +191,9 @@ def upload_single_image(session: requests.Session, ls_url: str, project_id: int,
         return False, filename, str(e)
 
 
-def split_list_into_chunks(items: list, num_chunks: int) -> list:
-    """Splits a list into num_chunks nearly equal parts."""
-    n = len(items)
-    base_size = n // num_chunks
-    remainder = n % num_chunks
-    chunks = []
-    start = 0
-    for i in range(num_chunks):
-        end = start + base_size + (1 if i < remainder else 0)
-        chunks.append(items[start:end])
-        start = end
-    return chunks
-
-
 def main():
-    parser = argparse.ArgumentParser(
-        description="Split test images equally and upload to 3 Label Studio projects (5, 6, 7)."
-    )
-    parser.add_argument(
-        "--project-ids",
-        type=int,
-        nargs="+",
-        default=[5, 6, 7],
-        help="List of Label Studio project IDs (default: 5 6 7)",
-    )
+    parser = argparse.ArgumentParser(description="Upload test images to Label Studio Project ID 4 (or specified project).")
+    parser.add_argument("--project-id", type=int, default=4, help="Label Studio project ID (default: 4)")
     parser.add_argument(
         "--images-dir",
         type=str,
@@ -222,11 +201,10 @@ def main():
         help="Path to directory containing images (default: ./images relative to script)",
     )
     parser.add_argument("--workers", type=int, default=4, help="Number of concurrent upload workers (default: 4)")
-    parser.add_argument("--dedup", action="store_true", help="Find and delete duplicate tasks in the target projects")
-    parser.add_argument("--dry-run", action="store_true", help="Preview split and actions without uploading or deleting")
+    parser.add_argument("--dedup", action="store_true", help="Find and delete duplicate tasks in the project")
+    parser.add_argument("--dry-run", action="store_true", help="Preview actions without uploading or deleting")
 
     args = parser.parse_args()
-    project_ids = args.project_ids
 
     env_path = find_and_load_env()
     if env_path:
@@ -258,21 +236,13 @@ def main():
         key=lambda p: p.name,
     )
 
-    total_images = len(image_files)
-    print(f"📁 Found {total_images} images in: {images_dir}")
-    print(f"🎯 Target Project IDs: {project_ids}")
+    print(f"📁 Found {len(image_files)} images in local directory: {images_dir}")
+    print(f"🎯 Target Label Studio Project ID: {args.project_id}")
     print(f"🌐 Label Studio URL: {ls_url}")
 
-    if total_images == 0:
-        print(f"⚠️ No image files found to process.")
+    if not image_files:
+        print(f"⚠️ No image files found in: {images_dir}")
         sys.exit(0)
-
-    # Split images equally across projects
-    image_groups = split_list_into_chunks(image_files, len(project_ids))
-
-    print("\n📦 Image Distribution Plan:")
-    for pid, group in zip(project_ids, image_groups):
-        print(f"   - Project {pid}: {len(group)} images ({group[0].name} ... {group[-1].name})")
 
     session = get_authenticated_session(
         ls_url=ls_url,
@@ -282,119 +252,102 @@ def main():
         workers=args.workers,
     )
 
-    # Verify each project exists and retrieve project titles
-    project_meta = {}
-    for pid in project_ids:
-        try:
-            p_resp = session.get(f"{ls_url}/api/projects/{pid}", timeout=10)
-            if p_resp.status_code != 200:
-                print(f"❌ Failed to access project {pid}. HTTP {p_resp.status_code}: {p_resp.text[:200]}")
-                sys.exit(1)
-            meta = p_resp.json()
-            project_meta[pid] = meta
-            print(f"📋 Project {pid} Verified: '{meta.get('title')}' (Current tasks: {meta.get('task_number', 0)})")
-        except Exception as e:
-            print(f"❌ Error verifying project {pid}: {e}")
+    # Verify project exists
+    try:
+        proj_resp = session.get(f"{ls_url}/api/projects/{args.project_id}", timeout=10)
+        if proj_resp.status_code != 200:
+            print(f"❌ Failed to access project {args.project_id}. HTTP {proj_resp.status_code}: {proj_resp.text[:200]}")
             sys.exit(1)
+        proj_info = proj_resp.json()
+        current_task_count = proj_info.get("task_number", 0)
+        print(f"📋 Project Title: '{proj_info.get('title')}' (Current total tasks: {current_task_count})")
+    except Exception as e:
+        print(f"❌ Error checking project {args.project_id}: {e}")
+        sys.exit(1)
+
+    # Fetch existing tasks in project
+    print("🔎 Checking existing tasks in project...")
+    existing_tasks = get_existing_project_tasks(session, ls_url, args.project_id)
+    print(f"📊 Project currently has {sum(len(v) for v in existing_tasks.values())} total tasks covering {len(existing_tasks)} unique images.")
 
     # Deduplication mode
     if args.dedup:
-        print("\n🧹 Running deduplication check on target projects...")
-        for pid in project_ids:
-            tasks_map = get_existing_project_tasks(session, ls_url, pid)
-            if args.dry_run:
-                print(f"🔎 Dry run: checking project {pid} ({len(tasks_map)} unique images)...")
-                for fn, tids in tasks_map.items():
-                    if len(tids) > 1:
-                        print(f"  Project {pid}: Would keep Task {sorted(tids)[0]} and delete {sorted(tids)[1:]} for {fn}")
-            else:
-                deduplicate_project_tasks(session, ls_url, pid, tasks_map)
+        if args.dry_run:
+            print("🔎 Dry run mode: would deduplicate tasks.")
+            for fn, tids in existing_tasks.items():
+                if len(tids) > 1:
+                    print(f"  Would keep Task {sorted(tids)[0]} and delete {sorted(tids)[1:]} for {fn}")
+            return
+        deduplicate_project_tasks(session, ls_url, args.project_id, existing_tasks)
+        existing_tasks = get_existing_project_tasks(session, ls_url, args.project_id)
+        print(f"📊 Remaining tasks: {sum(len(v) for v in existing_tasks.values())}")
+        return
+
+    # Filter out images that are already uploaded
+    files_to_upload = [img for img in image_files if img.name not in existing_tasks]
+    already_uploaded = [img for img in image_files if img.name in existing_tasks]
+
+    print(f"ℹ️ Already uploaded: {len(already_uploaded)} images (will be skipped)")
+    print(f"📥 Pending upload:    {len(files_to_upload)} images")
+
+    if not files_to_upload:
+        print("\n✅ All local images are already present in Label Studio Project! Nothing to upload.")
+        dup_count = sum(len(v) - 1 for v in existing_tasks.values() if len(v) > 1)
+        if dup_count > 0:
+            print(f"\n💡 Notice: There are {dup_count} duplicate tasks in the project.")
+            print(f"   You can run: python dataset/test/upload_to_label_studio.py --dedup to remove them.")
         return
 
     if args.dry_run:
-        print("\n🔎 Dry-run enabled. No images will be uploaded.")
-        for pid, group in zip(project_ids, image_groups):
-            print(f"\n--- Project {pid} ('{project_meta[pid].get('title')}') [{len(group)} images] ---")
-            for i, img in enumerate(group[:5], start=1):
-                print(f"  {i}. {img.name}")
-            if len(group) > 5:
-                print(f"  ... and {len(group) - 5} more.")
+        print("\n🔎 Dry run mode enabled. Files that would be uploaded:")
+        for idx, img in enumerate(files_to_upload[:10], start=1):
+            print(f"  {idx}. {img.name}")
+        if len(files_to_upload) > 10:
+            print(f"  ... and {len(files_to_upload) - 10} more.")
         return
 
-    # Upload each group to its respective project
-    total_uploaded = 0
-    total_skipped = 0
-    all_failed = []
+    print(f"\n🚀 Starting upload of {len(files_to_upload)} images to Project {args.project_id} with {args.workers} workers...")
 
-    for pid, group in zip(project_ids, image_groups):
-        title = project_meta[pid].get("title", f"Project {pid}")
-        print(f"\n" + "=" * 60)
-        print(f"📤 Uploading {len(group)} images to Project {pid} ('{title}')...")
-        print("=" * 60)
+    success_count = 0
+    failed_uploads = []
 
-        # Check existing tasks in this project to prevent duplicates
-        existing_tasks = get_existing_project_tasks(session, ls_url, pid)
-        pending_upload = [img for img in group if img.name not in existing_tasks]
-        already_uploaded = [img for img in group if img.name in existing_tasks]
-
-        if already_uploaded:
-            print(f"ℹ️ {len(already_uploaded)} images already exist in Project {pid} (skipping them).")
-            total_skipped += len(already_uploaded)
-
-        if not pending_upload:
-            print(f"✅ All {len(group)} images are already present in Project {pid}!")
-            continue
-
-        print(f"🚀 Uploading {len(pending_upload)} images with {args.workers} concurrent workers...")
-
-        proj_success = 0
-        proj_failed = []
-
-        if tqdm:
-            pbar = tqdm(total=len(pending_upload), desc=f"Project {pid}", unit="img")
-        else:
-            pbar = None
-
-        with ThreadPoolExecutor(max_workers=args.workers) as executor:
-            future_to_file = {
-                executor.submit(upload_single_image, session, ls_url, pid, img_path): img_path
-                for img_path in pending_upload
-            }
-
-            for future in as_completed(future_to_file):
-                success, filename, err = future.result()
-                if success:
-                    proj_success += 1
-                else:
-                    proj_failed.append((filename, err))
-
-                if pbar:
-                    pbar.update(1)
-                else:
-                    done = proj_success + len(proj_failed)
-                    if done % 10 == 0 or done == len(pending_upload):
-                        print(f"Progress Project {pid}: {done}/{len(pending_upload)} done...")
-
-        if pbar:
-            pbar.close()
-
-        total_uploaded += proj_success
-        all_failed.extend([(pid, fn, err) for fn, err in proj_failed])
-        print(f"✅ Project {pid} Upload Complete: {proj_success}/{len(pending_upload)} uploaded successfully.")
-
-    # Final summary
-    print("\n" + "=" * 60)
-    print("🏁 FINAL SUMMARY:")
-    print(f"   - Total images in dataset/test/images: {total_images}")
-    print(f"   - Successfully uploaded:              {total_uploaded}")
-    print(f"   - Already present (skipped):          {total_skipped}")
-    if all_failed:
-        print(f"   - Failed uploads ({len(all_failed)}):")
-        for pid, fn, err in all_failed:
-            print(f"     [Project {pid}] {fn}: {err}")
+    if tqdm:
+        pbar = tqdm(total=len(files_to_upload), desc=f"Project {args.project_id}", unit="img")
     else:
-        print("🎉 All 3 projects (5, 6, 7) have their complete 49-image test sets!")
-    print("=" * 60)
+        pbar = None
+
+    with ThreadPoolExecutor(max_workers=args.workers) as executor:
+        future_to_file = {
+            executor.submit(upload_single_image, session, ls_url, args.project_id, img_path): img_path
+            for img_path in files_to_upload
+        }
+
+        for future in as_completed(future_to_file):
+            success, filename, err = future.result()
+            if success:
+                success_count += 1
+            else:
+                failed_uploads.append((filename, err))
+
+            if pbar:
+                pbar.update(1)
+            else:
+                completed = success_count + len(failed_uploads)
+                if completed % 10 == 0 or completed == len(files_to_upload):
+                    print(f"Progress: {completed}/{len(files_to_upload)} uploaded...")
+
+    if pbar:
+        pbar.close()
+
+    print("\n" + "=" * 50)
+    print(f"✅ Successfully uploaded: {success_count}/{len(files_to_upload)} images")
+    if failed_uploads:
+        print(f"❌ Failed uploads ({len(failed_uploads)}):")
+        for fn, err in failed_uploads:
+            print(f"   - {fn}: {err}")
+    else:
+        print(f"🎉 All {success_count} images uploaded successfully to Project {args.project_id}!")
+    print("=" * 50)
 
 
 if __name__ == "__main__":

@@ -5,7 +5,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 
 from src.train import train_epoch, validate_epoch, get_coord_loss_warmup_factor
-from src.models.losses import WingLoss, AnatomicalGraphLoss
+from src.models.losses import AdaptiveWingLoss, WingLoss, AnatomicalGraphLoss
 
 
 class TinyModel(nn.Module):
@@ -127,6 +127,54 @@ class TestAblationNoAWL(unittest.TestCase):
 
         self.assertIsNotNone(self.model.conv.weight.grad)
         self.assertGreater(torch.norm(self.model.conv.weight.grad).item(), 0.0)
+
+    def test_end_to_end_gradient_flow_with_awl(self):
+        """Verify full multi-task gradient flow (AWL + WingLoss + GraphLoss) without gradient loss."""
+        self.optimizer.zero_grad()
+        images = torch.randn(2, 3, self.img_size, self.img_size)
+        gt_heatmaps = torch.rand(2, self.num_landmarks, self.img_size, self.img_size)
+        gt_coords = torch.rand(2, self.num_landmarks, 2)
+
+        pred_heatmaps, pred_coords = self.model(images)
+        awl = AdaptiveWingLoss()
+        loss_hm = awl(pred_heatmaps, gt_heatmaps, landmark_weights=self.landmark_weights)
+        loss_cd = self.wing_loss(pred_coords, gt_coords, landmark_weights=self.landmark_weights)
+        loss_g = self.graph_loss(pred_coords, gt_coords)
+
+        total_loss = 1.0 * loss_hm + 5.0 * loss_cd + 1.0 * loss_g
+        total_loss.backward()
+
+        # Gradients must successfully propagate to both conv and fc layers
+        self.assertIsNotNone(self.model.conv.weight.grad)
+        self.assertGreater(torch.norm(self.model.conv.weight.grad).item(), 0.0)
+        self.assertFalse(torch.isnan(self.model.conv.weight.grad).any())
+
+        self.assertIsNotNone(self.model.fc.weight.grad)
+        self.assertGreater(torch.norm(self.model.fc.weight.grad).item(), 0.0)
+        self.assertFalse(torch.isnan(self.model.fc.weight.grad).any())
+
+    def test_train_epoch_with_awl_enabled(self):
+        """Verify train_epoch computes combined loss with awl_loss active and gradients intact."""
+        awl = AdaptiveWingLoss()
+        loss = train_epoch(
+            model=self.model,
+            dataloader=self.dataloader,
+            optimizer=self.optimizer,
+            awl_loss=awl,
+            wing_loss=self.wing_loss,
+            graph_loss=self.graph_loss,
+            landmark_weights=self.landmark_weights,
+            lambda_hm=1.0,
+            lambda_cd=5.0,
+            lambda_graph=1.0,
+            device=self.device,
+            epoch=1,
+            epochs=1,
+            scaler=None,
+            use_amp=False,
+        )
+        self.assertGreater(loss, 0.0)
+        self.assertFalse(torch.isnan(torch.tensor(loss)))
 
 
 if __name__ == "__main__":
