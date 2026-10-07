@@ -102,6 +102,24 @@ def main():
         help="Radial error tolerance threshold in pixels for evaluation detection metrics.",
     )
     parser.add_argument(
+        "--use-tta",
+        "--tta",
+        action="store_true",
+        help="Enable Test-Time Augmentation (multi-scale inference) during evaluation.",
+    )
+    parser.add_argument(
+        "--tta-scales",
+        type=str,
+        default="0.95,1.0,1.05",
+        help="Comma-separated scale factors for TTA (default: '0.95,1.0,1.05').",
+    )
+    parser.add_argument(
+        "--tta-shifts",
+        type=str,
+        default=None,
+        help="Optional comma-separated pixel shifts in format 'dx:dy,dx:dy' (e.g. '-4:-4,4:4').",
+    )
+    parser.add_argument(
         "--skip-eval",
         action="store_true",
         help="Skip final model evaluation step after training.",
@@ -414,6 +432,18 @@ def main():
         # Step 6 will only execute if custom eval-weights were provided.
         if not args.skip_eval and args.eval_weights != "./artifacts/best.pth":
             print(f"\n[6/6] Executing standalone evaluation for custom weights: {args.eval_weights}")
+            parsed_eval_tta_scales = (
+                [float(s.strip()) for s in args.tta_scales.split(",") if s.strip()]
+                if args.tta_scales
+                else [0.95, 1.0, 1.05]
+            )
+            parsed_eval_tta_shifts = []
+            if args.tta_shifts:
+                for pair in args.tta_shifts.split(","):
+                    if ":" in pair:
+                        dx, dy = pair.strip().split(":")
+                        parsed_eval_tta_shifts.append((int(dx), int(dy)))
+
             run_evaluation(
                 weights_path=args.eval_weights,
                 test_img_dir="dataset/test/images",
@@ -427,6 +457,9 @@ def main():
                 experiment_name=args.mlflow_experiment_name,
                 tracking_username=args.mlflow_username,
                 tracking_password=args.mlflow_password,
+                use_tta=args.use_tta,
+                tta_scales=parsed_eval_tta_scales,
+                tta_shifts=parsed_eval_tta_shifts if len(parsed_eval_tta_shifts) > 0 else None,
             )
             print("-" * 20)
         elif not args.skip_eval:

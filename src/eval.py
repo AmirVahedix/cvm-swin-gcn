@@ -9,6 +9,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 import matplotlib
 matplotlib.use("Agg")
@@ -170,6 +171,123 @@ def load_model(weights_path: str, device: torch.device, img_size: int = 640) -> 
     model.to(device)
     model.eval()
     return model
+
+
+def predict_batch(
+    model: torch.nn.Module,
+    images: torch.Tensor,
+    use_tta: bool = False,
+    tta_scales: list[float] | tuple[float, ...] = (0.95, 1.0, 1.05),
+    tta_shifts: list[tuple[int, int]] | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Inference helper for a batch of images with optional Test-Time Augmentation (TTA).
+
+    Args:
+        model: CephalometricSwinGCN model.
+        images: Input tensor of shape [B, 3, H, W] normalized.
+        use_tta: Whether to apply multi-scale / shift TTA.
+        tta_scales: Scale factors to evaluate (e.g. 0.95, 1.0, 1.05).
+        tta_shifts: List of (dx, dy) pixel shift offsets (e.g. [(-4, -4), (4, 4)]).
+
+    Returns:
+        consensus_heatmaps: Heatmaps of shape [B, 13, H, W].
+        consensus_coords: Landmark coordinates of shape [B, 13, 2] in normalized [0, 1] range.
+    """
+    if not use_tta:
+        return model(images)
+
+    B, C, H, W = images.shape
+    all_coords = []
+    all_heatmaps = []
+
+    # 1. Multi-scale TTA
+    if tta_scales:
+        for s in tta_scales:
+            if abs(s - 1.0) < 1e-4:
+                hm, cd = model(images)
+                all_coords.append(cd)
+                all_heatmaps.append(hm)
+            elif s < 1.0:
+                # Zoom out: resize smaller and pad to (H, W)
+                Hs = max(1, int(round(H * s)))
+                Ws = max(1, int(round(W * s)))
+                scaled_img = F.interpolate(images, size=(Hs, Ws), mode="bilinear", align_corners=False)
+                pad_top = (H - Hs) // 2
+                pad_bottom = H - Hs - pad_top
+                pad_left = (W - Ws) // 2
+                pad_right = W - Ws - pad_left
+                padded_img = F.pad(scaled_img, (pad_left, pad_right, pad_top, pad_bottom), mode="replicate")
+
+                hm_aug, cd_aug = model(padded_img)
+
+                # Invert coordinates from padded+scaled space back to original [0, 1]
+                cd_x_px = cd_aug[..., 0] * W
+                cd_y_px = cd_aug[..., 1] * H
+                orig_cd_x = (cd_x_px - pad_left) / float(Ws)
+                orig_cd_y = (cd_y_px - pad_top) / float(Hs)
+                orig_cd = torch.stack([orig_cd_x, orig_cd_y], dim=-1).clamp(0.0, 1.0)
+                all_coords.append(orig_cd)
+
+                # Invert heatmaps: slice padded region and resize back to (H, W)
+                hm_unpad = hm_aug[:, :, pad_top:pad_top + Hs, pad_left:pad_left + Ws]
+                hm_orig = F.interpolate(hm_unpad, size=(H, W), mode="bilinear", align_corners=False)
+                all_heatmaps.append(hm_orig)
+            else:
+                # Zoom in: resize larger and center crop to (H, W)
+                Hs = int(round(H * s))
+                Ws = int(round(W * s))
+                scaled_img = F.interpolate(images, size=(Hs, Ws), mode="bilinear", align_corners=False)
+                crop_top = (Hs - H) // 2
+                crop_left = (Ws - W) // 2
+                cropped_img = scaled_img[:, :, crop_top:crop_top + H, crop_left:crop_left + W]
+
+                hm_aug, cd_aug = model(cropped_img)
+
+                # Invert coordinates from cropped+scaled space back to original [0, 1]
+                cd_x_px = cd_aug[..., 0] * W
+                cd_y_px = cd_aug[..., 1] * H
+                orig_cd_x = (cd_x_px + crop_left) / float(Ws)
+                orig_cd_y = (cd_y_px + crop_top) / float(Hs)
+                orig_cd = torch.stack([orig_cd_x, orig_cd_y], dim=-1).clamp(0.0, 1.0)
+                all_coords.append(orig_cd)
+
+                # Invert heatmaps: pad to (Hs, Ws) then resize down to (H, W)
+                pad_top = crop_top
+                pad_bottom = Hs - H - crop_top
+                pad_left = crop_left
+                pad_right = Ws - W - crop_left
+                hm_pad = F.pad(hm_aug, (pad_left, pad_right, pad_top, pad_bottom), mode="constant", value=0.0)
+                hm_orig = F.interpolate(hm_pad, size=(H, W), mode="bilinear", align_corners=False)
+                all_heatmaps.append(hm_orig)
+
+    # 2. Translation Shifts (if specified)
+    if tta_shifts:
+        for dx, dy in tta_shifts:
+            if dx == 0 and dy == 0:
+                continue
+            pad_l = max(0, dx)
+            pad_r = max(0, -dx)
+            pad_t = max(0, dy)
+            pad_b = max(0, -dy)
+            shifted = F.pad(images, (pad_l, pad_r, pad_t, pad_b), mode="replicate")
+            shifted = shifted[:, :, pad_b:pad_b + H, pad_r:pad_r + W]
+
+            hm_aug, cd_aug = model(shifted)
+
+            orig_cd_x = cd_aug[..., 0] - (dx / float(W))
+            orig_cd_y = cd_aug[..., 1] - (dy / float(H))
+            orig_cd = torch.stack([orig_cd_x, orig_cd_y], dim=-1).clamp(0.0, 1.0)
+            all_coords.append(orig_cd)
+
+    # Consensus ensemble average
+    consensus_coords = torch.mean(torch.stack(all_coords, dim=0), dim=0)
+    if len(all_heatmaps) > 0:
+        consensus_heatmaps = torch.mean(torch.stack(all_heatmaps, dim=0), dim=0)
+    else:
+        consensus_heatmaps, _ = model(images)
+
+    return consensus_heatmaps, consensus_coords
 
 
 def compute_metrics(
@@ -366,7 +484,8 @@ def format_metrics_table(
     lines.append("=" * 96)
     lines.append(f" SWIN-GCN CLINICAL MODEL EVALUATION REPORT | RUN: {run_name}")
     lines.append("=" * 96)
-    lines.append(f"Checkpoint Weights: {weights_path}")
+    tta_str = f"Enabled (scales={summary.get('tta_scales')})" if summary.get("use_tta") else "Disabled"
+    lines.append(f"Checkpoint Weights: {weights_path} | TTA: {tta_str}")
     lines.append(f"Pixel Spacing: {summary.get('pixel_spacing_mm_per_px', 0.1)} mm/px | Image Size: {summary.get('img_size', 640)}x{summary.get('img_size', 640)}")
     lines.append(f"Total Test Images: {summary['total_samples']} | Total Valid Landmarks: {summary['total_valid_landmarks']}")
     lines.append("-" * 96)
@@ -610,6 +729,310 @@ def generate_evaluation_charts(
     return generated_charts
 
 
+VERTEBRA_CONTOURS = [
+    ("C2", [0, 1, 2], False),
+    ("C3", [3, 4, 7, 6, 5], True),
+    ("C4", [8, 9, 12, 11, 10], True),
+]
+
+
+def compute_roi_bbox(
+    gt_coords: np.ndarray | None,
+    pred_coords: np.ndarray | None,
+    img_w: int,
+    img_h: int,
+    margin_ratio: float = 0.35,
+    min_size: int = 180,
+) -> tuple[int, int, int, int]:
+    """
+    Computes a square bounding box centered around valid cervical landmarks with padding.
+    Coordinates are expected to be normalized [0, 1].
+    """
+    valid_pts = []
+    if gt_coords is not None:
+        for pt in gt_coords:
+            if pt[0] >= 0 and pt[1] >= 0 and not np.isnan(pt[0]) and not np.isnan(pt[1]):
+                valid_pts.append(pt)
+    if pred_coords is not None:
+        for pt in pred_coords:
+            if pt[0] >= 0 and pt[1] >= 0 and not np.isnan(pt[0]) and not np.isnan(pt[1]):
+                valid_pts.append(pt)
+
+    if not valid_pts:
+        half = min(img_w, img_h) // 4
+        cx, cy = img_w // 2, img_h // 2
+        return max(0, cx - half), max(0, cy - half), min(img_w, cx + half), min(img_h, cy + half)
+
+    pts = np.array(valid_pts)
+    xs = pts[:, 0] * img_w
+    ys = pts[:, 1] * img_h
+
+    min_x, max_x = float(xs.min()), float(xs.max())
+    min_y, max_y = float(ys.min()), float(ys.max())
+
+    box_w = max_x - min_x
+    box_h = max_y - min_y
+    cx = (min_x + max_x) / 2.0
+    cy = (min_y + max_y) / 2.0
+
+    dim = max(box_w, box_h) * (1.0 + 2.0 * margin_ratio)
+    dim = max(dim, min_size)
+    half_dim = dim / 2.0
+
+    x1 = int(round(cx - half_dim))
+    x2 = int(round(cx + half_dim))
+    y1 = int(round(cy - half_dim))
+    y2 = int(round(cy + half_dim))
+
+    if x1 < 0:
+        x2 = min(img_w, x2 - x1)
+        x1 = 0
+    if x2 > img_w:
+        x1 = max(0, x1 - (x2 - img_w))
+        x2 = img_w
+
+    if y1 < 0:
+        y2 = min(img_h, y2 - y1)
+        y1 = 0
+    if y2 > img_h:
+        y1 = max(0, y1 - (y2 - img_h))
+        y2 = img_h
+
+    return max(0, x1), max(0, y1), min(img_w, x2), min(img_h, y2)
+
+
+def render_roi_panel(
+    roi_rgb: np.ndarray,
+    coords: np.ndarray,
+    img_w: int,
+    img_h: int,
+    x1: int,
+    y1: int,
+    roi_w: int,
+    roi_h: int,
+    panel_size: int = 560,
+    title: str = "Ground Truth",
+    title_color: tuple[int, int, int] = (76, 175, 80),
+) -> np.ndarray:
+    """
+    Renders one high-resolution ROI panel (Ground Truth or Prediction)
+    with landmark dots, number badges, and anatomical vertebra contours.
+    """
+    panel = cv2.resize(roi_rgb, (panel_size, panel_size), interpolation=cv2.INTER_CUBIC)
+
+    # Convert coordinates to panel pixel space
+    pts_dict = {}
+    for i, pt in enumerate(coords):
+        if pt[0] < 0 or pt[1] < 0 or np.isnan(pt[0]) or np.isnan(pt[1]):
+            continue
+        px_full = pt[0] * img_w
+        py_full = pt[1] * img_h
+        px_p = int(round((px_full - x1) / float(roi_w) * panel_size))
+        py_p = int(round((py_full - y1) / float(roi_h) * panel_size))
+        pts_dict[i] = (px_p, py_p)
+
+    # Draw landmark points (clean circles with contrast border and pinpoint center)
+    for i, _ in enumerate(coords):
+        if i not in pts_dict:
+            continue
+        px, py = pts_dict[i]
+        color_bgr = LANDMARK_COLORS_BGR[i % len(LANDMARK_COLORS_BGR)]
+        # Convert BGR constant to RGB for panel
+        color_rgb = (color_bgr[2], color_bgr[1], color_bgr[0])
+
+        # Outer black ring for contrast against bright bone
+        cv2.circle(panel, (px, py), 6, (0, 0, 0), -1, lineType=cv2.LINE_AA)
+        # Colored landmark dot
+        cv2.circle(panel, (px, py), 5, color_rgb, -1, lineType=cv2.LINE_AA)
+        # Inner white center point for precise pinpointing
+        cv2.circle(panel, (px, py), 1, (255, 255, 255), -1, lineType=cv2.LINE_AA)
+
+    # 3. Add panel title banner at top
+    banner_h = 36
+    banner = np.zeros((banner_h, panel_size, 3), dtype=np.uint8)
+    banner[:] = (25, 28, 32)
+    cv2.line(banner, (0, banner_h - 1), (panel_size, banner_h - 1), title_color, 2)
+
+    (ttw, tth), _ = cv2.getTextSize(title, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 2)
+    cv2.putText(
+        banner,
+        title,
+        ((panel_size - ttw) // 2, (banner_h + tth) // 2 - 2),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.55,
+        title_color,
+        2,
+        lineType=cv2.LINE_AA,
+    )
+
+    panel_with_header = np.vstack([banner, panel])
+    return panel_with_header
+
+
+def create_side_by_side_roi_visualization(
+    image_rgb: np.ndarray,
+    gt_coords: np.ndarray,
+    pred_coords: np.ndarray,
+    sample_name: str = "",
+    pixel_spacing: float = 0.1,
+    panel_size: int = 560,
+) -> np.ndarray:
+    """
+    Creates an interpretable side-by-side ROI comparison image showing only the cervical vertebrae:
+    - Left panel: Ground Truth
+    - Right panel: Model Prediction
+    - Top banner: Sample name and Mean Radial Error (pixels & mm)
+    - Bottom banner: Clean 3-group landmark guide (C2, C3, C4)
+    """
+    img_h, img_w = image_rgb.shape[:2]
+
+    # Compute ROI bounding box
+    x1, y1, x2, y2 = compute_roi_bbox(
+        gt_coords, pred_coords, img_w, img_h, margin_ratio=0.35, min_size=180
+    )
+    roi_rgb = image_rgb[y1:y2, x1:x2]
+    roi_w = x2 - x1
+    roi_h = y2 - y1
+
+    # Compute sample-level error
+    valid_mask = (gt_coords[:, 0] >= 0) & (gt_coords[:, 1] >= 0)
+    if np.any(valid_mask):
+        gt_px = gt_coords[valid_mask] * np.array([img_w, img_h])
+        pred_px = pred_coords[valid_mask] * np.array([img_w, img_h])
+        radial_errors_px = np.sqrt(np.sum((gt_px - pred_px) ** 2, axis=1))
+        mre_px = float(np.mean(radial_errors_px))
+        mre_mm = mre_px * pixel_spacing
+        metric_str = f"Mean Radial Error: {mre_px:.2f} px ({mre_mm:.2f} mm)"
+    else:
+        metric_str = "Mean Radial Error: N/A"
+
+    # Render Left Panel (Ground Truth)
+    panel_gt = render_roi_panel(
+        roi_rgb=roi_rgb,
+        coords=gt_coords,
+        img_w=img_w,
+        img_h=img_h,
+        x1=x1,
+        y1=y1,
+        roi_w=roi_w,
+        roi_h=roi_h,
+        panel_size=panel_size,
+        title="GROUND TRUTH",
+        title_color=(76, 175, 80),
+    )
+
+    # Render Right Panel (Prediction)
+    panel_pred = render_roi_panel(
+        roi_rgb=roi_rgb,
+        coords=pred_coords,
+        img_w=img_w,
+        img_h=img_h,
+        x1=x1,
+        y1=y1,
+        roi_w=roi_w,
+        roi_h=roi_h,
+        panel_size=panel_size,
+        title="MODEL PREDICTION",
+        title_color=(33, 150, 243),
+    )
+
+    # Divider bar
+    divider_w = 6
+    divider = np.full((panel_gt.shape[0], divider_w, 3), 40, dtype=np.uint8)
+
+    # Combine panels side by side
+    panels_combined = np.hstack([panel_gt, divider, panel_pred])
+    total_w = panels_combined.shape[1]
+
+    # Top Header
+    header_h = 44
+    header = np.zeros((header_h, total_w, 3), dtype=np.uint8)
+    header[:] = (18, 20, 24)
+
+    header_left = f"Sample: {sample_name}" if sample_name else "CVM Vertebrae Evaluation"
+    cv2.putText(
+        header,
+        header_left,
+        (16, 28),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.6,
+        (240, 240, 240),
+        1,
+        lineType=cv2.LINE_AA,
+    )
+
+    (mw, _), _ = cv2.getTextSize(metric_str, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 1)
+    cv2.putText(
+        header,
+        metric_str,
+        (total_w - mw - 16, 28),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.55,
+        (220, 200, 100),
+        1,
+        lineType=cv2.LINE_AA,
+    )
+    cv2.line(header, (0, header_h - 1), (total_w, header_h - 1), (50, 55, 65), 1)
+
+    # Bottom Legend (split by vertebra: C2, C3, C4)
+    legend_h = 80
+    legend = np.zeros((legend_h, total_w, 3), dtype=np.uint8)
+    legend[:] = (18, 20, 24)
+    cv2.line(legend, (0, 0), (total_w, 0), (50, 55, 65), 1)
+
+    groups = [
+        ("C2", [0, 1, 2]),
+        ("C3", [3, 4, 5, 6, 7]),
+        ("C4", [8, 9, 10, 11, 12]),
+    ]
+
+    col_w = total_w // 3
+    for col_idx, (grp_name, indices) in enumerate(groups):
+        start_x = col_idx * col_w + 16
+        cv2.putText(
+            legend,
+            f"[{grp_name}]",
+            (start_x, 20),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.45,
+            (180, 180, 200),
+            1,
+            lineType=cv2.LINE_AA,
+        )
+
+        for row_i, idx in enumerate(indices):
+            color_bgr = LANDMARK_COLORS_BGR[idx % len(LANDMARK_COLORS_BGR)]
+            color_rgb = (color_bgr[2], color_bgr[1], color_bgr[0])
+            name = LANDMARK_CLASSES[idx]
+
+            if len(indices) <= 3:
+                lx = start_x + 60 + (row_i * 90)
+                ly = 20
+            else:
+                if row_i < 3:
+                    lx = start_x + 50 + (row_i * 90)
+                    ly = 20
+                else:
+                    lx = start_x + 50 + ((row_i - 3) * 90)
+                    ly = 50
+
+            cv2.circle(legend, (lx, ly - 4), 5, color_rgb, -1, lineType=cv2.LINE_AA)
+            cv2.circle(legend, (lx, ly - 4), 6, (0, 0, 0), 1, lineType=cv2.LINE_AA)
+            cv2.putText(
+                legend,
+                f"{idx:02d}:{name.split('_')[-1]}",
+                (lx + 9, ly),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.35,
+                (230, 230, 230),
+                1,
+                lineType=cv2.LINE_AA,
+            )
+
+    final_image = np.vstack([header, panels_combined, legend])
+    return final_image
+
+
 def draw_landmarks_on_image(
     image: np.ndarray,
     pred_coords: np.ndarray,
@@ -618,8 +1041,7 @@ def draw_landmarks_on_image(
 ) -> np.ndarray:
     """
     Renders predicted landmarks (and optionally ground truth) onto an RGB image.
-    Each landmark is drawn in a distinct color, and a rectangular guide box (legend)
-    is rendered on the top right section of the image.
+    Preserved for backward-compatibility with full-image visualizations.
     """
     vis_img = image.copy()
     h, w = vis_img.shape[:2]
@@ -632,7 +1054,7 @@ def draw_landmarks_on_image(
                 continue
             abs_x = int(round(x_norm * w))
             abs_y = int(round(y_norm * h))
-            cv2.circle(vis_img, (abs_x, abs_y), 6, (255, 255, 0), 1)  # Yellow outline circle
+            cv2.circle(vis_img, (abs_x, abs_y), 6, (255, 255, 0), 1)
             cv2.drawMarker(vis_img, (abs_x, abs_y), (255, 255, 0), cv2.MARKER_CROSS, 8, 1)
 
     # Draw Predicted landmarks with distinct colors
@@ -644,8 +1066,6 @@ def draw_landmarks_on_image(
         abs_y = int(round(y_norm * h))
 
         color_bgr = LANDMARK_COLORS_BGR[i % len(LANDMARK_COLORS_BGR)]
-
-        # Draw filled landmark circle with black border
         cv2.circle(vis_img, (abs_x, abs_y), 4, color_bgr, -1)
         cv2.circle(vis_img, (abs_x, abs_y), 5, (0, 0, 0), 1)
 
@@ -699,10 +1119,17 @@ def visualize_batch_and_save(
     num_samples: int = 8,
     img_size: int = 640,
     test_img_dir: str = "dataset/test/images",
+    use_tta: bool = False,
+    tta_scales: list[float] | tuple[float, ...] = (0.95, 1.0, 1.05),
+    tta_shifts: list[tuple[int, int]] | None = None,
+    pixel_spacing: float = 0.1,
+    roi_only: bool = True,
+    panel_size: int = 560,
 ) -> None:
     """
-    Renders visual ground truth vs. predicted landmark comparisons on un-normalized
-    original test images and exports high-resolution PNGs to the run subfolder.
+    Renders visual ground truth vs. predicted landmark comparisons and exports high-resolution PNGs.
+    By default (roi_only=True), produces side-by-side ROI crops showing only the cervical vertebrae
+    with ground truth on the left and model prediction on the right.
     """
     save_dir.mkdir(parents=True, exist_ok=True)
     saved_count = 0
@@ -715,8 +1142,19 @@ def visualize_batch_and_save(
             images = batch["image"].to(device)
             gt_coords = batch["coords"].cpu().numpy()
             filenames = batch["filename"]
+            spacings = (
+                batch["pixel_spacing"].cpu().numpy()
+                if "pixel_spacing" in batch
+                else np.full(len(filenames), pixel_spacing)
+            )
 
-            _, pred_coords = model(images)
+            _, pred_coords = predict_batch(
+                model=model,
+                images=images,
+                use_tta=use_tta,
+                tta_scales=tta_scales,
+                tta_shifts=tta_shifts,
+            )
             pred_coords = pred_coords.cpu().numpy()
 
             for i in range(len(filenames)):
@@ -725,23 +1163,32 @@ def visualize_batch_and_save(
 
                 fname = filenames[i]
                 orig_img_path = Path(test_img_dir) / fname
+                sample_spacing = float(spacings[i]) if hasattr(spacings, "__getitem__") else float(pixel_spacing)
 
                 if orig_img_path.exists():
                     raw_bgr = cv2.imread(str(orig_img_path))
                     raw_rgb = cv2.cvtColor(raw_bgr, cv2.COLOR_BGR2RGB)
-                    # Resize to target canvas for visualization
-                    canvas_img = cv2.resize(raw_rgb, (img_size, img_size))
                 else:
-                    # Fallback to reconstructing from input tensor
                     tensor_np = images[i].cpu().numpy().transpose(1, 2, 0)
-                    canvas_img = (np.clip(tensor_np, 0, 1) * 255).astype(np.uint8)
+                    raw_rgb = (np.clip(tensor_np, 0, 1) * 255).astype(np.uint8)
 
-                vis_rgb = draw_landmarks_on_image(
-                    image=canvas_img,
-                    pred_coords=pred_coords[i],
-                    gt_coords=gt_coords[i],
-                    img_size=img_size,
-                )
+                if roi_only:
+                    vis_rgb = create_side_by_side_roi_visualization(
+                        image_rgb=raw_rgb,
+                        gt_coords=gt_coords[i],
+                        pred_coords=pred_coords[i],
+                        sample_name=fname,
+                        pixel_spacing=sample_spacing,
+                        panel_size=panel_size,
+                    )
+                else:
+                    canvas_img = cv2.resize(raw_rgb, (img_size, img_size))
+                    vis_rgb = draw_landmarks_on_image(
+                        image=canvas_img,
+                        pred_coords=pred_coords[i],
+                        gt_coords=gt_coords[i],
+                        img_size=img_size,
+                    )
 
                 out_path = save_dir / f"vis_{saved_count + 1:02d}_{Path(fname).stem}.png"
                 vis_bgr = cv2.cvtColor(vis_rgb, cv2.COLOR_RGB2BGR)
@@ -767,6 +1214,10 @@ def run_evaluation(
     tracking_username: str | None = None,
     tracking_password: str | None = None,
     mlflow_run_name: str | None = None,
+    use_tta: bool = False,
+    tta_scales: list[float] | tuple[float, ...] = (0.95, 1.0, 1.05),
+    tta_shifts: list[tuple[int, int]] | None = None,
+    roi_only: bool = True,
 ) -> tuple[dict, str]:
     """
     Main programmatic evaluation routine.
@@ -799,7 +1250,8 @@ def run_evaluation(
         device = torch.device("cpu")
 
     print(f"\n" + "=" * 80)
-    print(f"STARTING MODEL EVALUATION | Device: {device}")
+    tta_banner = f" | TTA: ENABLED (scales={list(tta_scales)})" if use_tta else " | TTA: DISABLED"
+    print(f"STARTING MODEL EVALUATION | Device: {device}{tta_banner}")
     print(f"=" * 80)
 
     # 1. Setup output run folder
@@ -831,7 +1283,13 @@ def run_evaluation(
         for batch in test_loader:
             images = batch["image"].to(device)
             gt_coords = batch["coords"].cpu().numpy()
-            _, pred_coords = model(images)
+            _, pred_coords = predict_batch(
+                model=model,
+                images=images,
+                use_tta=use_tta,
+                tta_scales=tta_scales,
+                tta_shifts=tta_shifts,
+            )
 
             all_preds.append(pred_coords.cpu().numpy())
             all_gts.append(gt_coords)
@@ -853,6 +1311,13 @@ def run_evaluation(
         pixel_spacing=spacings_array,
         threshold_px=threshold_px,
     )
+
+    # Attach TTA metadata
+    summary_metrics["use_tta"] = use_tta
+    if use_tta:
+        summary_metrics["tta_scales"] = list(tta_scales)
+        if tta_shifts:
+            summary_metrics["tta_shifts"] = [list(s) for s in tta_shifts]
 
     # 4b. Generate metric PNG charts
     generate_evaluation_charts(
@@ -901,6 +1366,11 @@ def run_evaluation(
         num_samples=num_samples,
         img_size=img_size,
         test_img_dir=test_img_dir,
+        use_tta=use_tta,
+        tta_scales=tta_scales,
+        tta_shifts=tta_shifts,
+        pixel_spacing=pixel_spacing,
+        roi_only=roi_only,
     )
 
     # 8. MLflow Logging (Active Run or Standalone Run)
@@ -947,6 +1417,8 @@ def run_evaluation(
                         "eval_pixel_spacing": pixel_spacing,
                         "eval_threshold_px": threshold_px,
                         "eval_batch_size": batch_size,
+                        "eval_use_tta": use_tta,
+                        "eval_tta_scales": str(list(tta_scales)) if use_tta else "none",
                     })
                     _log_eval_artifacts_in_order(standalone_run.info.run_id)
                     print(f"--> Successfully logged standalone evaluation to MLflow experiment '{exp_name}' (Run ID: {standalone_run.info.run_id}).")
@@ -1068,8 +1540,44 @@ def main():
         action="store_true",
         help="Disable MLflow logging during evaluation.",
     )
+    parser.add_argument(
+        "--use-tta",
+        "--tta",
+        action="store_true",
+        help="Enable Test-Time Augmentation (multi-scale inference) for higher accuracy.",
+    )
+    parser.add_argument(
+        "--tta-scales",
+        type=str,
+        default="0.95,1.0,1.05",
+        help="Comma-separated scale factors for TTA (default: '0.95,1.0,1.05').",
+    )
+    parser.add_argument(
+        "--tta-shifts",
+        type=str,
+        default=None,
+        help="Optional comma-separated pixel shifts in format 'dx:dy,dx:dy' (e.g. '-4:-4,4:4').",
+    )
+    parser.add_argument(
+        "--full-image",
+        action="store_true",
+        help="Render full 640x640 cephalometric image instead of cropped vertebrae ROI side-by-side.",
+    )
 
     args = parser.parse_args()
+
+    # Parse TTA parameters
+    parsed_tta_scales = (
+        [float(s.strip()) for s in args.tta_scales.split(",") if s.strip()]
+        if args.tta_scales
+        else [0.95, 1.0, 1.05]
+    )
+    parsed_tta_shifts = []
+    if args.tta_shifts:
+        for pair in args.tta_shifts.split(","):
+            if ":" in pair:
+                dx, dy = pair.strip().split(":")
+                parsed_tta_shifts.append((int(dx), int(dy)))
 
     run_evaluation(
         weights_path=args.weights,
@@ -1089,6 +1597,10 @@ def main():
         tracking_username=args.tracking_username,
         tracking_password=args.tracking_password,
         mlflow_run_name=args.mlflow_run_name,
+        use_tta=args.use_tta,
+        tta_scales=parsed_tta_scales,
+        tta_shifts=parsed_tta_shifts if len(parsed_tta_shifts) > 0 else None,
+        roi_only=not args.full_image,
     )
 
 
