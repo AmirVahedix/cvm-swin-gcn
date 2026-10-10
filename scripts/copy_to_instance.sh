@@ -72,7 +72,7 @@ if [ -n "$ENV_FILE" ] && [ -f "$ENV_FILE" ]; then
     set +a
 fi
 
-# --- Locate setup.sh script ---
+# --- Locate setup.sh and setup-inference.sh scripts ---
 SETUP_SCRIPT=""
 for candidate in "${SCRIPT_DIR}/setup.sh" "${REPO_ROOT}/scripts/setup.sh" "${REPO_ROOT}/setup.sh" "$(pwd)/setup.sh"; do
     if [ -f "$candidate" ]; then
@@ -80,6 +80,15 @@ for candidate in "${SCRIPT_DIR}/setup.sh" "${REPO_ROOT}/scripts/setup.sh" "${REP
         break
     fi
 done
+
+SETUP_INFER_SCRIPT=""
+for candidate in "${SCRIPT_DIR}/setup-inference.sh" "${REPO_ROOT}/scripts/setup-inference.sh" "${REPO_ROOT}/setup-inference.sh" "$(pwd)/setup-inference.sh"; do
+    if [ -f "$candidate" ]; then
+        SETUP_INFER_SCRIPT="$candidate"
+        break
+    fi
+done
+
 
 # --- Parse Arguments ---
 parse_connection_string() {
@@ -256,34 +265,42 @@ if ! ssh "${SSH_OPTS[@]}" -p "$SSH_PORT" "$SSH_TARGET" "mkdir -p ${REMOTE_DEST}"
     exit 1
 fi
 
-# Step 2: SCP .env and setup.sh
-echo -e "${BLUE}📦 Copying .env and setup.sh to ${SSH_TARGET}:${REMOTE_DEST}/...${NC}"
+# Step 2: SCP .env, setup.sh, and setup-inference.sh
+FILES_TO_SCP=("$ENV_FILE")
+[ -n "$SETUP_SCRIPT" ] && FILES_TO_SCP+=("$SETUP_SCRIPT")
+[ -n "$SETUP_INFER_SCRIPT" ] && FILES_TO_SCP+=("$SETUP_INFER_SCRIPT")
+
+echo -e "${BLUE}📦 Copying configuration and setup scripts (${#FILES_TO_SCP[@]} files) to ${SSH_TARGET}:${REMOTE_DEST}/...${NC}"
 SCP_KEY_OPTS=()
 if [ -n "$SSH_KEY" ]; then
     SCP_KEY_OPTS+=(-i "$SSH_KEY")
 fi
 
-if ! scp -o "StrictHostKeyChecking=no" -o "UserKnownHostsFile=/dev/null" "${SCP_KEY_OPTS[@]}" -P "$SSH_PORT" "$ENV_FILE" "$SETUP_SCRIPT" "${SSH_TARGET}:${REMOTE_DEST}/"; then
+if ! scp -o "StrictHostKeyChecking=no" -o "UserKnownHostsFile=/dev/null" "${SCP_KEY_OPTS[@]}" -P "$SSH_PORT" "${FILES_TO_SCP[@]}" "${SSH_TARGET}:${REMOTE_DEST}/"; then
     echo -e "${RED}❌ Failed to copy files to ${SSH_TARGET}:${REMOTE_DEST}/ via SCP.${NC}"
     exit 1
 fi
 echo -e "${GREEN}✅ Files copied successfully.${NC}"
 
-# Step 3: Make setup.sh executable on the host
-echo -e "${BLUE}🔑 Setting executable permissions on ${REMOTE_DEST}/setup.sh...${NC}"
-if ! ssh "${SSH_OPTS[@]}" -p "$SSH_PORT" "$SSH_TARGET" "chmod +x ${REMOTE_DEST}/setup.sh"; then
-    echo -e "${RED}❌ Failed to set executable permissions on ${REMOTE_DEST}/setup.sh.${NC}"
+# Step 3: Make setup scripts executable on the host
+echo -e "${BLUE}🔑 Setting executable permissions on setup scripts...${NC}"
+if ! ssh "${SSH_OPTS[@]}" -p "$SSH_PORT" "$SSH_TARGET" "chmod +x ${REMOTE_DEST}/*.sh 2>/dev/null || true"; then
+    echo -e "${RED}❌ Failed to set executable permissions on remote scripts.${NC}"
     exit 1
 fi
-echo -e "${GREEN}✅ ${REMOTE_DEST}/setup.sh is now executable.${NC}"
+echo -e "${GREEN}✅ Setup scripts are now executable on remote host.${NC}"
 
 # --- Completion Summary ---
 echo -e "\n${BLUE}=================================================================${NC}"
 echo -e "${GREEN}🎉 Deployment Complete!${NC}"
 echo -e "${BLUE}=================================================================${NC}"
-echo -e "You can now connect to your instance and run the setup script:"
+echo -e "You can now connect to your instance:"
 echo -e "\n  ${BOLD}ssh -p ${SSH_PORT} ${SSH_TARGET}${NC}"
-echo -e "  ${BOLD}cd ${REMOTE_DEST} && ./setup.sh${NC}\n"
+echo -e "\nFor Training Setup:"
+echo -e "  ${BOLD}cd ${REMOTE_DEST} && ./setup.sh${NC}"
+echo -e "\nFor Inference Setup:"
+echo -e "  ${BOLD}cd ${REMOTE_DEST} && ./setup-inference.sh${NC}\n"
+
 echo -e "Or run setup with options directly:"
 echo -e "  ${BOLD}ssh -p ${SSH_PORT} ${SSH_TARGET} \"cd ${REMOTE_DEST} && ./setup.sh -y\"${NC}\n"
 echo -e "${BLUE}Exiting.${NC}"
