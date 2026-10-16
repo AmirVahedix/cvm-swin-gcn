@@ -408,10 +408,11 @@ class TestCvmApiDataSource(unittest.TestCase):
             self.assertIn("1", mapping)
             self.assertEqual(mapping["task_0001.jpg"], 1)
 
-            # 2. Test build_class_weighted_sampler
+            # 2. Test build_class_weighted_sampler (strict power=1.0 equal probability)
             sampler = build_class_weighted_sampler(
                 train_files=train_files,
                 export_json_path=str(export_file),
+                power=1.0,
             )
             self.assertIsNotNone(sampler)
             self.assertIsInstance(sampler, WeightedRandomSampler)
