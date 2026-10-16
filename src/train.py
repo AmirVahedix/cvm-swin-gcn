@@ -838,6 +838,8 @@ def main(
     use_amp: bool = True,
     compile_model: bool = False,
     warmup_coord_epochs: int = WARMUP_COORD_EPOCHS,
+    use_balanced_sampling: bool = True,
+    balanced_sampling_power: float | None = None,
 ):
     load_dotenv()
 
@@ -867,6 +869,12 @@ def main(
         device = torch.device("cpu")
     print(f"Using device: {device}")
 
+    if balanced_sampling_power is None:
+        try:
+            balanced_sampling_power = float(os.getenv("BALANCED_SAMPLING_POWER", "0.5"))
+        except (ValueError, TypeError):
+            balanced_sampling_power = 0.5
+
     train_loader, val_loader = get_dataloaders(
         train_img_dir=TRAIN_IMG_DIR,
         train_npz_dir=TRAIN_NPZ_DIR,
@@ -875,6 +883,8 @@ def main(
         batch_size=batch_size,
         img_size=img_size,
         pixel_spacing=pixel_spacing,
+        use_balanced_sampling=use_balanced_sampling,
+        sampling_power=balanced_sampling_power,
     )
 
     model = CephalometricSwinGCN(num_landmarks=NUM_LANDMARKS, img_size=img_size).to(device)
@@ -952,6 +962,8 @@ def main(
                 "device": str(device),
                 "use_amp": use_amp,
                 "compile_model": compile_model,
+                "use_balanced_sampling": use_balanced_sampling,
+                "balanced_sampling_power": balanced_sampling_power if use_balanced_sampling else 0.0,
             }
         )
 
@@ -1470,6 +1482,25 @@ if __name__ == "__main__":
         default=LAMBDA_GRAPH,
         help=f"Weight for Anatomical Graph Loss on landmark edges (default: {LAMBDA_GRAPH})",
     )
+    parser.add_argument(
+        "--balanced-sampling",
+        dest="use_balanced_sampling",
+        action="store_true",
+        default=True,
+        help="Enable class-weighted balanced sampling on finalStage (1-6) to prevent gradient bias (default: True)",
+    )
+    parser.add_argument(
+        "--no-balanced-sampling",
+        dest="use_balanced_sampling",
+        action="store_false",
+        help="Disable class-weighted balanced sampling and use standard uniform shuffling",
+    )
+    parser.add_argument(
+        "--balanced-sampling-power",
+        type=float,
+        default=float(os.getenv("BALANCED_SAMPLING_POWER", "0.5")),
+        help="Smoothing exponent for class-weighted balanced sampling (1.0 = strict 1/N, 0.5 = smoothed 1/sqrt(N), 0.0 = uniform, default: 0.5)",
+    )
 
     args = parser.parse_args()
     main(
@@ -1500,5 +1531,7 @@ if __name__ == "__main__":
         use_amp=args.use_amp,
         compile_model=args.compile_model,
         warmup_coord_epochs=args.warmup_coord_epochs,
+        use_balanced_sampling=args.use_balanced_sampling,
+        balanced_sampling_power=args.balanced_sampling_power,
     )
 

@@ -1283,15 +1283,45 @@ INDEX_HTML_CONTENT = """<!DOCTYPE html>
 
 
 def main():
-    verify_env()
-
     parser = argparse.ArgumentParser(
         description="Dataset Validation & Geometric Consistency Verification Script."
     )
     parser.add_argument(
+        "--data-source",
+        "--source",
+        type=str,
+        choices=["api", "label-studio"],
+        default=os.getenv("DATA_SOURCE", "api"),
+        help="Data source to load annotations and images from: 'api' (default: CVM Backend API) or 'label-studio' (legacy).",
+    )
+    parser.add_argument(
+        "--legacy-label-studio",
+        action="store_true",
+        help="Keep legacy Label Studio as the data source instead of the default CVM Backend API.",
+    )
+    parser.add_argument(
+        "--api-url",
+        type=str,
+        default=os.getenv("CVM_API_URL", "http://localhost:8000"),
+        help="URL for CVM Backend API (default: http://localhost:8000 or $CVM_API_URL).",
+    )
+    parser.add_argument(
+        "--api-token",
+        type=str,
+        default=os.getenv("CVM_API_TOKEN", "O0s66Vi.r8e8WBGfY9I3x4neIm"),
+        help="Bearer authentication token for CVM Backend API.",
+    )
+    parser.add_argument(
+        "--skip-review-needed",
+        dest="skip_review_needed",
+        action="store_true",
+        default=True,
+        help="Skip images marked as review_needed (default: True).",
+    )
+    parser.add_argument(
         "--skip-download",
         action="store_true",
-        help="Skip downloading raw export and images from Label Studio.",
+        help="Skip downloading raw export and images.",
     )
     parser.add_argument(
         "--skip-preprocessing",
@@ -1314,7 +1344,7 @@ def main():
         "--raw-exports-dir",
         type=str,
         default="data/raw/exports",
-        help="Directory containing raw Label Studio exports.",
+        help="Directory containing raw exports.",
     )
     parser.add_argument(
         "--raw-images-dir",
@@ -1355,18 +1385,27 @@ def main():
     )
 
     args = parser.parse_args()
+    if args.legacy_label_studio:
+        args.data_source = "label-studio"
+
+    verify_env(data_source=args.data_source)
 
     print("=" * 80)
     print("      CERVICAL VERTEBRAE DATASET VALIDATION & PRE-PROCESSING PIPELINE     ")
+    print(f"      DATA SOURCE: {args.data_source.upper()}")
     print("=" * 80)
 
     # 1. Preprocessing Steps (up to generate_labels)
     if not args.skip_preprocessing:
         if not args.skip_download:
-            print("\n[Step 1/3] Executing: download_export_and_images()")
+            print(f"\n[Step 1/3] Executing: download_export_and_images(data_source='{args.data_source}')")
             download_export_and_images(
                 export_dir=args.raw_exports_dir,
                 img_dir=args.raw_images_dir,
+                data_source=args.data_source,
+                api_url=args.api_url,
+                api_token=args.api_token,
+                skip_review_needed=args.skip_review_needed,
             )
         else:
             print("\n[Step 1/3] Skipping download as requested.")

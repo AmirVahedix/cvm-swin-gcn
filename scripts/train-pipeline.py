@@ -21,11 +21,41 @@ from src.utils.ftp_utils import test_ftp_connection
 
 
 def main():
-    verify_env()
-
     # Setup argument parser
     parser = argparse.ArgumentParser(
         description="Execute full end-to-end data downloading, preprocessing, label generation, splitting, model training, and evaluation pipeline."
+    )
+    parser.add_argument(
+        "--data-source",
+        "--source",
+        type=str,
+        choices=["api", "label-studio"],
+        default=os.getenv("DATA_SOURCE", "api"),
+        help="Data source to load annotations and images from: 'api' (default: CVM Backend API) or 'label-studio' (legacy).",
+    )
+    parser.add_argument(
+        "--legacy-label-studio",
+        action="store_true",
+        help="Keep legacy Label Studio as the data source instead of the default CVM Backend API.",
+    )
+    parser.add_argument(
+        "--api-url",
+        type=str,
+        default=os.getenv("CVM_API_URL", "http://localhost:8000"),
+        help="URL for CVM Backend API (default: http://localhost:8000 or $CVM_API_URL).",
+    )
+    parser.add_argument(
+        "--api-token",
+        type=str,
+        default=os.getenv("CVM_API_TOKEN", "O0s66Vi.r8e8WBGfY9I3x4neIm"),
+        help="Bearer authentication token for CVM Backend API.",
+    )
+    parser.add_argument(
+        "--skip-review-needed",
+        dest="skip_review_needed",
+        action="store_true",
+        default=True,
+        help="Skip images marked as review_needed and do not load them in training process (default: True).",
     )
     parser.add_argument(
         "--epochs",
@@ -57,7 +87,7 @@ def main():
     parser.add_argument(
         "--skip-download",
         action="store_true",
-        help="Skip downloading raw export and images from Label Studio.",
+        help="Skip downloading raw export and images.",
     )
     parser.add_argument(
         "--train-only",
@@ -282,10 +312,47 @@ def main():
         default=None,
         help="Path to JSON file containing exact validation image IDs to isolate for the val split (default: check dataset/val_image_ids.json).",
     )
+    parser.add_argument(
+        "--use-test-cohort",
+        dest="use_test_cohort",
+        action="store_true",
+        default=True,
+        help="Use images marked as test cohort in API/export strictly as the evaluation test split (default: True).",
+    )
+    parser.add_argument(
+        "--no-test-cohort",
+        dest="use_test_cohort",
+        action="store_false",
+        help="Disable automatic test cohort isolation for the test split.",
+    )
+    parser.add_argument(
+        "--balanced-sampling",
+        dest="use_balanced_sampling",
+        action="store_true",
+        default=True,
+        help="Enable class-weighted balanced sampling on finalStage (1-6) to prevent gradient bias (default: True).",
+    )
+    parser.add_argument(
+        "--no-balanced-sampling",
+        dest="use_balanced_sampling",
+        action="store_false",
+        help="Disable class-weighted balanced sampling and use standard uniform shuffling.",
+    )
+    parser.add_argument(
+        "--balanced-sampling-power",
+        type=float,
+        default=float(os.getenv("BALANCED_SAMPLING_POWER", "0.5")),
+        help="Smoothing exponent for class-weighted balanced sampling (1.0 = strict 1/N, 0.5 = smoothed 1/sqrt(N), 0.0 = uniform, default: 0.5).",
+    )
 
     args = parser.parse_args()
+    if args.legacy_label_studio:
+        args.data_source = "label-studio"
+
+    verify_env(data_source=args.data_source)
 
     print("Initializing pipeline execution...\n" + "=" * 40)
+    print(f"Data source configured: {args.data_source.upper()}")
     print(f"Training configured for {args.epochs} epochs.")
 
     try:
@@ -331,10 +398,14 @@ def main():
         if not args.train_only:
             # Step 1: Download Images & Exports
             if not args.skip_download:
-                print("\n[1/6] Executing: download_export_and_images()")
+                print(f"\n[1/6] Executing: download_export_and_images(data_source='{args.data_source}')")
                 download_export_and_images(
                     export_dir="data/raw/exports",
                     img_dir="data/raw/images",
+                    data_source=args.data_source,
+                    api_url=args.api_url,
+                    api_token=args.api_token,
+                    skip_review_needed=args.skip_review_needed,
                 )
                 print("-" * 20)
             else:
@@ -385,6 +456,7 @@ def main():
                 seed=42,
                 fixed_test_ids_path=args.test_ids_file,
                 fixed_val_ids_path=args.val_ids_file,
+                use_test_cohort=args.use_test_cohort,
             )
             val_cnt = len(split_info.get("val_ids", []))
             test_cnt = len(split_info.get("test_ids", []))
@@ -424,6 +496,8 @@ def main():
             use_amp=args.use_amp,
             compile_model=args.compile_model,
             warmup_coord_epochs=args.warmup_coord_epochs,
+            use_balanced_sampling=args.use_balanced_sampling,
+            balanced_sampling_power=args.balanced_sampling_power,
         )
         print("-" * 20)
 

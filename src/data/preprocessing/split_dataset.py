@@ -113,32 +113,36 @@ def load_label_studio_mapping(export_json_path=None) -> dict[str, int]:
 
     try:
         with open(found_path, "r", encoding="utf-8") as f:
-            tasks = json.load(f)
+            raw_data = json.load(f)
+        tasks = raw_data.get("data", raw_data) if isinstance(raw_data, dict) else raw_data
         for task in tasks:
-            task_id = task.get("id")
+            task_id = task.get("taskId") or task.get("task_id") or task.get("id")
             if task_id is None:
                 continue
-            raw_path = task.get("file_upload") or task.get("data", {}).get("img")
-            if not raw_path:
-                continue
-            parsed_url = urlparse(raw_path)
-            query_params = parse_qs(parsed_url.query)
-            if "d" in query_params:
-                filename = os.path.basename(query_params["d"][0])
-            else:
-                filename = os.path.basename(parsed_url.path)
+            clean_filename = task.get("filename")
+            if not clean_filename:
+                raw_path = task.get("file_upload") or task.get("data", {}).get("img") or task.get("data", {}).get("image")
+                if not raw_path:
+                    continue
+                parsed_url = urlparse(raw_path)
+                query_params = parse_qs(parsed_url.query)
+                if "d" in query_params:
+                    filename = os.path.basename(query_params["d"][0])
+                else:
+                    filename = os.path.basename(parsed_url.path)
 
-            if "-" in filename and len(filename.split("-")[0]) == 8:
-                clean_filename = "-".join(filename.split("-")[1:])
-            else:
-                clean_filename = filename
+                if "-" in filename and len(filename.split("-")[0]) == 8:
+                    clean_filename = "-".join(filename.split("-")[1:])
+                else:
+                    clean_filename = filename
 
             stem = Path(clean_filename).stem
-            mapping[clean_filename] = task_id
-            mapping[stem] = task_id
-        print(f"--> Loaded Label Studio task ID mapping for {len(mapping)//2} images from: {found_path}")
+            mapping[clean_filename] = int(task_id)
+            mapping[stem] = int(task_id)
+        source_desc = "CVM API" if (isinstance(raw_data, dict) and raw_data.get("dataSource") == "cvm-backend-api") else "dataset"
+        print(f"--> Loaded {source_desc} task ID mapping for {len(mapping)//2} images from: {found_path}")
     except Exception as e:
-        print(f"⚠️ Warning loading Label Studio mapping from {found_path}: {e}")
+        print(f"⚠️ Warning loading task ID mapping from {found_path}: {e}")
 
     return mapping
 
@@ -180,6 +184,72 @@ def load_fixed_id_set(file_path) -> set:
         return set()
 
 
+def extract_test_cohort_identifiers(export_json_path=None) -> tuple[set, set]:
+    """
+    Scans candidate export JSON files for tasks flagged with:
+    'isTestCohort', 'is_test_cohort', 'testCohort', or 'test_cohort'.
+    Returns:
+        (cohort_ids: set, cohort_stems: set)
+    """
+    cohort_ids = set()
+    cohort_stems = set()
+
+    candidate_paths = []
+    if export_json_path:
+        candidate_paths.append(Path(export_json_path))
+    candidate_paths.append(Path("data/exports/export.json"))
+    raw_exports_dir = Path("data/raw/exports")
+    if raw_exports_dir.exists():
+        raw_files = sorted(
+            raw_exports_dir.glob("*.json"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        candidate_paths.extend(raw_files)
+
+    found_path = None
+    for p in candidate_paths:
+        if p.exists() and p.is_file():
+            found_path = p
+            break
+
+    if not found_path:
+        return cohort_ids, cohort_stems
+
+    try:
+        with open(found_path, "r", encoding="utf-8") as f:
+            raw_data = json.load(f)
+        tasks = raw_data.get("data", raw_data) if isinstance(raw_data, dict) else raw_data
+        for task in tasks:
+            is_cohort = bool(
+                task.get("isTestCohort")
+                or task.get("is_test_cohort")
+                or task.get("testCohort")
+                or task.get("test_cohort")
+            )
+            if is_cohort:
+                task_id = task.get("taskId") or task.get("task_id") or task.get("id")
+                if task_id is not None:
+                    cohort_ids.add(int(task_id))
+                    cohort_ids.add(str(task_id))
+
+                filename = task.get("filename")
+                if not filename:
+                    raw_path = task.get("file_upload") or task.get("data", {}).get("img") or task.get("data", {}).get("image")
+                    if raw_path:
+                        filename = os.path.basename(urlparse(raw_path).path)
+                if filename:
+                    cohort_stems.add(filename)
+                    cohort_stems.add(Path(filename).stem)
+        if cohort_ids or cohort_stems:
+            count = max(len(cohort_ids) // 2 if cohort_ids else 0, len(cohort_stems) // 2 if cohort_stems else 0)
+            print(f"--> Found {count} test cohort images in {found_path}")
+    except Exception as e:
+        print(f"⚠️ Warning reading test cohort from {found_path}: {e}")
+
+    return cohort_ids, cohort_stems
+
+
 def split_dataset(
     images_dir="data/images",
     labels_dir="data/labels",
@@ -192,9 +262,12 @@ def split_dataset(
     export_json_path="data/exports/export.json",
     fixed_test_ids_path=None,
     fixed_val_ids_path=None,
+    use_test_cohort=True,
 ):
     """
     Creates train-val-test splits for image/label pairs and copies them into output_dir structure.
+    If use_test_cohort=True (default), images marked as test_cohort in the API/export JSON
+    are strictly isolated as the test set for evaluation, and remaining images are split between train and val.
     If fixed_test_ids_path is specified (or test_image_ids.json exists in output_dir),
     the test set will strictly contain those exact IDs.
     If fixed_val_ids_path is specified (or val_image_ids.json exists in output_dir),
@@ -258,11 +331,27 @@ def split_dataset(
         print("No paired files found. Please check your input directories.")
         return {"train": 0, "val": 0, "test": 0}
 
-    # First split: Separate test set (using fixed test set if available)
+    # Extract test cohort if enabled and no manual fixed_test_set specified
+    cohort_ids, cohort_stems = (set(), set())
+    if use_test_cohort and not fixed_test_set:
+        cohort_ids, cohort_stems = extract_test_cohort_identifiers(export_json_path=export_json_path)
+
+    # First split: Separate test set (using fixed test set or test cohort if available)
     if fixed_test_set:
         test_pairs = [p for p in paired_files if resolve_image_id(p[0]) in fixed_test_set]
         temp_pairs = [p for p in paired_files if resolve_image_id(p[0]) not in fixed_test_set]
         print(f"--> Successfully matched {len(test_pairs)} exact test pairs using fixed test IDs.")
+    elif cohort_ids or cohort_stems:
+        def is_in_cohort(img_path):
+            stem = Path(img_path).stem
+            name = Path(img_path).name
+            img_id = resolve_image_id(img_path)
+            return (img_id in cohort_ids) or (stem in cohort_stems) or (name in cohort_stems)
+
+        test_pairs = [p for p in paired_files if is_in_cohort(p[0])]
+        temp_pairs = [p for p in paired_files if not is_in_cohort(p[0])]
+        print(f"--> Isolated {len(test_pairs)} test cohort images strictly for evaluation test split.")
+        print(f"--> Remaining {len(temp_pairs)} non-test images will be split between train and validation.")
     elif test_ratio > 0:
         temp_pairs, test_pairs = train_test_split(
             paired_files, test_size=test_ratio, random_state=seed
@@ -270,14 +359,14 @@ def split_dataset(
     else:
         temp_pairs, test_pairs = paired_files, []
 
-    # Second split: Separate train and validation sets (using fixed val set if available)
+    # Second split: Separate train and validation sets from temp_pairs
     if fixed_val_set:
         val_pairs = [p for p in temp_pairs if resolve_image_id(p[0]) in fixed_val_set]
         train_pairs = [p for p in temp_pairs if resolve_image_id(p[0]) not in fixed_val_set]
         print(f"--> Successfully matched {len(val_pairs)} exact validation pairs using fixed val IDs.")
         print(f"--> Remaining {len(train_pairs)} pairs assigned to training set (zero randomness).")
-    elif val_ratio > 0:
-        relative_val_ratio = val_ratio / (train_ratio + val_ratio)
+    elif val_ratio > 0 and len(temp_pairs) > 0:
+        relative_val_ratio = val_ratio / (train_ratio + val_ratio) if (train_ratio + val_ratio > 0) else val_ratio
         train_pairs, val_pairs = train_test_split(
             temp_pairs, test_size=relative_val_ratio, random_state=seed
         )
@@ -313,6 +402,18 @@ def split_dataset(
 
     with open(test_json_path, "w", encoding="utf-8") as f:
         json.dump(test_ids, f, indent=2)
+
+    # Save stage mapping if available in candidate exports
+    try:
+        from src.data.loaders.dataloader import load_stage_mapping
+        stage_map = load_stage_mapping(export_json_path=export_json_path)
+        if stage_map:
+            stage_json_path = Path(output_dir) / "stage_mapping.json"
+            with open(stage_json_path, "w", encoding="utf-8") as f:
+                json.dump(stage_map, f, indent=2)
+            print(f"--> Saved stage mapping ({len(stage_map)} entries) to {stage_json_path.name}")
+    except Exception as e:
+        pass
 
     split_counts["val_ids"] = val_ids
     split_counts["test_ids"] = test_ids
@@ -399,6 +500,19 @@ def main():
         default=None,
         help="Path to JSON file containing exact validation image IDs to isolate for the validation split.",
     )
+    parser.add_argument(
+        "--use-test-cohort",
+        dest="use_test_cohort",
+        action="store_true",
+        default=True,
+        help="Strictly isolate images marked as test cohort in API/export for test evaluation split (default: True).",
+    )
+    parser.add_argument(
+        "--no-test-cohort",
+        dest="use_test_cohort",
+        action="store_false",
+        help="Disable automatic test cohort isolation for test split.",
+    )
 
     args = parser.parse_args()
 
@@ -414,6 +528,7 @@ def main():
         export_json_path=args.export_json_path,
         fixed_test_ids_path=args.test_ids_file,
         fixed_val_ids_path=args.val_ids_file,
+        use_test_cohort=args.use_test_cohort,
     )
 
 

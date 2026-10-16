@@ -27,22 +27,30 @@ def generate_gaussian_heatmap(shape, center, sigma=4.0):
 
 
 def process_single_record(record, images_dir, output_dir, sigma):
-    raw_path = record.get("file_upload") or record.get("data", {}).get("img")
-    if not raw_path:
-        return "SKIP_NO_PATH"
+    # Skip any record marked as review_needed
+    if record.get("review_needed") or record.get("reviewNeeded"):
+        return "SKIP_REVIEW_NEEDED"
 
-    parsed_url = urlparse(raw_path)
-    query_params = parse_qs(parsed_url.query)
-
-    if "d" in query_params:
-        filename = os.path.basename(query_params["d"][0])
+    clean_filename = None
+    if "filename" in record and record["filename"]:
+        clean_filename = record["filename"]
     else:
-        filename = os.path.basename(parsed_url.path)
+        raw_path = record.get("file_upload") or record.get("data", {}).get("img") or record.get("data", {}).get("image")
+        if not raw_path:
+            return "SKIP_NO_PATH"
 
-    if "-" in filename and len(filename.split("-")[0]) == 8:
-        clean_filename = "-".join(filename.split("-")[1:])
-    else:
-        clean_filename = filename
+        parsed_url = urlparse(raw_path)
+        query_params = parse_qs(parsed_url.query)
+
+        if "d" in query_params:
+            filename = os.path.basename(query_params["d"][0])
+        else:
+            filename = os.path.basename(parsed_url.path)
+
+        if "-" in filename and len(filename.split("-")[0]) == 8:
+            clean_filename = "-".join(filename.split("-")[1:])
+        else:
+            clean_filename = filename
 
     img_path = os.path.join(images_dir, clean_filename)
 
@@ -55,46 +63,69 @@ def process_single_record(record, images_dir, output_dir, sigma):
 
     h, w = img.shape[:2]
 
-    # Initialize both the heatmaps and the GCN coordinates arrays dynamically using NUM_LANDMARKS
+    # Initialize both heatmaps and GCN coordinates arrays using NUM_LANDMARKS
     heatmaps = np.zeros((NUM_LANDMARKS, h, w), dtype=np.float16)
     coords = np.full((NUM_LANDMARKS, 2), -1.0, dtype=np.float32)
-
-    annotations = record.get("annotations", [])
-    if not annotations:
-        return "SKIP_NO_ANNOTATIONS"
-
-    result_list = annotations[0].get("result", [])
     valid_keypoints = 0
 
-    for item in result_list:
-        if item.get("type") == "keypointlabels":
-            val = item.get("value", {})
-            labels = val.get("keypointlabels", [])
-
-            if not labels:
-                continue
-
-            label_name = labels[0]
-            if label_name not in LANDMARK_CLASSES:
+    # 1. Check for CVM Backend API format (landmarks list)
+    if "landmarks" in record and isinstance(record["landmarks"], list):
+        for lm in record["landmarks"]:
+            label_name = lm.get("id")
+            if not label_name or label_name not in LANDMARK_CLASSES:
                 continue
 
             channel_idx = LANDMARK_CLASSES.index(label_name)
+            norm_x = float(lm.get("x", 0.0))
+            norm_y = float(lm.get("y", 0.0))
 
-            # --- Heatmap calculations (Absolute pixels) ---
-            orig_w = float(item.get("original_width", w))
-            orig_h = float(item.get("original_height", h))
-            abs_x = (float(val.get("x", 0.0)) * orig_w) / 100.0
-            abs_y = (float(val.get("y", 0.0)) * orig_h) / 100.0
+            # Handle both normalized [0, 1] and percentage [0, 100]
+            if norm_x > 1.0 or norm_y > 1.0:
+                norm_x /= 100.0
+                norm_y /= 100.0
+
+            abs_x = norm_x * float(w)
+            abs_y = norm_y * float(h)
 
             heatmap_layer = generate_gaussian_heatmap((h, w), (abs_x, abs_y), sigma)
             heatmaps[channel_idx] = heatmap_layer.astype(np.float16)
-
-            # --- GCN calculations (Normalized [0, 1] floats) ---
-            norm_x = float(val.get("x", 0.0)) / 100.0
-            norm_y = float(val.get("y", 0.0)) / 100.0
             coords[channel_idx] = [norm_x, norm_y]
-
             valid_keypoints += 1
+
+    # 2. Check for Label Studio format (annotations -> result)
+    elif "annotations" in record and isinstance(record["annotations"], list):
+        annotations = record.get("annotations", [])
+        if not annotations:
+            return "SKIP_NO_ANNOTATIONS"
+
+        result_list = annotations[0].get("result", [])
+        for item in result_list:
+            if item.get("type") == "keypointlabels":
+                val = item.get("value", {})
+                labels = val.get("keypointlabels", [])
+
+                if not labels:
+                    continue
+
+                label_name = labels[0]
+                if label_name not in LANDMARK_CLASSES:
+                    continue
+
+                channel_idx = LANDMARK_CLASSES.index(label_name)
+
+                orig_w = float(item.get("original_width", w))
+                orig_h = float(item.get("original_height", h))
+                abs_x = (float(val.get("x", 0.0)) * orig_w) / 100.0
+                abs_y = (float(val.get("y", 0.0)) * orig_h) / 100.0
+
+                heatmap_layer = generate_gaussian_heatmap((h, w), (abs_x, abs_y), sigma)
+                heatmaps[channel_idx] = heatmap_layer.astype(np.float16)
+
+                norm_x = float(val.get("x", 0.0)) / 100.0
+                norm_y = float(val.get("y", 0.0)) / 100.0
+                coords[channel_idx] = [norm_x, norm_y]
+
+                valid_keypoints += 1
 
     if valid_keypoints == 0:
         return "SKIP_NO_VALID_KEYPOINTS"
@@ -115,7 +146,8 @@ def generate_labels(
     max_workers: int | None = None,
 ) -> int:
     """
-    Processes Label Studio JSON export into NPZ heatmap masks and GCN coordinates.
+    Processes export JSON (CVM Backend API or Label Studio) into NPZ heatmap masks and GCN coordinates.
+    Automatically skips records marked as review_needed.
 
     Returns:
         int: Number of successfully generated label files (.npz).
@@ -129,12 +161,20 @@ def generate_labels(
     prepare_empty_directory(output_dir)
 
     with open(json_path, "r", encoding="utf-8") as f:
-        data = json.load(f)
+        raw_data = json.load(f)
+
+    if isinstance(raw_data, dict) and "data" in raw_data:
+        data = raw_data["data"]
+    elif isinstance(raw_data, list):
+        data = raw_data
+    else:
+        data = []
 
     print(f"Found {len(data)} records in {os.path.basename(json_path)}")
 
     processed_count = 0
     missing_images = 0
+    skipped_review = 0
 
     worker_func = partial(
         process_single_record, images_dir=images_dir, output_dir=output_dir, sigma=sigma
@@ -158,10 +198,14 @@ def generate_labels(
                 processed_count += 1
             elif result == "MISSING_IMAGE":
                 missing_images += 1
+            elif result == "SKIP_REVIEW_NEEDED":
+                skipped_review += 1
 
     print("\n" + "-" * 30)
     print("Export Complete!")
     print(f"Successfully generated: {processed_count} .npz files.")
+    if skipped_review > 0:
+        print(f"Skipped review_needed images: {skipped_review}")
     if missing_images > 0:
         print(f"Missing images in directory: {missing_images}")
 
@@ -174,14 +218,14 @@ process_label_studio_export = generate_labels
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Process Label Studio keypoint exports into NPZ heatmap masks and GCN coordinates."
+        description="Process keypoint exports (CVM API or Label Studio) into NPZ heatmap masks and GCN coordinates."
     )
 
     parser.add_argument(
         "--json_path",
         type=str,
         default="data/exports/export.json",
-        help="Path to Label Studio JSON export file",
+        help="Path to JSON export file",
     )
     parser.add_argument(
         "--images_dir",

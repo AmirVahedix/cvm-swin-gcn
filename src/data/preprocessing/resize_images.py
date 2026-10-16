@@ -3,37 +3,73 @@ import os
 import cv2
 import numpy as np
 import argparse
+from pathlib import Path
 from tqdm import tqdm
 
 
 def resize_images(img_dir, json_path, out_img_dir, out_json_path, target_size=1024):
     """
-    Reads Label Studio JSON, resizes images of any size/aspect ratio to target_size x target_size
-    without cropping or distortion using letterboxing padding, and translates JSON annotation coordinates.
+    Reads export JSON (CVM Backend API or Label Studio), resizes images of any size/aspect ratio
+    to target_size x target_size without cropping or distortion using letterboxing padding,
+    and translates JSON annotation coordinates.
+    Skips images marked as review_needed.
     """
     os.makedirs(out_img_dir, exist_ok=True)
     os.makedirs(os.path.dirname(out_json_path) or ".", exist_ok=True)
 
     print(f"📄 Loading JSON from: {json_path}")
     with open(json_path, "r", encoding="utf-8") as f:
-        tasks = json.load(f)
+        raw_data = json.load(f)
 
+    if isinstance(raw_data, dict) and "data" in raw_data:
+        tasks = raw_data["data"]
+        is_wrapped = True
+    else:
+        tasks = raw_data
+        is_wrapped = False
+
+    processed_tasks = []
     processed_count = 0
     skipped_count = 0
+    skipped_review_count = 0
+
+    dimensions_map_path = Path("data/image_dimensions.json")
+    dim_map = {}
+    if dimensions_map_path.exists():
+        try:
+            with open(dimensions_map_path, "r", encoding="utf-8") as f_dim:
+                dim_map = json.load(f_dim)
+        except Exception:
+            dim_map = {}
 
     for task in tqdm(
         tasks, desc="Processing Images & Labels", unit="img", colour="blue"
     ):
-        img_url = task["data"]["img"]
+        # 1. Skip if marked as review_needed
+        if task.get("review_needed") or task.get("reviewNeeded"):
+            skipped_review_count += 1
+            continue
 
-        # Replicate filename cleaning logic
-        base_name = os.path.splitext(os.path.basename(img_url))[0]
-        clean_name = (
-            img_url.split("-", 1)[1] if "-" in base_name else os.path.basename(img_url)
-        )
-        img_ext = os.path.splitext(clean_name)[1]
-        clean_base_name = os.path.splitext(clean_name)[0]
-        img_filename = f"{clean_base_name}{img_ext}"
+        # 2. Extract image filename
+        if "filename" in task and task["filename"]:
+            img_filename = task["filename"]
+        else:
+            img_url = (
+                task.get("data", {}).get("img")
+                or task.get("data", {}).get("image")
+                or task.get("file_upload")
+                or ""
+            )
+            if not img_url:
+                skipped_count += 1
+                continue
+            base_name = os.path.splitext(os.path.basename(img_url))[0]
+            clean_name = (
+                img_url.split("-", 1)[1] if "-" in base_name else os.path.basename(img_url)
+            )
+            img_ext = os.path.splitext(clean_name)[1]
+            clean_base_name = os.path.splitext(clean_name)[0]
+            img_filename = f"{clean_base_name}{img_ext}"
 
         img_path = os.path.join(img_dir, img_filename)
         out_path = os.path.join(out_img_dir, img_filename)
@@ -43,7 +79,7 @@ def resize_images(img_dir, json_path, out_img_dir, out_json_path, target_size=10
             skipped_count += 1
             continue
 
-        # Read image
+        # 3. Read image
         img = cv2.imread(img_path)
         if img is None:
             tqdm.write(f"❌ Failed to read: {img_filename}")
@@ -51,8 +87,9 @@ def resize_images(img_dir, json_path, out_img_dir, out_json_path, target_size=10
             continue
 
         h, w = img.shape[:2]
+        dim_map[img_filename] = {"orig_w": int(w), "orig_h": int(h)}
 
-        # Calculate uniform scale factor to preserve aspect ratio without cropping
+        # 4. Calculate uniform scale factor to preserve aspect ratio without cropping
         scale = min(target_size / w, target_size / h)
         new_w = int(round(w * scale))
         new_h = int(round(h * scale))
@@ -60,7 +97,7 @@ def resize_images(img_dir, json_path, out_img_dir, out_json_path, target_size=10
         interp = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_CUBIC
         resized_img = cv2.resize(img, (new_w, new_h), interpolation=interp)
 
-        # Calculate symmetric letterbox padding
+        # 5. Calculate symmetric letterbox padding
         pad_x_int = (target_size - new_w) // 2
         pad_y_int = (target_size - new_h) // 2
 
@@ -80,15 +117,62 @@ def resize_images(img_dir, json_path, out_img_dir, out_json_path, target_size=10
         pad_x = float(pad_x_int)
         pad_y = float(pad_y_int)
 
-        # Update JSON coordinates to account for scaling and letterbox padding
-        update_annotations(task, h, w, target_size, scale_x, scale_y, pad_x, pad_y)
+        # 6. Update JSON coordinates to account for scaling and letterbox padding
+        if "landmarks" in task and isinstance(task["landmarks"], list):
+            # CVM Backend API format: landmarks have normalized 'x', 'y' (0..1) on original image
+            for lm in task["landmarks"]:
+                raw_x = float(lm.get("x", 0.0))
+                raw_y = float(lm.get("y", 0.0))
+                # Handle both normalized [0, 1] and percentage [0, 100]
+                if raw_x > 1.0 or raw_y > 1.0:
+                    norm_x = raw_x / 100.0
+                    norm_y = raw_y / 100.0
+                else:
+                    norm_x = raw_x
+                    norm_y = raw_y
+
+                orig_abs_x = norm_x * float(w)
+                orig_abs_y = norm_y * float(h)
+                new_abs_x = orig_abs_x * scale_x + pad_x
+                new_abs_y = orig_abs_y * scale_y + pad_y
+                new_norm_x = new_abs_x / float(target_size)
+                new_norm_y = new_abs_y / float(target_size)
+
+                lm["x"] = round(new_norm_x, 6)
+                lm["y"] = round(new_norm_y, 6)
+                lm["normX"] = round(new_norm_x, 6)
+                lm["normY"] = round(new_norm_y, 6)
+                lm["pixelX"] = round(new_abs_x, 2)
+                lm["pixelY"] = round(new_abs_y, 2)
+
+        if "annotations" in task and isinstance(task["annotations"], list):
+            # Label Studio format
+            update_annotations(task, h, w, target_size, scale_x, scale_y, pad_x, pad_y)
+
+        processed_tasks.append(task)
         processed_count += 1
 
+    # Persist updated dimension map
+    try:
+        os.makedirs(dimensions_map_path.parent, exist_ok=True)
+        with open(dimensions_map_path, "w", encoding="utf-8") as f_dim:
+            json.dump(dim_map, f_dim, indent=2)
+    except Exception as e:
+        print(f"⚠️ Could not save image_dimensions.json: {e}")
+
+    # Save output JSON
     print(f"💾 Saving updated JSON export to: {out_json_path}")
     with open(out_json_path, "w", encoding="utf-8") as f:
-        json.dump(tasks, f, indent=4)
+        if is_wrapped:
+            raw_data["data"] = processed_tasks
+            raw_data["totalExported"] = len(processed_tasks)
+            json.dump(raw_data, f, indent=4)
+        else:
+            json.dump(processed_tasks, f, indent=4)
 
-    print(f"\n🚀 Done! Processed {processed_count} images. Skipped {skipped_count}.")
+    print(
+        f"\n🚀 Done! Processed {processed_count} images. Skipped {skipped_count} (missing/corrupt), {skipped_review_count} (review_needed)."
+    )
 
 
 def update_annotations(task, orig_h, orig_w, target_size, scale_x, scale_y, pad_x, pad_y):
@@ -166,7 +250,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--json_path",
         default="data/raw/exports/export.json",
-        help="Path to the original Label Studio JSON export.",
+        help="Path to the original export JSON.",
     )
     parser.add_argument(
         "--out_img_dir",
