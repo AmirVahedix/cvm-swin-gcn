@@ -370,6 +370,13 @@ def main():
         default=float(os.getenv("BALANCED_SAMPLING_POWER", "0.5")),
         help="Smoothing exponent for class-weighted balanced sampling (1.0 = strict 1/N, 0.5 = smoothed 1/sqrt(N), 0.0 = uniform, default: 0.5).",
     )
+    parser.add_argument(
+        "--max-workers",
+        "-j",
+        type=int,
+        default=int(os.getenv("MAX_WORKERS", "10")),
+        help="Number of concurrent worker threads for downloading images (default: 10 or $MAX_WORKERS).",
+    )
 
     args = parser.parse_args()
     if args.legacy_label_studio:
@@ -433,6 +440,7 @@ def main():
                     api_token=args.api_token,
                     skip_review_needed=args.skip_review_needed,
                     skip_excluded=args.skip_excluded,
+                    max_workers=args.max_workers,
                 )
                 print("-" * 20)
             else:

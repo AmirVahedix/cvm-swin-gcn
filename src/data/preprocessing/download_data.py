@@ -7,6 +7,7 @@ from urllib.parse import urlparse, parse_qs
 from datetime import datetime
 from dotenv import load_dotenv
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from urllib3.util import Retry
 from tqdm import tqdm
 
 load_dotenv()
@@ -100,8 +101,16 @@ def download_from_label_studio(
     os.makedirs(export_dir, exist_ok=True)
 
     session = requests.Session()
+    retries = Retry(
+        total=3,
+        backoff_factor=0.5,
+        status_forcelist=[500, 502, 503, 504],
+        raise_on_status=False,
+    )
     adapter = requests.adapters.HTTPAdapter(
-        pool_connections=max_workers, pool_maxsize=max_workers
+        pool_connections=max_workers,
+        pool_maxsize=max_workers,
+        max_retries=retries,
     )
     session.mount("http://", adapter)
     session.mount("https://", adapter)
@@ -228,8 +237,16 @@ def download_from_cvm_api(
     os.makedirs(export_dir, exist_ok=True)
 
     session = requests.Session()
+    retries = Retry(
+        total=3,
+        backoff_factor=0.5,
+        status_forcelist=[500, 502, 503, 504],
+        raise_on_status=False,
+    )
     adapter = requests.adapters.HTTPAdapter(
-        pool_connections=max_workers, pool_maxsize=max_workers
+        pool_connections=max_workers,
+        pool_maxsize=max_workers,
+        max_retries=retries,
     )
     session.mount("http://", adapter)
     session.mount("https://", adapter)
@@ -503,6 +520,13 @@ if __name__ == "__main__":
         help="Do not skip images marked as excluded.",
     )
     parser.add_argument(
+        "--max-workers",
+        "-j",
+        type=int,
+        default=int(os.getenv("MAX_WORKERS", "10")),
+        help="Number of concurrent worker threads for downloading images (default: 10 or $MAX_WORKERS).",
+    )
+    parser.add_argument(
         "--out_img_dir",
         default="data/raw/images",
         help="Directory to save the downloaded images",
@@ -523,4 +547,6 @@ if __name__ == "__main__":
         api_url=args.api_url,
         api_token=args.api_token,
         skip_review_needed=args.skip_review_needed,
+        skip_excluded=args.skip_excluded,
+        max_workers=args.max_workers,
     )

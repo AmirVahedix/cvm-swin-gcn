@@ -1332,6 +1332,13 @@ def main():
         help="Do not skip images marked as excluded.",
     )
     parser.add_argument(
+        "--max-workers",
+        "-j",
+        type=int,
+        default=int(os.getenv("MAX_WORKERS", "10")),
+        help="Number of concurrent worker threads for downloading images (default: 10 or $MAX_WORKERS).",
+    )
+    parser.add_argument(
         "--skip-download",
         action="store_true",
         help="Skip downloading raw export and images.",
@@ -1420,6 +1427,7 @@ def main():
                 api_token=args.api_token,
                 skip_review_needed=args.skip_review_needed,
                 skip_excluded=args.skip_excluded,
+                max_workers=args.max_workers,
             )
         else:
             print("\n[Step 1/3] Skipping download as requested.")
