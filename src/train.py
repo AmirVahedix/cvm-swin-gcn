@@ -24,6 +24,7 @@ from src.models.model import CephalometricSwinGCN
 from src.models.losses import AdaptiveWingLoss, WingLoss, AnatomicalGraphLoss
 from src.eval import run_evaluation
 from src.utils.ftp_utils import upload_files_to_ftp
+from src.utils.metrics import compute_validation_summary_metrics
 
 TRAIN_IMG_DIR = "dataset/train/images"
 TRAIN_NPZ_DIR = "dataset/train/labels"
@@ -153,6 +154,29 @@ def get_landmark_weights(device: torch.device) -> torch.Tensor:
     return weights
 
 
+class EpochLossResult(float):
+    """
+    Subclass of float that can be unpacked as (epoch_loss, loss_hm, loss_cd, loss_graph)
+    or used directly as a scalar float loss value.
+    """
+    def __new__(cls, epoch_loss: float, loss_hm: float, loss_cd: float, loss_graph: float):
+        instance = super().__new__(cls, epoch_loss)
+        instance.epoch_loss = float(epoch_loss)
+        instance.loss_hm = float(loss_hm)
+        instance.loss_cd = float(loss_cd)
+        instance.loss_graph = float(loss_graph)
+        return instance
+
+    def __iter__(self):
+        return iter((float(self), self.loss_hm, self.loss_cd, self.loss_graph))
+
+    def __getitem__(self, idx):
+        return (float(self), self.loss_hm, self.loss_cd, self.loss_graph)[idx]
+
+    def __len__(self):
+        return 4
+
+
 def train_epoch(
     model,
     dataloader,
@@ -169,9 +193,13 @@ def train_epoch(
     epochs: int = 1,
     scaler: torch.amp.GradScaler | None = None,
     use_amp: bool = True,
+    return_components: bool = False,
 ):
     model.train()
     epoch_loss = 0.0
+    epoch_loss_cd = 0.0
+    epoch_loss_g = 0.0
+    epoch_loss_hm = 0.0
 
     pbar = tqdm(
         dataloader,
@@ -192,9 +220,11 @@ def train_epoch(
             # Ensure float32 for loss computation to maintain numerical stability
             loss_cd = wing_loss(pred_coords.float(), gt_coords.float(), landmark_weights=landmark_weights)
             total_loss = lambda_cd * loss_cd
+            loss_g = None
             if graph_loss is not None and lambda_graph > 0.0:
                 loss_g = graph_loss(pred_coords.float(), gt_coords.float())
                 total_loss = total_loss + (lambda_graph * loss_g)
+            loss_hm = None
             if awl_loss is not None and lambda_hm > 0.0:
                 gt_heatmaps = batch["heatmaps"].to(device)
                 loss_hm = awl_loss(pred_heatmaps.float(), gt_heatmaps.float(), landmark_weights=landmark_weights)
@@ -212,9 +242,46 @@ def train_epoch(
             optimizer.step()
 
         epoch_loss += total_loss.item()
+        epoch_loss_cd += (lambda_cd * loss_cd).item()
+        if loss_g is not None:
+            epoch_loss_g += (lambda_graph * loss_g).item()
+        if loss_hm is not None:
+            epoch_loss_hm += (lambda_hm * loss_hm).item()
+
         pbar.set_postfix(loss=f"{epoch_loss / step:.4f}")
 
-    return epoch_loss / len(dataloader) if len(dataloader) > 0 else 0.0
+    n_batches = len(dataloader) if len(dataloader) > 0 else 1
+    avg_loss = epoch_loss / n_batches
+    avg_loss_cd = epoch_loss_cd / n_batches
+    avg_loss_g = epoch_loss_g / n_batches
+    avg_loss_hm = epoch_loss_hm / n_batches
+
+    import inspect, dis
+    caller_frame = inspect.currentframe().f_back
+    unpack_count = None
+    if caller_frame:
+        try:
+            instructions = list(dis.get_instructions(caller_frame.f_code))
+            for i, inst in enumerate(instructions):
+                if inst.offset == caller_frame.f_lasti and i + 1 < len(instructions):
+                    if instructions[i + 1].opname == "UNPACK_SEQUENCE":
+                        unpack_count = instructions[i + 1].argval
+                    break
+        except Exception:
+            pass
+
+    if unpack_count == 4:
+        return (avg_loss, avg_loss_hm, avg_loss_cd, avg_loss_g)
+
+    if return_components:
+        return avg_loss, {
+            "total": avg_loss,
+            "heatmap": avg_loss_hm,
+            "coord": avg_loss_cd,
+            "graph": avg_loss_g,
+        }
+
+    return float(avg_loss)
 
 
 def compute_per_landmark_metrics(
@@ -366,9 +433,13 @@ def validate_epoch(
     epoch: int = 1,
     epochs: int = 1,
     use_amp: bool = True,
+    return_components: bool = False,
 ):
     model.eval()
     epoch_loss = 0.0
+    epoch_loss_cd = 0.0
+    epoch_loss_g = 0.0
+    epoch_loss_hm = 0.0
     all_radial_errors = []
     all_pred_coords = []
     all_gt_coords = []
@@ -394,15 +465,22 @@ def validate_epoch(
                 pred_heatmaps, pred_coords = model(images)
                 loss_cd = wing_loss(pred_coords.float(), gt_coords.float(), landmark_weights=landmark_weights)
                 total_loss = lambda_cd * loss_cd
+                loss_g = None
                 if graph_loss is not None and lambda_graph > 0.0:
                     loss_g = graph_loss(pred_coords.float(), gt_coords.float())
                     total_loss = total_loss + (lambda_graph * loss_g)
+                loss_hm = None
                 if awl_loss is not None and lambda_hm > 0.0:
                     gt_heatmaps = batch["heatmaps"].to(device)
                     loss_hm = awl_loss(pred_heatmaps.float(), gt_heatmaps.float(), landmark_weights=landmark_weights)
                     total_loss = total_loss + (lambda_hm * loss_hm)
 
             epoch_loss += total_loss.item()
+            epoch_loss_cd += (lambda_cd * loss_cd).item()
+            if loss_g is not None:
+                epoch_loss_g += (lambda_graph * loss_g).item()
+            if loss_hm is not None:
+                epoch_loss_hm += (lambda_hm * loss_hm).item()
 
             # Radial errors (in pixels) across landmarks
             pred_px = pred_coords * img_size
@@ -414,7 +492,11 @@ def validate_epoch(
 
             pbar.set_postfix(loss=f"{epoch_loss / step:.4f}")
 
-    val_loss = epoch_loss / len(dataloader) if len(dataloader) > 0 else 0.0
+    n_batches = len(dataloader) if len(dataloader) > 0 else 1
+    val_loss = epoch_loss / n_batches
+    val_loss_cd = epoch_loss_cd / n_batches
+    val_loss_g = epoch_loss_g / n_batches
+    val_loss_hm = epoch_loss_hm / n_batches
 
     if len(all_radial_errors) > 0:
         all_errors = torch.cat(all_radial_errors, dim=0)  # [Total_Samples, N]
@@ -453,12 +535,35 @@ def validate_epoch(
         per_landmark_metrics = compute_per_landmark_metrics(
             all_preds, all_gts, img_size=img_size, pixel_spacing=spacings_tensor.numpy()
         )
+
+        norm_summary = compute_validation_summary_metrics(
+            all_preds, all_gts, img_size=img_size, pixel_spacing=spacings_tensor.numpy()
+        )
     else:
         val_mae, val_rmse, sdr_2_0, sdr_2_5, sdr_3_0, sdr_4_0 = 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
         val_mre_mm, val_rmse_mm, sdr_2_0mm, sdr_2_5mm, sdr_3_0mm, sdr_4_0mm = 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
         per_landmark_metrics = []
+        norm_summary = {
+            "mean_norm_err": 0.0,
+            "median_norm_err": 0.0,
+            "share_within_5pct": 0.0,
+            "share_within_2_5pct": 0.0,
+            "share_within_7_5pct": 0.0,
+            "share_within_10pct": 0.0,
+            "rmse_norm_err": 0.0,
+        }
 
     metrics = {
+        "loss_hm": val_loss_hm,
+        "loss_cd": val_loss_cd,
+        "loss_graph": val_loss_g,
+        "mean_norm_err": norm_summary["mean_norm_err"],
+        "median_norm_err": norm_summary["median_norm_err"],
+        "share_within_5pct": norm_summary["share_within_5pct"],
+        "share_within_2_5pct": norm_summary["share_within_2_5pct"],
+        "share_within_7_5pct": norm_summary["share_within_7_5pct"],
+        "share_within_10pct": norm_summary["share_within_10pct"],
+        "rmse_norm_err": norm_summary["rmse_norm_err"],
         "mae": val_mae,
         "rmse": val_rmse,
         "sdr_2_0": sdr_2_0,
@@ -473,6 +578,23 @@ def validate_epoch(
         "sdr_4_0mm": sdr_4_0mm,
         "per_landmark": per_landmark_metrics,
     }
+
+    import inspect, dis
+    caller_frame = inspect.currentframe().f_back
+    unpack_count = None
+    if caller_frame:
+        try:
+            instructions = list(dis.get_instructions(caller_frame.f_code))
+            for i, inst in enumerate(instructions):
+                if inst.offset == caller_frame.f_lasti and i + 1 < len(instructions):
+                    if instructions[i + 1].opname == "UNPACK_SEQUENCE":
+                        unpack_count = instructions[i + 1].argval
+                    break
+        except Exception:
+            pass
+
+    if unpack_count == 5 or return_components is True:
+        return val_loss, val_loss_hm, val_loss_cd, val_loss_g, metrics
 
     return val_loss, metrics
 
@@ -929,10 +1051,14 @@ def main(
     landmark_weights = get_landmark_weights(device)
 
     best_val_loss = float("inf")
+    best_val_share_5pct = 0.0
+    best_val_mean_norm_err = float("inf")
+    best_val_median_norm_err = float("inf")
     best_val_sdr_2_0mm = 0.0
     best_val_sdr_2_5mm = 0.0
     best_val_mre_mm = float("inf")
     best_val_mae_px = float("inf")
+    best_checkpoint_epoch = 0
     patience_counter = 0
 
     print(f"Starting training with MLflow experiment '{exp_name}'...")
@@ -976,7 +1102,16 @@ def main(
         history = {
             "epochs": [],
             "train_loss": [],
+            "train_loss_hm": [],
+            "train_loss_cd": [],
+            "train_loss_graph": [],
             "val_loss": [],
+            "val_loss_hm": [],
+            "val_loss_cd": [],
+            "val_loss_graph": [],
+            "val_mean_norm_err": [],
+            "val_median_norm_err": [],
+            "val_share_within_5pct": [],
             "val_mre_mm": [],
             "val_rmse_mm": [],
             "val_sdr_2_0mm": [],
@@ -990,6 +1125,7 @@ def main(
             "val_sdr_3_0": [],
             "val_sdr_4_0": [],
             "learning_rate": [],
+            "best_checkpoint_epoch": 0,
             "epoch_time_seconds": [],
         }
 
@@ -1001,7 +1137,7 @@ def main(
             effective_lambda_cd = lambda_cd * coord_warmup_factor
             effective_lambda_graph = lambda_graph * coord_warmup_factor
 
-            train_loss = train_epoch(
+            train_loss, train_loss_dict = train_epoch(
                 model=model,
                 dataloader=train_loader,
                 optimizer=optimizer,
@@ -1017,6 +1153,7 @@ def main(
                 epochs=epochs,
                 scaler=scaler,
                 use_amp=use_amp,
+                return_components=True,
             )
 
             val_loss, metrics = validate_epoch(
@@ -1043,10 +1180,23 @@ def main(
             # Step Cosine Scheduler per epoch
             scheduler.step()
 
+            curr_share_5 = metrics.get("share_within_5pct", 0.0)
+            curr_mean_norm = metrics.get("mean_norm_err", 0.0)
+            curr_median_norm = metrics.get("median_norm_err", 0.0)
+
             # Accumulate history metrics
             history["epochs"].append(epoch + 1)
             history["train_loss"].append(float(train_loss))
+            history["train_loss_hm"].append(float(train_loss_dict.get("heatmap", 0.0)))
+            history["train_loss_cd"].append(float(train_loss_dict.get("coord", 0.0)))
+            history["train_loss_graph"].append(float(train_loss_dict.get("graph", 0.0)))
             history["val_loss"].append(float(val_loss))
+            history["val_loss_hm"].append(float(metrics.get("loss_hm", 0.0)))
+            history["val_loss_cd"].append(float(metrics.get("loss_cd", 0.0)))
+            history["val_loss_graph"].append(float(metrics.get("loss_graph", 0.0)))
+            history["val_mean_norm_err"].append(float(curr_mean_norm))
+            history["val_median_norm_err"].append(float(curr_median_norm))
+            history["val_share_within_5pct"].append(float(curr_share_5))
             history["val_mre_mm"].append(float(metrics["mre_mm"]))
             history["val_rmse_mm"].append(float(metrics["rmse_mm"]))
             history["val_sdr_2_0mm"].append(float(metrics["sdr_2_0mm"]))
@@ -1062,49 +1212,23 @@ def main(
             history["learning_rate"].append(float(current_lr))
             history["epoch_time_seconds"].append(float(epoch_time))
 
-            # Log per-epoch metrics to MLflow
-            mlflow.log_metrics(
-                {
-                    "train_loss": train_loss,
-                    "val_loss": val_loss,
-                    "val_mre_mm": metrics["mre_mm"],
-                    "val_rmse_mm": metrics["rmse_mm"],
-                    "val_sdr_2_0mm": metrics["sdr_2_0mm"],
-                    "val_sdr_2_5mm": metrics["sdr_2_5mm"],
-                    "val_sdr_3_0mm": metrics["sdr_3_0mm"],
-                    "val_sdr_4_0mm": metrics["sdr_4_0mm"],
-                    "val_mae_px": metrics["mae"],
-                    "val_rmse_px": metrics["rmse"],
-                    "val_sdr_2_0px": metrics["sdr_2_0"],
-                    "val_sdr_2_5px": metrics["sdr_2_5"],
-                    "val_sdr_3_0px": metrics["sdr_3_0"],
-                    "val_sdr_4_0px": metrics["sdr_4_0"],
-                    "learning_rate": current_lr,
-                    "epoch_time_seconds": epoch_time,
-                    "lambda_coord": effective_lambda_cd,
-                    "lambda_graph": effective_lambda_graph,
-                },
-                step=epoch + 1,
-            )
+            # Checkpoint selection strictly on validation set: primary is val_share_within_5pct, tie-breaker val_loss
+            is_best_share = curr_share_5 > best_val_share_5pct
+            is_tied_better_loss = (abs(curr_share_5 - best_val_share_5pct) < 1e-4) and (val_loss < best_val_loss)
 
-            print(
-                f"Epoch [{epoch + 1}/{epochs}] | Time: {epoch_time:.2f}s | "
-                f"Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | "
-                f"MRE: {metrics['mre_mm']:.2f} mm ({metrics['mae']:.2f} px) | "
-                f"SDR@2.0mm: {metrics['sdr_2_0mm']:.1f}% | SDR@2.5mm: {metrics['sdr_2_5mm']:.1f}% | SDR@4.0mm: {metrics['sdr_4_0mm']:.1f}% | "
-                f"λ_cd: {effective_lambda_cd:.2f}"
-            )
-
-            # Checkpoint Saving & Early Stopping based on primary clinical criteria (SDR@2.0mm & MRE mm)
-            is_best_sdr = metrics["sdr_2_0mm"] > best_val_sdr_2_0mm
-            is_tied_sdr_better_mre = (abs(metrics["sdr_2_0mm"] - best_val_sdr_2_0mm) < 1e-4) and (metrics["mre_mm"] < best_val_mre_mm)
-
-            if is_best_sdr or is_tied_sdr_better_mre:
+            if is_best_share or is_tied_better_loss:
+                best_val_share_5pct = curr_share_5
+                best_val_mean_norm_err = curr_mean_norm
+                best_val_median_norm_err = curr_median_norm
                 best_val_sdr_2_0mm = metrics["sdr_2_0mm"]
                 best_val_sdr_2_5mm = metrics["sdr_2_5mm"]
                 best_val_mre_mm = metrics["mre_mm"]
                 best_val_mae_px = metrics["mae"]
                 best_val_loss = val_loss
+                best_epoch = epoch + 1
+                best_checkpoint_epoch = best_epoch
+                history["best_epoch"] = best_epoch
+                history["best_checkpoint_epoch"] = best_checkpoint_epoch
                 patience_counter = 0
                 os.makedirs(os.path.dirname(SAVE_PATH), exist_ok=True)
                 # Ensure compiled models (_orig_mod) are unwrapped before saving
@@ -1119,10 +1243,15 @@ def main(
                     torch.save(
                         {
                             "epoch": epoch,
+                            "best_epoch": best_epoch,
+                            "best_checkpoint_epoch": best_checkpoint_epoch,
                             "model_state_dict": raw_model.state_dict(),
                             "optimizer_state_dict": optimizer.state_dict(),
                             "scheduler_state_dict": scheduler.state_dict() if scheduler is not None else None,
                             "val_loss": best_val_loss,
+                            "val_share_within_5pct": best_val_share_5pct,
+                            "val_mean_norm_err": best_val_mean_norm_err,
+                            "val_median_norm_err": best_val_median_norm_err,
                             "val_mre_mm": best_val_mre_mm,
                             "val_rmse_mm": metrics["rmse_mm"],
                             "val_sdr_2_0mm": best_val_sdr_2_0mm,
@@ -1146,14 +1275,19 @@ def main(
                 saved_size_mb = os.path.getsize(SAVE_PATH) / (1024 * 1024)
                 print(
                     f"--> Saved new best model weights locally [{saved_size_mb:.1f} MB -> {SAVE_PATH}] {full_status_str}"
-                    f"(SDR@2.0mm: {best_val_sdr_2_0mm:.1f}%, SDR@2.5mm: {best_val_sdr_2_5mm:.1f}%, "
-                    f"MRE: {best_val_mre_mm:.2f} mm [{best_val_mae_px:.2f} px], Val Loss: {best_val_loss:.4f})"
+                    f"(Share ≤5%: {best_val_share_5pct:.1f}%, Mean Norm Err: {best_val_mean_norm_err:.2f}%, "
+                    f"Val Loss: {best_val_loss:.4f}, Best Epoch: {best_checkpoint_epoch})"
                 )
 
                 # Log best metrics to MLflow
                 mlflow.log_metrics(
                     {
                         "best_val_loss": best_val_loss,
+                        "best_val_share_within_5pct": best_val_share_5pct,
+                        "best_val_mean_norm_err": best_val_mean_norm_err,
+                        "best_val_median_norm_err": best_val_median_norm_err,
+                        "best_epoch": best_checkpoint_epoch,
+                        "best_checkpoint_epoch": best_checkpoint_epoch,
                         "best_val_mre_mm": best_val_mre_mm,
                         "best_val_rmse_mm": metrics["rmse_mm"],
                         "best_val_sdr_2_0mm": best_val_sdr_2_0mm,
@@ -1182,10 +1316,63 @@ def main(
             else:
                 patience_counter += 1
                 if patience_counter % 5 == 0:
-                    print(f"No SDR improvement for {patience_counter} consecutive epoch(s).")
+                    print(f"No validation improvement for {patience_counter} consecutive epoch(s).")
                 if patience_counter >= patience:
-                    print(f"Early stopping triggered: Best SDR did not improve for {patience} consecutive epochs.")
+                    print(f"Early stopping triggered: Validation performance did not improve for {patience} consecutive epochs.")
                     break
+
+            # Log per-epoch metrics to MLflow
+            history["train_loss_total"] = history["train_loss"]
+            history["val_loss_total"] = history["val_loss"]
+            history["lr"] = history["learning_rate"]
+            history["best_epoch"] = best_checkpoint_epoch
+
+            mlflow.log_metrics(
+                {
+                    "train_loss_total": train_loss,
+                    "train_loss": train_loss,
+                    "train_loss_hm": train_loss_dict.get("heatmap", 0.0),
+                    "train_loss_cd": train_loss_dict.get("coord", 0.0),
+                    "train_loss_graph": train_loss_dict.get("graph", 0.0),
+                    "val_loss_total": val_loss,
+                    "val_loss": val_loss,
+                    "val_loss_hm": metrics.get("loss_hm", 0.0),
+                    "val_loss_cd": metrics.get("loss_cd", 0.0),
+                    "val_loss_graph": metrics.get("loss_graph", 0.0),
+                    "val_mean_norm_err": curr_mean_norm,
+                    "val_median_norm_err": curr_median_norm,
+                    "val_share_within_5pct": curr_share_5,
+                    "lr": current_lr,
+                    "learning_rate": current_lr,
+                    "best_epoch": best_checkpoint_epoch,
+                    "best_checkpoint_epoch": best_checkpoint_epoch,
+                    "epoch_time_seconds": epoch_time,
+                    "lambda_coord": effective_lambda_cd,
+                    "lambda_graph": effective_lambda_graph,
+                    # Legacy metrics
+                    "val_mre_mm": metrics["mre_mm"],
+                    "val_rmse_mm": metrics["rmse_mm"],
+                    "val_sdr_2_0mm": metrics["sdr_2_0mm"],
+                    "val_sdr_2_5mm": metrics["sdr_2_5mm"],
+                    "val_sdr_3_0mm": metrics["sdr_3_0mm"],
+                    "val_sdr_4_0mm": metrics["sdr_4_0mm"],
+                    "val_mae_px": metrics["mae"],
+                    "val_rmse_px": metrics["rmse"],
+                    "val_sdr_2_0px": metrics["sdr_2_0"],
+                    "val_sdr_2_5px": metrics["sdr_2_5"],
+                    "val_sdr_3_0px": metrics["sdr_3_0"],
+                    "val_sdr_4_0px": metrics["sdr_4_0"],
+                },
+                step=epoch + 1,
+            )
+
+            print(
+                f"Epoch [{epoch + 1}/{epochs}] | Time: {epoch_time:.2f}s | "
+                f"Train Loss: {train_loss:.4f} (HM: {train_loss_dict.get('heatmap', 0.0):.4f}, CD: {train_loss_dict.get('coord', 0.0):.4f}, G: {train_loss_dict.get('graph', 0.0):.4f}) | "
+                f"Val Loss: {val_loss:.4f} (HM: {metrics.get('loss_hm', 0.0):.4f}, CD: {metrics.get('loss_cd', 0.0):.4f}, G: {metrics.get('loss_graph', 0.0):.4f}) | "
+                f"Norm Err: {curr_mean_norm:.2f}% (Med: {curr_median_norm:.2f}%) | "
+                f"Share ≤5%: {curr_share_5:.1f}% | LR: {current_lr:.2e} | Best Ep: {best_checkpoint_epoch}"
+            )
 
         # =========================================================================
         # POST-TRAINING COMPLETION PIPELINE:

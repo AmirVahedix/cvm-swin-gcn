@@ -14,6 +14,8 @@ from torch.utils.data import DataLoader
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import csv
+import math
 from dotenv import load_dotenv
 import mlflow
 
@@ -24,6 +26,17 @@ if str(ROOT_DIR) not in sys.path:
 
 from src.data import LANDMARK_CLASSES, NUM_LANDMARKS, get_test_dataloader
 from src.models.model import CephalometricSwinGCN
+from src.utils.metrics import (
+    compute_test_comprehensive_metrics,
+    format_summary_report,
+    compute_inferior_border_projections,
+    compute_reference_length,
+    determine_image_source,
+    C3_PI_IDX,
+    C3_AI_IDX,
+    VERTEBRA_INFERIOR_LANDMARKS,
+)
+from src.utils.cvm_calculator import evaluate_landmarks_dict
 
 
 LANDMARK_COLORS_BGR = [
@@ -1278,11 +1291,13 @@ def run_evaluation(
     all_preds = []
     all_gts = []
     all_spacings = []
+    all_filenames = []
 
     with torch.no_grad():
         for batch in test_loader:
             images = batch["image"].to(device)
             gt_coords = batch["coords"].cpu().numpy()
+            all_filenames.extend(batch["filename"])
             _, pred_coords = predict_batch(
                 model=model,
                 images=images,
@@ -1303,7 +1318,261 @@ def run_evaluation(
     else:
         spacings_array = pixel_spacing
 
-    # 4. Compute metrics
+    # 4. Un-Letterboxing to Native Scanner Dimensions & Per-Landmark CSV Rows
+    dims_map = {}
+    dims_file = ROOT_DIR / "data" / "image_dimensions.json"
+    if dims_file.exists():
+        try:
+            with open(dims_file, "r") as f:
+                dims_map = json.load(f)
+        except Exception:
+            dims_map = {}
+
+    n_samples = len(all_filenames)
+    all_orig_dims = []
+    unletterboxed_preds_list = []
+    unletterboxed_gts_list = []
+    pred_stages_list = []
+    gt_stages_list = []
+    pred_cvm_list = []
+    gt_cvm_list = []
+    csv_rows = []
+
+    for i in range(n_samples):
+        fn = all_filenames[i]
+        orig_w, orig_h = None, None
+        stem = Path(fn).stem
+        if fn in dims_map:
+            orig_w = dims_map[fn].get("orig_w")
+            orig_h = dims_map[fn].get("orig_h")
+        elif f"{stem}.jpg" in dims_map:
+            orig_w = dims_map[f"{stem}.jpg"].get("orig_w")
+            orig_h = dims_map[f"{stem}.jpg"].get("orig_h")
+        elif f"{stem}.png" in dims_map:
+            orig_w = dims_map[f"{stem}.png"].get("orig_w")
+            orig_h = dims_map[f"{stem}.png"].get("orig_h")
+
+        if orig_w is None or orig_h is None:
+            local_p = Path(test_img_dir) / fn
+            if local_p.exists():
+                try:
+                    img_read = cv2.imread(str(local_p))
+                    if img_read is not None:
+                        orig_h, orig_w = img_read.shape[:2]
+                except Exception:
+                    pass
+        if orig_w is None or orig_h is None:
+            orig_w, orig_h = img_size, img_size
+
+        orig_w_int = int(orig_w)
+        orig_h_int = int(orig_h)
+        all_orig_dims.append((orig_w_int, orig_h_int))
+
+        scale = float(img_size) / max(orig_w_int, orig_h_int)
+        new_w = int(round(orig_w_int * scale))
+        new_h = int(round(orig_h_int * scale))
+        pad_x = (img_size - new_w) // 2
+        pad_y = (img_size - new_h) // 2
+        scale_x = float(new_w) / float(orig_w_int) if orig_w_int > 0 else 1.0
+        scale_y = float(new_h) / float(orig_h_int) if orig_h_int > 0 else 1.0
+
+        p_orig = np.zeros((NUM_LANDMARKS, 2), dtype=float)
+        g_orig = np.zeros((NUM_LANDMARKS, 2), dtype=float)
+
+        for k in range(NUM_LANDMARKS):
+            p_c_x = pred_array[i, k, 0] * img_size
+            p_c_y = pred_array[i, k, 1] * img_size
+            p_orig[k, 0] = max(0.0, min(float(orig_w_int), (p_c_x - pad_x) / scale_x))
+            p_orig[k, 1] = max(0.0, min(float(orig_h_int), (p_c_y - pad_y) / scale_y))
+
+            if gt_array[i, k, 0] >= 0 and gt_array[i, k, 1] >= 0:
+                g_c_x = gt_array[i, k, 0] * img_size
+                g_c_y = gt_array[i, k, 1] * img_size
+                g_orig[k, 0] = (g_c_x - pad_x) / scale_x
+                g_orig[k, 1] = (g_c_y - pad_y) / scale_y
+            else:
+                g_orig[k, 0] = -1.0
+                g_orig[k, 1] = -1.0
+
+        unletterboxed_preds_list.append(p_orig)
+        unletterboxed_gts_list.append(g_orig)
+
+        # Anatomical Reference Length (C3 inferior endplate width) in original pixel space
+        if g_orig[C3_AI_IDX, 0] >= 0 and g_orig[C3_PI_IDX, 0] >= 0:
+            ref_length = math.hypot(
+                g_orig[C3_AI_IDX, 0] - g_orig[C3_PI_IDX, 0],
+                g_orig[C3_AI_IDX, 1] - g_orig[C3_PI_IDX, 1],
+            )
+        else:
+            ref_length = float(orig_w_int)
+        if ref_length <= 1e-4:
+            ref_length = float(orig_w_int)
+
+        # Clinical morphometrics & stage evaluation via PercentCVMEngine
+        gt_dict = {LANDMARK_CLASSES[k]: (g_orig[k, 0], g_orig[k, 1]) for k in range(NUM_LANDMARKS)}
+        pred_dict = {LANDMARK_CLASSES[k]: (p_orig[k, 0], p_orig[k, 1]) for k in range(NUM_LANDMARKS)}
+
+        try:
+            gt_cvm = evaluate_landmarks_dict(gt_dict, img_width=orig_w_int, img_height=orig_h_int)
+            true_stage = int(gt_cvm.get("stage", -1))
+        except Exception:
+            gt_cvm = {}
+            true_stage = -1
+
+        try:
+            pred_cvm = evaluate_landmarks_dict(pred_dict, img_width=orig_w_int, img_height=orig_h_int)
+            predicted_stage = int(pred_cvm.get("stage", -1))
+        except Exception:
+            pred_cvm = {}
+            predicted_stage = -1
+
+        pred_stages_list.append(predicted_stage)
+        gt_stages_list.append(true_stage)
+        pred_cvm_list.append(pred_cvm)
+        gt_cvm_list.append(gt_cvm)
+
+        source = determine_image_source(fn, orig_w_int, orig_h_int)
+        split = "test"
+
+        # Calculate inferior border projections for this sample (along tangent & perpendicular normal)
+        projections = {}
+        for vert, lm_map in VERTEBRA_INFERIOR_LANDMARKS.items():
+            pi_k = lm_map["PI"]
+            ai_k = lm_map["AI"]
+            if g_orig[ai_k, 0] >= 0 and g_orig[pi_k, 0] >= 0:
+                base_dx = g_orig[ai_k, 0] - g_orig[pi_k, 0]
+                base_dy = g_orig[ai_k, 1] - g_orig[pi_k, 1]
+                base_len = math.hypot(base_dx, base_dy)
+                base_len_safe = base_len if base_len > 1e-4 else 1.0
+                u_along_x = base_dx / base_len_safe
+                u_along_y = base_dy / base_len_safe
+                s = 1.0 if base_dx >= 0 else -1.0
+                norm_x = s * base_dy
+                norm_y = s * (-base_dx)
+                norm_len = math.hypot(norm_x, norm_y)
+                norm_len_safe = norm_len if norm_len > 1e-4 else 1.0
+                u_perp_x = norm_x / norm_len_safe
+                u_perp_y = norm_y / norm_len_safe
+
+                for lm_type, lm_idx in lm_map.items():
+                    err_dx = p_orig[lm_idx, 0] - g_orig[lm_idx, 0]
+                    err_dy = p_orig[lm_idx, 1] - g_orig[lm_idx, 1]
+                    e_along_px = err_dx * u_along_x + err_dy * u_along_y
+                    e_perp_px = err_dx * u_perp_x + err_dy * u_perp_y
+                    e_along_pct = (e_along_px / ref_length) * 100.0
+                    e_perp_pct = (e_perp_px / ref_length) * 100.0
+                    projections[lm_idx] = (e_along_px, e_along_pct, e_perp_px, e_perp_pct)
+
+        for k in range(NUM_LANDMARKS):
+            lm_name = LANDMARK_CLASSES[k]
+            gt_x = g_orig[k, 0]
+            gt_y = g_orig[k, 1]
+            pred_x = p_orig[k, 0]
+            pred_y = p_orig[k, 1]
+            dx = pred_x - gt_x
+            dy = pred_y - gt_y
+            rad_px = math.hypot(dx, dy)
+            norm_pct = (rad_px / ref_length) * 100.0
+            dx_pct = (dx / ref_length) * 100.0
+            dy_pct = (dy / ref_length) * 100.0
+
+            if k in projections:
+                e_al_px, e_al_pct, e_pr_px, e_pr_pct = projections[k]
+                along_px_str = f"{e_al_px:.4f}"
+                along_pct_str = f"{e_al_pct:.4f}"
+                perp_px_str = f"{e_pr_px:.4f}"
+                perp_pct_str = f"{e_pr_pct:.4f}"
+            else:
+                along_px_str = ""
+                along_pct_str = ""
+                perp_px_str = ""
+                perp_pct_str = ""
+
+            csv_rows.append([
+                fn, source, split, true_stage, predicted_stage,
+                orig_w_int, orig_h_int, pad_x, pad_y, f"{scale_x:.6f}", f"{scale_y:.6f}",
+                lm_name, f"{gt_x:.4f}", f"{gt_y:.4f}", f"{pred_x:.4f}", f"{pred_y:.4f}",
+                f"{ref_length:.4f}", f"{rad_px:.4f}", f"{norm_pct:.4f}",
+                f"{dx:.4f}", f"{dy:.4f}", f"{dx_pct:.4f}", f"{dy_pct:.4f}",
+                along_px_str, along_pct_str, perp_px_str, perp_pct_str,
+            ])
+
+    # Save predictions_landmarks.csv
+    csv_path = run_folder / "predictions_landmarks.csv"
+    csv_headers = [
+        "image_id", "source", "split", "true_stage", "predicted_stage",
+        "orig_w", "orig_h", "pad_x", "pad_y", "scale_x", "scale_y",
+        "landmark_name", "gt_x", "gt_y", "pred_x", "pred_y", "ref_length",
+        "radial_error_px", "normalized_error_pct",
+        "signed_dx_px", "signed_dy_px", "signed_dx_pct", "signed_dy_pct",
+        "error_along_px", "error_along_pct", "error_perp_px", "error_perp_pct",
+    ]
+    with open(csv_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(csv_headers)
+        writer.writerows(csv_rows)
+    print(f"--> Saved audit-ready test landmark CSV ({len(csv_rows)} rows) to '{csv_path}'")
+
+    # 5. Compute Comprehensive Publication-Grade Evaluation Suite
+    pred_morphometrics = {
+        "concavities": {
+            "C2": [c.get("concavities", {}).get("C2", {}).get("concavity_percentage", 0.0) for c in pred_cvm_list],
+            "C3": [c.get("concavities", {}).get("C3", {}).get("concavity_percentage", 0.0) for c in pred_cvm_list],
+            "C4": [c.get("concavities", {}).get("C4", {}).get("concavity_percentage", 0.0) for c in pred_cvm_list],
+        },
+        "shape_indices": {
+            "C3": [c.get("shapes", {}).get("C3", {}).get("shape_index", 1.0) for c in pred_cvm_list],
+            "C4": [c.get("shapes", {}).get("C4", {}).get("shape_index", 1.0) for c in pred_cvm_list],
+        },
+        "notches": {
+            "C2": [c.get("concavities", {}).get("C2", {}).get("has_notch", False) for c in pred_cvm_list],
+            "C3": [c.get("concavities", {}).get("C3", {}).get("has_notch", False) for c in pred_cvm_list],
+            "C4": [c.get("concavities", {}).get("C4", {}).get("has_notch", False) for c in pred_cvm_list],
+        },
+        "shapes": {
+            "C3": [c.get("shapes", {}).get("C3", {}).get("shape", "Unknown") for c in pred_cvm_list],
+            "C4": [c.get("shapes", {}).get("C4", {}).get("shape", "Unknown") for c in pred_cvm_list],
+        },
+    }
+    gt_morphometrics = {
+        "concavities": {
+            "C2": [c.get("concavities", {}).get("C2", {}).get("concavity_percentage", 0.0) for c in gt_cvm_list],
+            "C3": [c.get("concavities", {}).get("C3", {}).get("concavity_percentage", 0.0) for c in gt_cvm_list],
+            "C4": [c.get("concavities", {}).get("C4", {}).get("concavity_percentage", 0.0) for c in gt_cvm_list],
+        },
+        "shape_indices": {
+            "C3": [c.get("shapes", {}).get("C3", {}).get("shape_index", 1.0) for c in gt_cvm_list],
+            "C4": [c.get("shapes", {}).get("C4", {}).get("shape_index", 1.0) for c in gt_cvm_list],
+        },
+        "notches": {
+            "C2": [c.get("concavities", {}).get("C2", {}).get("has_notch", False) for c in gt_cvm_list],
+            "C3": [c.get("concavities", {}).get("C3", {}).get("has_notch", False) for c in gt_cvm_list],
+            "C4": [c.get("concavities", {}).get("C4", {}).get("has_notch", False) for c in gt_cvm_list],
+        },
+        "shapes": {
+            "C3": [c.get("shapes", {}).get("C3", {}).get("shape", "Unknown") for c in gt_cvm_list],
+            "C4": [c.get("shapes", {}).get("C4", {}).get("shape", "Unknown") for c in gt_cvm_list],
+        },
+    }
+
+    unletterboxed_preds_arr = np.array(unletterboxed_preds_list)
+    unletterboxed_gts_arr = np.array(unletterboxed_gts_list)
+
+    comprehensive_metrics = compute_test_comprehensive_metrics(
+        pred_coords=unletterboxed_preds_arr,
+        gt_coords=unletterboxed_gts_arr,
+        sample_ids=all_filenames,
+        orig_dims=all_orig_dims,
+        pixel_spacing=spacings_array,
+        img_size=img_size,
+        pred_stages=pred_stages_list,
+        gt_stages=gt_stages_list,
+        pred_morphometrics=pred_morphometrics,
+        gt_morphometrics=gt_morphometrics,
+        n_bootstrap=1000,
+    )
+
+    # Legacy Canvas Metrics (for backward compatibility and continuity)
     summary_metrics, landmark_metrics, valid_radial_errors = compute_metrics(
         pred_coords=pred_array,
         gt_coords=gt_array,
@@ -1319,42 +1588,41 @@ def run_evaluation(
         if tta_shifts:
             summary_metrics["tta_shifts"] = [list(s) for s in tta_shifts]
 
-    # 4b. Generate metric PNG charts
+    # Generate metric PNG charts
     generate_evaluation_charts(
         summary_metrics=summary_metrics,
         landmark_metrics=landmark_metrics,
         valid_radial_errors=valid_radial_errors,
         pixel_spacing=spacings_array,
         save_dir=run_folder / "charts",
-        log_to_mlflow=False,  # We handle comprehensive MLflow logging below
+        log_to_mlflow=False,
     )
 
-    # 5. Format & print table
-    table_text = format_metrics_table(
-        summary=summary_metrics,
-        landmarks=landmark_metrics,
-        run_name=run_name,
-        weights_path=weights_path,
+    # Format publication-ready summary report
+    report_text = format_summary_report(
+        comprehensive_metrics,
+        title=f"CVM SWIN-GCN EVALUATION REPORT — {run_name}",
     )
-    print("\n" + table_text + "\n")
+    print("\n" + report_text + "\n")
 
     # 6. Save JSON metrics and summary report TXT
     metrics_export = {
         "run_name": run_name,
         "timestamp": datetime.now().isoformat(),
         "weights_path": weights_path,
+        "comprehensive": comprehensive_metrics,
         "summary": summary_metrics,
         "landmarks": landmark_metrics,
     }
 
     json_path = run_folder / "metrics.json"
-    with open(json_path, "w") as f:
+    with open(json_path, "w", encoding="utf-8") as f:
         json.dump(metrics_export, f, indent=4)
     print(f"--> Saved evaluation metrics JSON to '{json_path}'")
 
     txt_path = run_folder / "summary_report.txt"
-    with open(txt_path, "w") as f:
-        f.write(table_text + "\n")
+    with open(txt_path, "w", encoding="utf-8") as f:
+        f.write(report_text + "\n")
     print(f"--> Saved summary report text to '{txt_path}'")
 
     # 7. Render & save visualization PNGs
@@ -1384,6 +1652,9 @@ def run_evaluation(
         def _log_eval_artifacts_in_order(run_id_str: str):
             # Step 1: Log scalar metrics and .json/.txt report FIRST
             mlflow.log_metrics(clean_metrics)
+            if (run_folder / "predictions_landmarks.csv").exists():
+                mlflow.log_artifact(str(run_folder / "predictions_landmarks.csv"), artifact_path="evaluation")
+                print(f"--> Successfully logged 'predictions_landmarks.csv' to MLflow artifact path 'evaluation'.")
             if (run_folder / "metrics.json").exists():
                 mlflow.log_artifact(str(run_folder / "metrics.json"), artifact_path="evaluation")
                 print(f"--> Successfully logged 'metrics.json' to MLflow artifact path 'evaluation'.")

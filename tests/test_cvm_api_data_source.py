@@ -493,6 +493,174 @@ class TestCvmApiDataSource(unittest.TestCase):
             )
             self.assertNotIsInstance(train_loader_unweighted.sampler, WeightedRandomSampler)
 
+    def test_cvm_api_download_skips_excluded(self):
+        """download_from_cvm_api should strictly skip tasks marked with excluded=True."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            export_dir = tmp_path / "exports"
+            img_dir = tmp_path / "images"
+
+            mock_tasks = [
+                {
+                    "taskId": 1,
+                    "filename": "1.jpg",
+                    "imageUrl": "http://localhost:8000/images/1.jpg",
+                    "excluded": False,
+                    "landmarks": self.sample_landmarks,
+                },
+                {
+                    "taskId": 2,
+                    "filename": "2.jpg",
+                    "imageUrl": "http://localhost:8000/images/2.jpg",
+                    "excluded": True,  # MUST BE SKIPPED
+                    "landmarks": self.sample_landmarks,
+                },
+            ]
+
+            mock_session = MagicMock()
+            mock_health = MagicMock()
+            mock_health.status_code = 200
+            mock_export = MagicMock()
+            mock_export.status_code = 200
+            mock_export.json.return_value = {"totalExported": 2, "data": mock_tasks}
+            mock_img = MagicMock()
+            mock_img.status_code = 200
+            mock_img.iter_content.return_value = [b"mock image bytes"]
+
+            def mock_get(url, **kwargs):
+                if "/api/health" in url:
+                    return mock_health
+                elif "/api/training-data" in url or "/api/export" in url:
+                    return mock_export
+                elif "/images/" in url:
+                    return mock_img
+                return mock_health
+
+            mock_session.get.side_effect = mock_get
+
+            with patch("requests.Session", return_value=mock_session):
+                count = download_from_cvm_api(
+                    export_dir=str(export_dir),
+                    img_dir=str(img_dir),
+                    api_url="http://mock-cvm:8000",
+                    skip_excluded=True,
+                )
+
+            self.assertEqual(count, 1, "Should only download 1 non-excluded image")
+            self.assertTrue((img_dir / "1.jpg").exists())
+            self.assertFalse((img_dir / "2.jpg").exists())
+
+    def test_split_dataset_with_fixed_api_cohorts_three_splits(self):
+        """split_dataset should assign all 3 fixed cohorts (train, val, test) directly with zero randomness."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            images_dir = tmp_path / "images"
+            labels_dir = tmp_path / "labels"
+            output_dir = tmp_path / "dataset"
+            images_dir.mkdir()
+            labels_dir.mkdir()
+
+            # Create 10 dummy image and label files (1.jpg .. 10.jpg)
+            dummy_img = np.zeros((10, 10, 3), dtype=np.uint8)
+            for i in range(1, 11):
+                img_file = images_dir / f"{i}.jpg"
+                cv2.imwrite(str(img_file), dummy_img)
+                label_file = labels_dir / f"{i}.npz"
+                np.savez(label_file, heatmaps=np.zeros((13, 10, 10)), coords=np.zeros((13, 2)))
+
+            # Tasks 1, 2 = test cohort; tasks 3, 4 = val cohort; tasks 5..10 = train cohort
+            export_file = tmp_path / "export.json"
+            export_data = {
+                "dataSource": "cvm-backend-api",
+                "data": [
+                    {
+                        "taskId": i,
+                        "filename": f"{i}.jpg",
+                        "isTestCohort": (i in [1, 2]),
+                        "isValCohort": (i in [3, 4]),
+                        "cohort": "test" if i in [1, 2] else ("val" if i in [3, 4] else "train"),
+                    }
+                    for i in range(1, 11)
+                ],
+            }
+            with open(export_file, "w", encoding="utf-8") as f:
+                json.dump(export_data, f)
+
+            split_res = split_dataset(
+                images_dir=str(images_dir),
+                labels_dir=str(labels_dir),
+                output_dir=str(output_dir),
+                export_json_path=str(export_file),
+                use_fixed_cohorts=True,
+            )
+
+            test_images = sorted([p.name for p in (output_dir / "test" / "images").glob("*.jpg")])
+            val_images = sorted([p.name for p in (output_dir / "val" / "images").glob("*.jpg")])
+            train_images = sorted([p.name for p in (output_dir / "train" / "images").glob("*.jpg")])
+
+            self.assertEqual(test_images, ["1.jpg", "2.jpg"])
+            self.assertEqual(val_images, ["3.jpg", "4.jpg"])
+            self.assertEqual(train_images, ["10.jpg", "5.jpg", "6.jpg", "7.jpg", "8.jpg", "9.jpg"])
+
+            self.assertEqual(split_res["test"], 2)
+            self.assertEqual(split_res["val"], 2)
+            self.assertEqual(split_res["train"], 6)
+
+            # Check that val_image_ids.json and test_image_ids.json contain the exact task IDs
+            with open(output_dir / "val_image_ids.json") as f:
+                saved_val_ids = json.load(f)
+            self.assertEqual(saved_val_ids, [3, 4])
+
+            with open(output_dir / "test_image_ids.json") as f:
+                saved_test_ids = json.load(f)
+            self.assertEqual(saved_test_ids, [1, 2])
+
+    def test_split_dataset_strictly_ignores_excluded(self):
+        """split_dataset should ignore images marked as excluded or review_needed."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            images_dir = tmp_path / "images"
+            labels_dir = tmp_path / "labels"
+            output_dir = tmp_path / "dataset"
+            images_dir.mkdir()
+            labels_dir.mkdir()
+
+            dummy_img = np.zeros((10, 10, 3), dtype=np.uint8)
+            for i in range(1, 6):
+                cv2.imwrite(str(images_dir / f"{i}.jpg"), dummy_img)
+                np.savez(labels_dir / f"{i}.npz", heatmaps=np.zeros((13, 10, 10)), coords=np.zeros((13, 2)))
+
+            # Task 4 is excluded, Task 5 is review_needed
+            export_file = tmp_path / "export.json"
+            export_data = {
+                "dataSource": "cvm-backend-api",
+                "data": [
+                    {"taskId": 1, "filename": "1.jpg", "isTestCohort": True},
+                    {"taskId": 2, "filename": "2.jpg", "isValCohort": True},
+                    {"taskId": 3, "filename": "3.jpg"},
+                    {"taskId": 4, "filename": "4.jpg", "excluded": True},
+                    {"taskId": 5, "filename": "5.jpg", "reviewNeeded": True},
+                ],
+            }
+            with open(export_file, "w", encoding="utf-8") as f:
+                json.dump(export_data, f)
+
+            split_res = split_dataset(
+                images_dir=str(images_dir),
+                labels_dir=str(labels_dir),
+                output_dir=str(output_dir),
+                export_json_path=str(export_file),
+                use_fixed_cohorts=True,
+            )
+
+            self.assertEqual(split_res["test"], 1)
+            self.assertEqual(split_res["val"], 1)
+            self.assertEqual(split_res["train"], 1)
+            self.assertFalse((output_dir / "train" / "images" / "4.jpg").exists())
+            self.assertFalse((output_dir / "val" / "images" / "4.jpg").exists())
+            self.assertFalse((output_dir / "test" / "images" / "4.jpg").exists())
+            self.assertFalse((output_dir / "train" / "images" / "5.jpg").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

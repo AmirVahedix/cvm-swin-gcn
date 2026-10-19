@@ -213,11 +213,12 @@ def download_from_cvm_api(
     api_url=None,
     api_token=None,
     skip_review_needed=True,
+    skip_excluded=True,
     max_workers=10,
 ):
     """
     Default data loader that fetches export and images from CVM Backend API (/api/training-data or /api/export).
-    Automatically skips images flagged as review_needed to exclude them from the training process.
+    Automatically skips images flagged as review_needed or excluded to exclude them from the training process.
     All data is retrieved strictly via HTTP requests from the API.
     """
     api_url = (api_url or os.getenv("CVM_API_URL") or "http://localhost:8000").rstrip("/")
@@ -247,7 +248,7 @@ def download_from_cvm_api(
             )
         print("🔑 Connected to CVM Backend API successfully.")
 
-        # Request training data directly (with exclude_review_needed=True)
+        # Request training data directly (with exclude_review_needed=True and exclude_excluded=True)
         export_endpoint = f"{api_url}/api/training-data" if skip_review_needed else f"{api_url}/api/export"
         export_resp = session.get(export_endpoint, timeout=60)
         if export_resp.status_code == 200:
@@ -259,7 +260,7 @@ def download_from_cvm_api(
         else:
             # Fallback to /api/export
             export_resp2 = session.get(
-                f"{api_url}/api/export?exclude_review_needed={'true' if skip_review_needed else 'false'}",
+                f"{api_url}/api/export?exclude_review_needed={'true' if skip_review_needed else 'false'}&exclude_excluded={'true' if skip_excluded else 'false'}",
                 timeout=60,
             )
             if export_resp2.status_code == 200:
@@ -278,22 +279,56 @@ def download_from_cvm_api(
     if not tasks:
         raise ValueError(f"Received empty dataset from CVM API at {api_url}.")
 
-    # 2. Filter out review_needed images strictly
+    # 2. Filter out review_needed and excluded images strictly
     filtered_tasks = []
     skipped_review_count = 0
+    skipped_excluded_count = 0
     test_cohort_count = 0
+    val_cohort_count = 0
+    train_cohort_count = 0
+
     for t in tasks:
         is_review_needed = bool(t.get("reviewNeeded") or t.get("review_needed"))
+        is_excluded = bool(t.get("excluded") or t.get("isExcluded") or t.get("is_excluded"))
         if skip_review_needed and is_review_needed:
             skipped_review_count += 1
             continue
-        if bool(t.get("isTestCohort") or t.get("is_test_cohort") or t.get("testCohort") or t.get("test_cohort")):
+        if skip_excluded and is_excluded:
+            skipped_excluded_count += 1
+            continue
+
+        is_test = bool(
+            t.get("isTestCohort")
+            or t.get("is_test_cohort")
+            or t.get("testCohort")
+            or t.get("test_cohort")
+            or t.get("cohort") == "test"
+        )
+        is_val = bool(
+            t.get("isValCohort")
+            or t.get("is_val_cohort")
+            or t.get("valCohort")
+            or t.get("val_cohort")
+            or t.get("cohort") == "val"
+        )
+
+        if is_test:
             test_cohort_count += 1
+        elif is_val:
+            val_cohort_count += 1
+        else:
+            train_cohort_count += 1
+
         filtered_tasks.append(t)
 
     print(f"\n📊 Total records in CVM dataset: {len(tasks)}")
-    print(f"🚫 Skipped review_needed images: {skipped_review_count} (excluded from training)")
-    print(f"🧪 Test cohort images: {test_cohort_count} (designated strictly for evaluation)")
+    if skipped_review_count > 0:
+        print(f"🚫 Skipped review_needed images: {skipped_review_count} (excluded from training)")
+    if skipped_excluded_count > 0:
+        print(f"🚫 Skipped excluded images: {skipped_excluded_count} (excluded from training)")
+    print(f"🏋️ Train cohort images: {train_cohort_count} (training cohort)")
+    print(f"🔍 Validation cohort images: {val_cohort_count} (fixed validation cohort)")
+    print(f"🧪 Test cohort images: {test_cohort_count} (fixed test cohort)")
     print(f"🎯 Total images to load: {len(filtered_tasks)}")
 
     # 3. Save JSON export
@@ -305,6 +340,12 @@ def download_from_cvm_api(
     export_payload = {
         "totalExported": len(filtered_tasks),
         "skippedReviewNeeded": skipped_review_count,
+        "skippedExcluded": skipped_excluded_count,
+        "cohortCounts": {
+            "train": train_cohort_count,
+            "val": val_cohort_count,
+            "test": test_cohort_count,
+        },
         "dataSource": "cvm-backend-api",
         "timestamp": timestamp,
         "data": filtered_tasks,
@@ -375,6 +416,7 @@ def download_export_and_images(
     api_url=None,
     api_token=None,
     skip_review_needed=True,
+    skip_excluded=True,
     max_workers=10,
 ):
     """
@@ -400,6 +442,7 @@ def download_export_and_images(
             api_url=api_url,
             api_token=api_token,
             skip_review_needed=skip_review_needed,
+            skip_excluded=skip_excluded,
             max_workers=max_workers,
         )
 
@@ -445,6 +488,19 @@ if __name__ == "__main__":
         dest="skip_review_needed",
         action="store_false",
         help="Do not skip images marked as review_needed.",
+    )
+    parser.add_argument(
+        "--skip-excluded",
+        dest="skip_excluded",
+        action="store_true",
+        default=True,
+        help="Skip images marked as excluded (default: True).",
+    )
+    parser.add_argument(
+        "--no-skip-excluded",
+        dest="skip_excluded",
+        action="store_false",
+        help="Do not skip images marked as excluded.",
     )
     parser.add_argument(
         "--out_img_dir",

@@ -58,6 +58,19 @@ def main():
         help="Skip images marked as review_needed and do not load them in training process (default: True).",
     )
     parser.add_argument(
+        "--skip-excluded",
+        dest="skip_excluded",
+        action="store_true",
+        default=True,
+        help="Skip images marked as excluded and do not load them in training process (default: True).",
+    )
+    parser.add_argument(
+        "--no-skip-excluded",
+        dest="skip_excluded",
+        action="store_false",
+        help="Do not skip images marked as excluded.",
+    )
+    parser.add_argument(
         "--epochs",
         "-e",
         type=int,
@@ -326,6 +339,19 @@ def main():
         help="Disable automatic test cohort isolation for the test split.",
     )
     parser.add_argument(
+        "--use-fixed-cohorts",
+        dest="use_fixed_cohorts",
+        action="store_true",
+        default=True,
+        help="Use fixed cohorts directly from CVM Backend API/export (train, val, test) with zero random splitting (default: True).",
+    )
+    parser.add_argument(
+        "--no-fixed-cohorts",
+        dest="use_fixed_cohorts",
+        action="store_false",
+        help="Disable fixed API cohorts and perform ratio-based splitting.",
+    )
+    parser.add_argument(
         "--balanced-sampling",
         dest="use_balanced_sampling",
         action="store_true",
@@ -406,6 +432,7 @@ def main():
                     api_url=args.api_url,
                     api_token=args.api_token,
                     skip_review_needed=args.skip_review_needed,
+                    skip_excluded=args.skip_excluded,
                 )
                 print("-" * 20)
             else:
@@ -457,10 +484,12 @@ def main():
                 fixed_test_ids_path=args.test_ids_file,
                 fixed_val_ids_path=args.val_ids_file,
                 use_test_cohort=args.use_test_cohort,
+                use_fixed_cohorts=args.use_fixed_cohorts,
             )
+            train_cnt = split_info.get("train", 0)
             val_cnt = len(split_info.get("val_ids", []))
             test_cnt = len(split_info.get("test_ids", []))
-            print(f"--> Split artifacts ready: 'val_image_ids.json' ({val_cnt} IDs), 'test_image_ids.json' ({test_cnt} IDs)")
+            print(f"--> Split artifacts ready: 'train' ({train_cnt} IDs), 'val_image_ids.json' ({val_cnt} IDs), 'test_image_ids.json' ({test_cnt} IDs)")
             print("-" * 20)
         else:
             print("\n[1-4/6] Skipping steps 1 to 4 (--train-only flag set).")

@@ -184,15 +184,31 @@ def load_fixed_id_set(file_path) -> set:
         return set()
 
 
-def extract_test_cohort_identifiers(export_json_path=None) -> tuple[set, set]:
+def extract_all_cohort_identifiers(export_json_path=None) -> dict:
     """
-    Scans candidate export JSON files for tasks flagged with:
-    'isTestCohort', 'is_test_cohort', 'testCohort', or 'test_cohort'.
+    Scans candidate export JSON files for tasks and categorizes them into:
+    'test', 'val', 'train', 'excluded', and 'review_needed'.
     Returns:
-        (cohort_ids: set, cohort_stems: set)
+        dict: {
+            "test_ids": set, "test_stems": set,
+            "val_ids": set, "val_stems": set,
+            "train_ids": set, "train_stems": set,
+            "excluded_ids": set, "excluded_stems": set,
+            "review_needed_ids": set, "review_needed_stems": set,
+        }
     """
-    cohort_ids = set()
-    cohort_stems = set()
+    cohort_data = {
+        "test_ids": set(),
+        "test_stems": set(),
+        "val_ids": set(),
+        "val_stems": set(),
+        "train_ids": set(),
+        "train_stems": set(),
+        "excluded_ids": set(),
+        "excluded_stems": set(),
+        "review_needed_ids": set(),
+        "review_needed_stems": set(),
+    }
 
     candidate_paths = []
     if export_json_path:
@@ -214,40 +230,95 @@ def extract_test_cohort_identifiers(export_json_path=None) -> tuple[set, set]:
             break
 
     if not found_path:
-        return cohort_ids, cohort_stems
+        return cohort_data
 
     try:
         with open(found_path, "r", encoding="utf-8") as f:
             raw_data = json.load(f)
         tasks = raw_data.get("data", raw_data) if isinstance(raw_data, dict) else raw_data
         for task in tasks:
-            is_cohort = bool(
+            task_id = task.get("taskId") or task.get("task_id") or task.get("id")
+            filename = task.get("filename")
+            if not filename:
+                raw_path = (
+                    task.get("file_upload")
+                    or task.get("data", {}).get("img")
+                    or task.get("data", {}).get("image")
+                )
+                if raw_path:
+                    filename = os.path.basename(urlparse(raw_path).path)
+
+            ids = set()
+            if task_id is not None:
+                ids.add(int(task_id) if str(task_id).isdigit() else str(task_id))
+                ids.add(str(task_id))
+
+            stems = set()
+            if filename:
+                stems.add(filename)
+                stems.add(Path(filename).stem)
+
+            is_excluded = bool(
+                task.get("excluded")
+                or task.get("isExcluded")
+                or task.get("is_excluded")
+            )
+            is_review_needed = bool(
+                task.get("reviewNeeded")
+                or task.get("review_needed")
+            )
+
+            if is_excluded:
+                cohort_data["excluded_ids"].update(ids)
+                cohort_data["excluded_stems"].update(stems)
+                continue
+
+            if is_review_needed:
+                cohort_data["review_needed_ids"].update(ids)
+                cohort_data["review_needed_stems"].update(stems)
+                continue
+
+            is_test = bool(
                 task.get("isTestCohort")
                 or task.get("is_test_cohort")
                 or task.get("testCohort")
                 or task.get("test_cohort")
+                or task.get("cohort") == "test"
             )
-            if is_cohort:
-                task_id = task.get("taskId") or task.get("task_id") or task.get("id")
-                if task_id is not None:
-                    cohort_ids.add(int(task_id))
-                    cohort_ids.add(str(task_id))
+            is_val = bool(
+                task.get("isValCohort")
+                or task.get("is_val_cohort")
+                or task.get("valCohort")
+                or task.get("val_cohort")
+                or task.get("cohort") == "val"
+            )
 
-                filename = task.get("filename")
-                if not filename:
-                    raw_path = task.get("file_upload") or task.get("data", {}).get("img") or task.get("data", {}).get("image")
-                    if raw_path:
-                        filename = os.path.basename(urlparse(raw_path).path)
-                if filename:
-                    cohort_stems.add(filename)
-                    cohort_stems.add(Path(filename).stem)
-        if cohort_ids or cohort_stems:
-            count = max(len(cohort_ids) // 2 if cohort_ids else 0, len(cohort_stems) // 2 if cohort_stems else 0)
-            print(f"--> Found {count} test cohort images in {found_path}")
+            if is_test:
+                cohort_data["test_ids"].update(ids)
+                cohort_data["test_stems"].update(stems)
+            elif is_val:
+                cohort_data["val_ids"].update(ids)
+                cohort_data["val_stems"].update(stems)
+            else:
+                cohort_data["train_ids"].update(ids)
+                cohort_data["train_stems"].update(stems)
+
+        test_cnt = len(cohort_data["test_stems"]) // 2 if cohort_data["test_stems"] else len(cohort_data["test_ids"]) // 2
+        val_cnt = len(cohort_data["val_stems"]) // 2 if cohort_data["val_stems"] else len(cohort_data["val_ids"]) // 2
+        train_cnt = len(cohort_data["train_stems"]) // 2 if cohort_data["train_stems"] else len(cohort_data["train_ids"]) // 2
+        print(f"--> Loaded cohort definitions from {found_path}: Train={train_cnt}, Val={val_cnt}, Test={test_cnt}")
     except Exception as e:
-        print(f"⚠️ Warning reading test cohort from {found_path}: {e}")
+        print(f"⚠️ Warning reading cohorts from {found_path}: {e}")
 
-    return cohort_ids, cohort_stems
+    return cohort_data
+
+
+def extract_test_cohort_identifiers(export_json_path=None) -> tuple[set, set]:
+    """
+    Backwards compatibility helper: returns (test_ids, test_stems).
+    """
+    cohorts = extract_all_cohort_identifiers(export_json_path=export_json_path)
+    return cohorts["test_ids"], cohorts["test_stems"]
 
 
 def split_dataset(
@@ -263,16 +334,18 @@ def split_dataset(
     fixed_test_ids_path=None,
     fixed_val_ids_path=None,
     use_test_cohort=True,
+    use_fixed_cohorts=True,
 ):
     """
-    Creates train-val-test splits for image/label pairs and copies them into output_dir structure.
-    If use_test_cohort=True (default), images marked as test_cohort in the API/export JSON
-    are strictly isolated as the test set for evaluation, and remaining images are split between train and val.
-    If fixed_test_ids_path is specified (or test_image_ids.json exists in output_dir),
-    the test set will strictly contain those exact IDs.
-    If fixed_val_ids_path is specified (or val_image_ids.json exists in output_dir),
-    the validation set will strictly contain those exact IDs, and all remaining data
-    will be allocated to the training set.
+    Assigns image/label pairs into train, val, and test splits and copies them into output_dir.
+
+    When use_fixed_cohorts=True (default), uses the fixed cohorts defined directly in the
+    CVM Backend API / export JSON (train, val, test) with zero random splitting.
+    Any images flagged as 'review_needed' or 'excluded' are strictly ignored and never placed
+    into any cohort.
+
+    If fixed cohort definitions are absent in the export or use_fixed_cohorts=False,
+    falls back to ratio-based splitting.
 
     Returns:
         dict: Counts of dataset split pairs {"train": int, "val": int, "test": int}.
@@ -295,34 +368,38 @@ def split_dataset(
             return ls_mapping[name]
         return int(stem) if stem.isdigit() else stem
 
-    # Check for fixed test IDs
+    # Extract all cohort identifiers (test, val, train, excluded, review_needed)
+    cohort_info = extract_all_cohort_identifiers(export_json_path=export_json_path)
+
+    # Check for fixed test IDs override file
     target_fixed_test_path = None
     if fixed_test_ids_path and Path(fixed_test_ids_path).exists():
         target_fixed_test_path = Path(fixed_test_ids_path)
-    elif (Path(output_dir) / "test_image_ids.json").exists():
+    elif (Path(output_dir) / "test_image_ids.json").exists() and not (cohort_info["test_ids"] or cohort_info["test_stems"]):
         target_fixed_test_path = Path(output_dir) / "test_image_ids.json"
 
     fixed_test_set = load_fixed_id_set(target_fixed_test_path)
     if fixed_test_set:
         print(f"--> Using fixed test set with {len(fixed_test_set)} IDs from: {target_fixed_test_path}")
 
-    # Check for fixed val IDs
+    # Check for fixed val IDs override file
     target_fixed_val_path = None
     if fixed_val_ids_path and Path(fixed_val_ids_path).exists():
         target_fixed_val_path = Path(fixed_val_ids_path)
-    elif (Path(output_dir) / "val_image_ids.json").exists():
+    elif (Path(output_dir) / "val_image_ids.json").exists() and not (cohort_info["val_ids"] or cohort_info["val_stems"]):
         target_fixed_val_path = Path(output_dir) / "val_image_ids.json"
 
     fixed_val_set = load_fixed_id_set(target_fixed_val_path)
     if fixed_val_set:
         print(f"--> Using fixed val set with {len(fixed_val_set)} IDs from: {target_fixed_val_path}")
 
-    # Check for overlap between fixed test and val sets
-    overlap = fixed_test_set.intersection(fixed_val_set)
-    if overlap:
-        raise ValueError(
-            f"Data leakage detected! Fixed test and validation sets share {len(overlap)} overlapping IDs: {overlap}"
-        )
+    # Check for overlap between explicitly provided fixed test and val files
+    if fixed_test_set and fixed_val_set:
+        overlap = fixed_test_set.intersection(fixed_val_set)
+        if overlap:
+            raise ValueError(
+                f"Data leakage detected! Fixed test and validation sets share {len(overlap)} overlapping IDs: {overlap}"
+            )
 
     setup_directories(output_dir, clean_output=clean_output)
     paired_files = get_paired_files(images_dir, labels_dir)
@@ -331,47 +408,104 @@ def split_dataset(
         print("No paired files found. Please check your input directories.")
         return {"train": 0, "val": 0, "test": 0}
 
-    # Extract test cohort if enabled and no manual fixed_test_set specified
-    cohort_ids, cohort_stems = (set(), set())
-    if use_test_cohort and not fixed_test_set:
-        cohort_ids, cohort_stems = extract_test_cohort_identifiers(export_json_path=export_json_path)
-
-    # First split: Separate test set (using fixed test set or test cohort if available)
-    if fixed_test_set:
-        test_pairs = [p for p in paired_files if resolve_image_id(p[0]) in fixed_test_set]
-        temp_pairs = [p for p in paired_files if resolve_image_id(p[0]) not in fixed_test_set]
-        print(f"--> Successfully matched {len(test_pairs)} exact test pairs using fixed test IDs.")
-    elif cohort_ids or cohort_stems:
-        def is_in_cohort(img_path):
-            stem = Path(img_path).stem
-            name = Path(img_path).name
-            img_id = resolve_image_id(img_path)
-            return (img_id in cohort_ids) or (stem in cohort_stems) or (name in cohort_stems)
-
-        test_pairs = [p for p in paired_files if is_in_cohort(p[0])]
-        temp_pairs = [p for p in paired_files if not is_in_cohort(p[0])]
-        print(f"--> Isolated {len(test_pairs)} test cohort images strictly for evaluation test split.")
-        print(f"--> Remaining {len(temp_pairs)} non-test images will be split between train and validation.")
-    elif test_ratio > 0:
-        temp_pairs, test_pairs = train_test_split(
-            paired_files, test_size=test_ratio, random_state=seed
+    # Filter out any files flagged as excluded or review_needed
+    def is_ignored(img_path):
+        stem = Path(img_path).stem
+        name = Path(img_path).name
+        img_id = resolve_image_id(img_path)
+        return (
+            (img_id in cohort_info["excluded_ids"])
+            or (stem in cohort_info["excluded_stems"])
+            or (name in cohort_info["excluded_stems"])
+            or (img_id in cohort_info["review_needed_ids"])
+            or (stem in cohort_info["review_needed_stems"])
+            or (name in cohort_info["review_needed_stems"])
         )
-    else:
-        temp_pairs, test_pairs = paired_files, []
 
-    # Second split: Separate train and validation sets from temp_pairs
-    if fixed_val_set:
-        val_pairs = [p for p in temp_pairs if resolve_image_id(p[0]) in fixed_val_set]
-        train_pairs = [p for p in temp_pairs if resolve_image_id(p[0]) not in fixed_val_set]
-        print(f"--> Successfully matched {len(val_pairs)} exact validation pairs using fixed val IDs.")
-        print(f"--> Remaining {len(train_pairs)} pairs assigned to training set (zero randomness).")
-    elif val_ratio > 0 and len(temp_pairs) > 0:
-        relative_val_ratio = val_ratio / (train_ratio + val_ratio) if (train_ratio + val_ratio > 0) else val_ratio
-        train_pairs, val_pairs = train_test_split(
-            temp_pairs, test_size=relative_val_ratio, random_state=seed
+    clean_pairs = [p for p in paired_files if not is_ignored(p[0])]
+    skipped_count = len(paired_files) - len(clean_pairs)
+    if skipped_count > 0:
+        print(f"--> Strictly excluded {skipped_count} images flagged as 'review_needed' or 'excluded' from dataset splits.")
+
+    def matches_test(img_path):
+        if fixed_test_set:
+            return resolve_image_id(img_path) in fixed_test_set
+        if not use_test_cohort:
+            return False
+        stem = Path(img_path).stem
+        name = Path(img_path).name
+        img_id = resolve_image_id(img_path)
+        return (
+            (img_id in cohort_info["test_ids"])
+            or (stem in cohort_info["test_stems"])
+            or (name in cohort_info["test_stems"])
         )
+
+    def matches_val(img_path):
+        if fixed_val_set:
+            return resolve_image_id(img_path) in fixed_val_set
+        stem = Path(img_path).stem
+        name = Path(img_path).name
+        img_id = resolve_image_id(img_path)
+        return (
+            (img_id in cohort_info["val_ids"])
+            or (stem in cohort_info["val_stems"])
+            or (name in cohort_info["val_stems"])
+        )
+
+    has_fixed_api_cohorts = bool(
+        (cohort_info["test_ids"] or cohort_info["test_stems"] or fixed_test_set)
+        and (cohort_info["val_ids"] or cohort_info["val_stems"] or fixed_val_set)
+    )
+
+    if use_fixed_cohorts and has_fixed_api_cohorts:
+        # Strict API cohorts: zero random splitting
+        test_pairs = [p for p in clean_pairs if matches_test(p[0])]
+        val_pairs = [p for p in clean_pairs if not matches_test(p[0]) and matches_val(p[0])]
+        train_pairs = [p for p in clean_pairs if not matches_test(p[0]) and not matches_val(p[0])]
+        print(f"\n--> ✅ Using Fixed API Cohorts (Zero Random Splitting):")
+        print(f"    • Train cohort:      {len(train_pairs)} pairs")
+        print(f"    • Validation cohort: {len(val_pairs)} pairs")
+        print(f"    • Test cohort:       {len(test_pairs)} pairs")
     else:
-        train_pairs, val_pairs = temp_pairs, []
+        # Fallback: Ratio-based splitting or partial fixed sets
+        if fixed_test_set or (use_test_cohort and (cohort_info["test_ids"] or cohort_info["test_stems"])):
+            test_pairs = [p for p in clean_pairs if matches_test(p[0])]
+            temp_pairs = [p for p in clean_pairs if not matches_test(p[0])]
+            print(f"--> Isolated {len(test_pairs)} test cohort images strictly for evaluation test split.")
+        elif test_ratio > 0:
+            temp_pairs, test_pairs = train_test_split(
+                clean_pairs, test_size=test_ratio, random_state=seed
+            )
+        else:
+            temp_pairs, test_pairs = clean_pairs, []
+
+        if fixed_val_set or (cohort_info["val_ids"] or cohort_info["val_stems"]):
+            val_pairs = [p for p in temp_pairs if matches_val(p[0])]
+            train_pairs = [p for p in temp_pairs if not matches_val(p[0])]
+            print(f"--> Matched {len(val_pairs)} validation pairs from fixed validation set.")
+        elif val_ratio > 0 and len(temp_pairs) > 0:
+            relative_val_ratio = val_ratio / (train_ratio + val_ratio) if (train_ratio + val_ratio > 0) else val_ratio
+            train_pairs, val_pairs = train_test_split(
+                temp_pairs, test_size=relative_val_ratio, random_state=seed
+            )
+        else:
+            train_pairs, val_pairs = temp_pairs, []
+
+    # Verify no data leakage between splits
+    test_ids_set = {resolve_image_id(p[0]) for p in test_pairs}
+    val_ids_set = {resolve_image_id(p[0]) for p in val_pairs}
+    train_ids_set = {resolve_image_id(p[0]) for p in train_pairs}
+
+    overlap_test_val = test_ids_set.intersection(val_ids_set)
+    if overlap_test_val:
+        raise ValueError(f"Data leakage detected! Test and validation sets share overlapping IDs: {overlap_test_val}")
+    overlap_train_val = train_ids_set.intersection(val_ids_set)
+    if overlap_train_val:
+        raise ValueError(f"Data leakage detected! Train and validation sets share overlapping IDs: {overlap_train_val}")
+    overlap_train_test = train_ids_set.intersection(test_ids_set)
+    if overlap_train_test:
+        raise ValueError(f"Data leakage detected! Train and test sets share overlapping IDs: {overlap_train_test}")
 
     print("\n--- Starting Data Transfer ---")
     copy_files(train_pairs, "train", output_dir)
@@ -384,24 +518,32 @@ def split_dataset(
         "test": len(test_pairs),
     }
 
-    # Extract and save validation and test image ID arrays (Label Studio IDs)
+    # Extract and save validation, test, and train image ID arrays (Label Studio IDs)
     val_ids = sorted(
-        [resolve_image_id(p[0]) for p in val_pairs],
+        list(val_ids_set),
         key=lambda x: (0, x) if isinstance(x, int) else (1, str(x)),
     )
     test_ids = sorted(
-        [resolve_image_id(p[0]) for p in test_pairs],
+        list(test_ids_set),
+        key=lambda x: (0, x) if isinstance(x, int) else (1, str(x)),
+    )
+    train_ids = sorted(
+        list(train_ids_set),
         key=lambda x: (0, x) if isinstance(x, int) else (1, str(x)),
     )
 
     val_json_path = Path(output_dir) / "val_image_ids.json"
     test_json_path = Path(output_dir) / "test_image_ids.json"
+    train_json_path = Path(output_dir) / "train_image_ids.json"
 
     with open(val_json_path, "w", encoding="utf-8") as f:
         json.dump(val_ids, f, indent=2)
 
     with open(test_json_path, "w", encoding="utf-8") as f:
         json.dump(test_ids, f, indent=2)
+
+    with open(train_json_path, "w", encoding="utf-8") as f:
+        json.dump(train_ids, f, indent=2)
 
     # Save stage mapping if available in candidate exports
     try:
@@ -415,14 +557,16 @@ def split_dataset(
     except Exception as e:
         pass
 
+    split_counts["train_ids"] = train_ids
     split_counts["val_ids"] = val_ids
     split_counts["test_ids"] = test_ids
+    split_counts["train_ids_path"] = str(train_json_path)
     split_counts["val_ids_path"] = str(val_json_path)
     split_counts["test_ids_path"] = str(test_json_path)
 
     print("\n--- Split Complete ---")
     print(f"Total dataset size: {len(paired_files)}")
-    print(f"Train set: {split_counts['train']} pairs")
+    print(f"Train set: {split_counts['train']} pairs (Label Studio IDs saved to {train_json_path.name})")
     print(f"Validation set: {split_counts['val']} pairs (Label Studio IDs saved to {val_json_path.name})")
     print(f"Test set: {split_counts['test']} pairs (Label Studio IDs saved to {test_json_path.name})")
     print(f"Output stored in: {os.path.abspath(output_dir)}")
@@ -513,6 +657,19 @@ def main():
         action="store_false",
         help="Disable automatic test cohort isolation for test split.",
     )
+    parser.add_argument(
+        "--use-fixed-cohorts",
+        dest="use_fixed_cohorts",
+        action="store_true",
+        default=True,
+        help="Use fixed cohorts directly from CVM Backend API/export without random splitting (default: True).",
+    )
+    parser.add_argument(
+        "--no-fixed-cohorts",
+        dest="use_fixed_cohorts",
+        action="store_false",
+        help="Disable fixed API cohorts and perform ratio-based splitting.",
+    )
 
     args = parser.parse_args()
 
@@ -529,6 +686,7 @@ def main():
         fixed_test_ids_path=args.test_ids_file,
         fixed_val_ids_path=args.val_ids_file,
         use_test_cohort=args.use_test_cohort,
+        use_fixed_cohorts=args.use_fixed_cohorts,
     )
 
 

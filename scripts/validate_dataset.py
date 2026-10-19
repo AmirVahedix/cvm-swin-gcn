@@ -1319,6 +1319,19 @@ def main():
         help="Skip images marked as review_needed (default: True).",
     )
     parser.add_argument(
+        "--skip-excluded",
+        dest="skip_excluded",
+        action="store_true",
+        default=True,
+        help="Skip images marked as excluded (default: True).",
+    )
+    parser.add_argument(
+        "--no-skip-excluded",
+        dest="skip_excluded",
+        action="store_false",
+        help="Do not skip images marked as excluded.",
+    )
+    parser.add_argument(
         "--skip-download",
         action="store_true",
         help="Skip downloading raw export and images.",
@@ -1406,6 +1419,7 @@ def main():
                 api_url=args.api_url,
                 api_token=args.api_token,
                 skip_review_needed=args.skip_review_needed,
+                skip_excluded=args.skip_excluded,
             )
         else:
             print("\n[Step 1/3] Skipping download as requested.")

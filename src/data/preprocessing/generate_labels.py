@@ -27,9 +27,11 @@ def generate_gaussian_heatmap(shape, center, sigma=4.0):
 
 
 def process_single_record(record, images_dir, output_dir, sigma):
-    # Skip any record marked as review_needed
+    # Skip any record marked as review_needed or excluded
     if record.get("review_needed") or record.get("reviewNeeded"):
         return "SKIP_REVIEW_NEEDED"
+    if record.get("excluded") or record.get("isExcluded") or record.get("is_excluded"):
+        return "SKIP_EXCLUDED"
 
     clean_filename = None
     if "filename" in record and record["filename"]:
@@ -175,6 +177,7 @@ def generate_labels(
     processed_count = 0
     missing_images = 0
     skipped_review = 0
+    skipped_excluded = 0
 
     worker_func = partial(
         process_single_record, images_dir=images_dir, output_dir=output_dir, sigma=sigma
@@ -200,12 +203,16 @@ def generate_labels(
                 missing_images += 1
             elif result == "SKIP_REVIEW_NEEDED":
                 skipped_review += 1
+            elif result == "SKIP_EXCLUDED":
+                skipped_excluded += 1
 
     print("\n" + "-" * 30)
     print("Export Complete!")
     print(f"Successfully generated: {processed_count} .npz files.")
     if skipped_review > 0:
         print(f"Skipped review_needed images: {skipped_review}")
+    if skipped_excluded > 0:
+        print(f"Skipped excluded images: {skipped_excluded}")
     if missing_images > 0:
         print(f"Missing images in directory: {missing_images}")
 
