@@ -656,7 +656,6 @@ def compute_validation_summary_metrics(
     pred_coords: Union[np.ndarray, torch.Tensor],
     gt_coords: Union[np.ndarray, torch.Tensor],
     img_size: float = 640.0,
-    pixel_spacing: Optional[Union[float, np.ndarray, torch.Tensor]] = 0.1,
 ) -> Dict[str, float]:
     """
     Lightweight, fast metric computation executed each epoch on the validation set.
@@ -664,7 +663,9 @@ def compute_validation_summary_metrics(
     - mean_norm_err: Mean normalized error (% of C3 inferior endplate reference length)
     - median_norm_err: Median normalized error (%)
     - share_within_5pct: Share of landmarks within 5% of reference length
-    - Legacy mm and px metrics for continuous logging
+    - share_within_2_5pct, share_within_7_5pct, share_within_10pct
+    - rmse_norm_err: RMSE of normalized error (%)
+    - Canvas pixel metrics (mre_px, rmse_px)
     """
     if isinstance(pred_coords, torch.Tensor):
         pred_coords = pred_coords.detach().cpu().numpy()
@@ -683,8 +684,7 @@ def compute_validation_summary_metrics(
             "share_within_10pct": 0.0,
             "rmse_norm_err": 0.0,
             "mre_px": 0.0,
-            "mre_mm": 0.0,
-            "sdr_2_0mm": 0.0,
+            "rmse_px": 0.0,
         }
 
     # Absolute pixel coords on canvas
@@ -714,22 +714,8 @@ def compute_validation_summary_metrics(
     share_10 = float(np.mean(valid_norm_err <= 10.0) * 100.0)
     rmse_norm = float(np.sqrt(np.mean(valid_norm_err**2)))
 
-    # Legacy metrics
     mre_px = float(np.mean(valid_radial_px))
-    if pixel_spacing is not None:
-        if isinstance(pixel_spacing, torch.Tensor):
-            ps = pixel_spacing.detach().cpu().numpy()
-        else:
-            ps = np.asarray(pixel_spacing)
-        if ps.ndim > 0:
-            radial_mm = radial_px * ps[:, None]
-        else:
-            radial_mm = radial_px * float(ps)
-        mre_mm = float(np.mean(radial_mm[valid_mask]))
-        sdr_2mm = float(np.mean(radial_mm[valid_mask] <= 2.0) * 100.0)
-    else:
-        mre_mm = 0.0
-        sdr_2mm = 0.0
+    rmse_px = float(np.sqrt(np.mean(valid_radial_px**2)))
 
     return {
         "mean_norm_err": mean_norm,
@@ -740,8 +726,7 @@ def compute_validation_summary_metrics(
         "share_within_10pct": share_10,
         "rmse_norm_err": rmse_norm,
         "mre_px": mre_px,
-        "mre_mm": mre_mm,
-        "sdr_2_0mm": sdr_2mm,
+        "rmse_px": rmse_px,
     }
 
 
@@ -750,7 +735,6 @@ def compute_test_comprehensive_metrics(
     gt_coords: Union[np.ndarray, torch.Tensor],
     sample_ids: Optional[List[str]] = None,
     orig_dims: Optional[List[Tuple[int, int]]] = None,
-    pixel_spacing: Optional[Union[float, np.ndarray, torch.Tensor]] = 0.1,
     img_size: float = 640.0,
     pred_stages: Optional[Union[np.ndarray, List[int]]] = None,
     gt_stages: Optional[Union[np.ndarray, List[int]]] = None,
@@ -916,12 +900,11 @@ def compute_test_comprehensive_metrics(
                     deltas=(1.0, 2.0),
                 )
 
-    # 10. Legacy validation summary for reference
-    legacy_summary = compute_validation_summary_metrics(
+    # 10. Validation summary metrics
+    val_summary = compute_validation_summary_metrics(
         pred_coords=p_coords,
         gt_coords=g_coords,
         img_size=img_size,
-        pixel_spacing=pixel_spacing,
     )
 
     return {
@@ -935,7 +918,7 @@ def compute_test_comprehensive_metrics(
         "by_landmark": landmark_breakdown,
         "by_source": source_breakdown,
         "clinical": clinical_metrics,
-        "legacy": legacy_summary,
+        "summary": val_summary,
         "total_samples": n_samples,
     }
 

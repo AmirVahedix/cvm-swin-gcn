@@ -26,57 +26,61 @@ class TestLandmarkMetricsLogging(unittest.TestCase):
 
         # Base GT coordinates at center (0.5, 0.5)
         gt_coords = np.full((num_samples, num_landmarks, 2), 0.5, dtype=np.float32)
+        # Set C3_PI (idx 5) and C3_AI (idx 7) to define known reference length (128 px)
+        gt_coords[:, 5, 0] = 0.4
+        gt_coords[:, 5, 1] = 0.5
+        gt_coords[:, 7, 0] = 0.6
+        gt_coords[:, 7, 1] = 0.5
 
         # Pred coordinates identical to GT initially
         pred_coords = gt_coords.copy()
 
         # Landmark 0: exactly 2.0 pixels error along X
-        # 2.0 px in normalized coords: 2.0 / 640
+        # 2.0 px error / 128.0 px ref = 1.5625%
         pred_coords[:, 0, 0] += 2.0 / img_size
 
         # Landmark 1: exactly 4.0 pixels error along Y
+        # 4.0 px error / 128.0 px ref = 3.125%
         pred_coords[:, 1, 1] += 4.0 / img_size
 
-        metrics_list = compute_per_landmark_metrics(pred_coords, gt_coords, img_size=img_size, pixel_spacing=0.1)
+        metrics_list = compute_per_landmark_metrics(pred_coords, gt_coords, img_size=img_size)
 
         self.assertEqual(len(metrics_list), num_landmarks)
 
-        # Test Landmark 0 (2.0 px radial error = 0.2 mm)
+        # Test Landmark 0 (2.0 px radial error = 1.5625% of C3 ref length)
         lm0 = metrics_list[0]
         self.assertEqual(lm0["id"], 0)
         self.assertEqual(lm0["name"], LANDMARK_CLASSES[0])
         self.assertEqual(lm0["count"], num_samples)
         self.assertAlmostEqual(lm0["mre_px"], 2.0, places=4)
         self.assertAlmostEqual(lm0["rmse_px"], 2.0, places=4)
-        self.assertAlmostEqual(lm0["mre_mm"], 0.2, places=4)
-        self.assertAlmostEqual(lm0["rmse_mm"], 0.2, places=4)
-        self.assertEqual(lm0["sdr_2.0mm"], 100.0)
-        self.assertEqual(lm0["sdr_2.5mm"], 100.0)
+        self.assertAlmostEqual(lm0["mean_norm_err"], 1.5625, places=4)
+        self.assertEqual(lm0["share_within_2_5pct"], 100.0)
+        self.assertEqual(lm0["share_within_5pct"], 100.0)
         self.assertEqual(lm0["sdr_2.0px"], 100.0)
         self.assertEqual(lm0["sdr_2.5px"], 100.0)
         self.assertEqual(lm0["sdr_3.0px"], 100.0)
 
-        # Test Landmark 1 (4.0 px radial error = 0.4 mm)
+        # Test Landmark 1 (4.0 px radial error = 3.125% of C3 ref length)
         lm1 = metrics_list[1]
         self.assertEqual(lm1["id"], 1)
         self.assertEqual(lm1["name"], LANDMARK_CLASSES[1])
         self.assertEqual(lm1["count"], num_samples)
         self.assertAlmostEqual(lm1["mre_px"], 4.0, places=4)
         self.assertAlmostEqual(lm1["rmse_px"], 4.0, places=4)
-        self.assertAlmostEqual(lm1["mre_mm"], 0.4, places=4)
-        self.assertAlmostEqual(lm1["rmse_mm"], 0.4, places=4)
-        self.assertEqual(lm1["sdr_2.0mm"], 100.0)  # 0.4 mm <= 2.0 mm
-        self.assertEqual(lm1["sdr_2.5mm"], 100.0)
-        self.assertEqual(lm1["sdr_2.0px"], 0.0)    # 4.0 px > 2.0 px
+        self.assertAlmostEqual(lm1["mean_norm_err"], 3.125, places=4)
+        self.assertEqual(lm1["share_within_2_5pct"], 0.0)
+        self.assertEqual(lm1["share_within_5pct"], 100.0)
+        self.assertEqual(lm1["sdr_2.0px"], 0.0)
         self.assertEqual(lm1["sdr_2.5px"], 0.0)
         self.assertEqual(lm1["sdr_3.0px"], 0.0)
         self.assertEqual(lm1["sdr_4.0px"], 100.0)
 
-        # Test Landmark 2 (0 px error = 0 mm)
+        # Test Landmark 2 (0 px error = 0% norm error)
         lm2 = metrics_list[2]
         self.assertAlmostEqual(lm2["mre_px"], 0.0, places=4)
-        self.assertAlmostEqual(lm2["mre_mm"], 0.0, places=4)
-        self.assertEqual(lm2["sdr_2.0mm"], 100.0)
+        self.assertAlmostEqual(lm2["mean_norm_err"], 0.0, places=4)
+        self.assertEqual(lm2["share_within_5pct"], 100.0)
         self.assertEqual(lm2["sdr_2.0px"], 100.0)
 
     def test_compute_per_landmark_metrics_torch_tensor_input(self):
@@ -133,7 +137,15 @@ class TestLandmarkMetricsLogging(unittest.TestCase):
             save_dir = Path(tmp_dir)
             summary_metrics = {
                 "rmse": 1.5,
+                "share_within_5pct": 98.5,
+                "share_within_2_5pct": 95.0,
+                "share_within_7_5pct": 99.5,
+                "share_within_10pct": 100.0,
+                "mean_norm_err": 1.2,
+                "median_norm_err": 1.1,
+                "rmse_norm_err": 1.5,
                 "sdr_2_0": 90.0,
+                "sdr_2_5": 98.5,
                 "sdr_3_0": 100.0,
                 "sdr_4_0": 100.0,
             }
@@ -156,8 +168,9 @@ class TestLandmarkMetricsLogging(unittest.TestCase):
                 saved_data = json.load(f)
 
             self.assertEqual(saved_data["epoch"], 5)
-            self.assertEqual(saved_data["summary"]["best_val_sdr_2_5"], 98.5)
-            self.assertEqual(saved_data["summary"]["best_val_mae"], 1.15)
+            self.assertEqual(saved_data["summary"]["best_val_share_within_5pct"], 98.5)
+            self.assertEqual(saved_data["summary"]["best_val_mae_px"], 1.15)
+            self.assertEqual(saved_data["summary"]["best_val_sdr_2_5px"], 98.5)
             self.assertEqual(len(saved_data["landmarks"]), NUM_LANDMARKS)
             self.assertIn("C2_PI", saved_data["by_landmark_name"])
 
@@ -236,100 +249,91 @@ class TestLandmarkMetricsLogging(unittest.TestCase):
         self.assertIn("per_landmark", metrics)
         self.assertEqual(len(metrics["per_landmark"]), NUM_LANDMARKS)
         self.assertAlmostEqual(metrics["per_landmark"][0]["mre_px"], 0.0, places=4)
-        self.assertAlmostEqual(metrics["per_landmark"][0]["mre_mm"], 0.0, places=4)
-        self.assertEqual(metrics["per_landmark"][0]["sdr_2.0mm"], 100.0)
+        self.assertAlmostEqual(metrics["per_landmark"][0]["mean_norm_err"], 0.0, places=4)
+        self.assertEqual(metrics["per_landmark"][0]["share_within_5pct"], 100.0)
         self.assertEqual(metrics["per_landmark"][0]["sdr_2.5px"], 100.0)
 
-    def test_eval_compute_metrics_millimeter_and_pixel_reporting(self):
-        """Verify that src.eval.compute_metrics correctly computes clinical mm and canvas px metrics."""
+    def test_eval_compute_metrics_normalized_and_pixel_reporting(self):
+        """Verify that src.eval.compute_metrics correctly computes normalized % and canvas px metrics."""
         from src.eval import compute_metrics, format_metrics_table
 
         num_samples = 4
         img_size = 640
-        pixel_spacing = 0.1  # 0.1 mm per pixel
 
         gt_coords = np.full((num_samples, NUM_LANDMARKS, 2), 0.5, dtype=np.float32)
+        # Set C3_PI (idx 5) and C3_AI (idx 7) to define known reference length (128 px)
+        gt_coords[:, 5, 0] = 0.4
+        gt_coords[:, 5, 1] = 0.5
+        gt_coords[:, 7, 0] = 0.6
+        gt_coords[:, 7, 1] = 0.5
+
         pred_coords = gt_coords.copy()
 
-        # Add 10 px radial error (1.0 mm) to landmark 0
+        # Add 10 px radial error to landmark 0 -> 10 / 128 = 7.8125% norm error
         pred_coords[:, 0, 0] += 10.0 / img_size
 
         summary, landmarks, errors = compute_metrics(
             pred_coords=pred_coords,
             gt_coords=gt_coords,
             img_size=img_size,
-            pixel_spacing=pixel_spacing,
         )
 
-        # Total valid landmarks = 4 samples * 13 landmarks = 52
-        # 4 landmarks have 10 px (1.0 mm) error, 48 landmarks have 0 px (0.0 mm) error
-        # Mean error = (4 * 1.0) / 52 = 0.07692 mm (or in px: 40/52 = 0.7692 px)
-        self.assertIn("mre_mm", summary)
-        self.assertIn("rmse_mm", summary)
-        self.assertIn("sdr_2.0mm", summary)
-        self.assertIn("sdr_2.5mm", summary)
-        self.assertIn("sdr_4.0mm", summary)
-        self.assertIn("mre_pixels", summary)
+        self.assertIn("mean_norm_err", summary)
+        self.assertIn("median_norm_err", summary)
+        self.assertIn("rmse_norm_err", summary)
+        self.assertIn("share_within_2_5pct", summary)
+        self.assertIn("share_within_5pct", summary)
+        self.assertIn("share_within_7_5pct", summary)
+        self.assertIn("share_within_10pct", summary)
+        self.assertIn("mae_pixels", summary)
+        self.assertIn("rmse_pixels", summary)
         self.assertIn("sdr_2.5px", summary)
 
-        self.assertAlmostEqual(summary["mre_mm"], summary["mre_pixels"] * pixel_spacing, places=5)
-        # All 52 landmarks have error <= 1.0 mm, which is <= 2.0 mm
-        self.assertEqual(summary["sdr_2.0mm"], 100.0)
-        self.assertEqual(summary["sdr_2.5mm"], 100.0)
+        # Total valid landmarks = 4 samples * 13 landmarks = 52
+        # 4 landmarks have 10 px error (7.8125% norm error), 48 landmarks have 0 px error (0% norm error)
+        # Mean norm error = (4 * 7.8125) / 52 = 0.60096%
+        self.assertAlmostEqual(summary["mean_norm_err"], (4 * 7.8125) / 52, places=4)
+        # For share <= 5%: 48 landmarks pass, 4 fail -> 48 / 52 = 92.31%
+        self.assertAlmostEqual(summary["share_within_5pct"], (48.0 / 52.0) * 100.0, places=2)
+        # For share <= 10%: all 52 pass -> 100.0%
+        self.assertEqual(summary["share_within_10pct"], 100.0)
+
         # In px: 4 landmarks have 10 px error (> 2.5 px), so 48/52 = 92.31%
         self.assertAlmostEqual(summary["sdr_2.5px"], (48.0 / 52.0) * 100.0, places=2)
 
-        # Verify ASCII table generation contains clinical mm header
+        # Verify ASCII table generation contains normalized header and canvas px
         table = format_metrics_table(summary, landmarks, run_name="test_run", weights_path="best.pth")
-        self.assertIn("CLINICAL METRIC (MILLIMETERS)", table)
+        self.assertIn("NORMALIZED METRIC (% OF C3 REF LENGTH)", table)
         self.assertIn("CANVAS METRIC (PIXELS)", table)
-        self.assertIn("SDR @ 2.0 mm (Clinical Standard)", table)
+        self.assertIn("Share ≤ 5.0%", table)
 
-    def test_sample_adaptive_pixel_spacing_computation(self):
-        """Verify that compute_pixel_spacing_for_sample correctly scales based on image dimensions."""
-        from src.data.loaders.dataset import compute_pixel_spacing_for_sample
-        from src.eval import compute_metrics
+    def test_reference_length_computation_and_normalization(self):
+        """Verify that compute_reference_length accurately calculates C3 endplate width."""
+        from src.utils.metrics import compute_reference_length
 
-        # 1. Standard ISBI cephalogram (1935x2400) on 640 canvas
-        s_isbi = compute_pixel_spacing_for_sample(1935, 2400, canvas_size=640, base_pixel_spacing=0.1)
-        self.assertAlmostEqual(s_isbi, 0.375, places=4)
+        # Batch of 2 samples
+        gt_coords = np.full((2, NUM_LANDMARKS, 2), 0.5, dtype=np.float32)
+        # Sample 0: C3_PI at (0.4, 0.5), C3_AI at (0.6, 0.5) -> dx = 0.2 * 640 = 128 px
+        gt_coords[0, 5, 0] = 0.4
+        gt_coords[0, 5, 1] = 0.5
+        gt_coords[0, 7, 0] = 0.6
+        gt_coords[0, 7, 1] = 0.5
 
-        # 2. Pre-resized cephalogram (640x640) on 640 canvas (represents full 2400-tall scan)
-        s_640 = compute_pixel_spacing_for_sample(640, 640, canvas_size=640, base_pixel_spacing=0.1)
-        self.assertAlmostEqual(s_640, 0.375, places=4)
+        # Sample 1: C3_PI at (0.3, 0.4), C3_AI at (0.3, 0.7) -> dy = 0.3 * 640 = 192 px
+        gt_coords[1, 5, 0] = 0.3
+        gt_coords[1, 5, 1] = 0.4
+        gt_coords[1, 7, 0] = 0.3
+        gt_coords[1, 7, 1] = 0.7
 
-        # 3. TUMS landscape cephalogram (2091x1676) on 640 canvas
-        s_tums = compute_pixel_spacing_for_sample(2091, 1676, canvas_size=640, base_pixel_spacing=0.1)
-        self.assertAlmostEqual(s_tums, 0.1 / (640.0 / 2091.0), places=4)
+        ref_lens = compute_reference_length(gt_coords, img_size=640)
+        self.assertAlmostEqual(ref_lens[0], 128.0, places=4)
+        self.assertAlmostEqual(ref_lens[1], 192.0, places=4)
 
-        # 4. Per-sample vector spacing in compute_metrics
-        num_samples = 2
-        img_size = 640
-        gt_coords = np.full((num_samples, NUM_LANDMARKS, 2), 0.5, dtype=np.float32)
-        pred_coords = gt_coords.copy()
-
-        # Both samples have 10 px error along X on landmark 0
-        pred_coords[:, 0, 0] += 10.0 / img_size
-
-        # Sample 0 has spacing 0.2 mm/px -> 10 px = 2.0 mm
-        # Sample 1 has spacing 0.3 mm/px -> 10 px = 3.0 mm
-        spacings = np.array([0.2, 0.3], dtype=np.float32)
-
-        summary, landmarks, errors = compute_metrics(
-            pred_coords=pred_coords,
-            gt_coords=gt_coords,
-            img_size=img_size,
-            pixel_spacing=spacings,
-        )
-
-        self.assertEqual(summary["pixel_spacing_mode"], "adaptive_sample_level")
-        self.assertAlmostEqual(summary["pixel_spacing_mm_per_px"], 0.25, places=4)
-        # Landmark 0: sample 0 has 2.0 mm (<= 2.0mm -> True), sample 1 has 3.0 mm (<= 2.0mm -> False)
-        # So SDR@2.0mm on landmark 0 should be 50.0%
-        lm0 = landmarks[0]
-        self.assertEqual(lm0["sdr_2.0mm"], 50.0)
-        # For SDR@3.0mm, both sample 0 (2.0mm) and sample 1 (3.0mm) pass -> 100.0%
-        self.assertEqual(lm0["sdr_3.0mm"], 100.0)
+        # Missing landmarks fallback safeguard (negative coordinates -> fallback to img_size)
+        gt_missing = gt_coords.copy()
+        gt_missing[0, 5, 0] = -1.0
+        ref_lens_fallback = compute_reference_length(gt_missing, img_size=640)
+        self.assertAlmostEqual(ref_lens_fallback[0], 640.0, places=4)
 
     def test_checkpoint_saving_clean_and_full(self):
         """Verify that best.pth contains only state_dict and best_full_checkpoint.pth contains optimizer state."""
@@ -356,8 +360,8 @@ class TestLandmarkMetricsLogging(unittest.TestCase):
                     "optimizer_state_dict": optimizer.state_dict(),
                     "scheduler_state_dict": scheduler.state_dict(),
                     "val_loss": 0.1234,
-                    "val_mre_mm": 1.45,
-                    "val_sdr_2_0mm": 88.5,
+                    "val_mean_norm_err": 3.45,
+                    "val_share_within_5pct": 88.5,
                 },
                 full_ckpt_path,
             )
@@ -377,7 +381,8 @@ class TestLandmarkMetricsLogging(unittest.TestCase):
             self.assertIn("optimizer_state_dict", loaded_full)
             self.assertIn("scheduler_state_dict", loaded_full)
             self.assertEqual(loaded_full["epoch"], 5)
-            self.assertEqual(loaded_full["val_mre_mm"], 1.45)
+            self.assertEqual(loaded_full["val_mean_norm_err"], 3.45)
+            self.assertEqual(loaded_full["val_share_within_5pct"], 88.5)
 
     def test_artifact_logging_order_charts_before_checkpoint(self):
         """Verify that evaluation/charts is logged to MLflow strictly BEFORE checkpoints/best.pth."""

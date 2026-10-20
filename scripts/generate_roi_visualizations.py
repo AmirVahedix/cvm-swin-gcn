@@ -77,11 +77,6 @@ def generate_roi_visualizations(
             images = batch["image"].to(device)
             gt_coords = batch["coords"].cpu().numpy()
             filenames = batch["filename"]
-            spacings = (
-                batch["pixel_spacing"].cpu().numpy()
-                if "pixel_spacing" in batch
-                else np.full(len(filenames), 0.1)
-            )
 
             _, pred_coords = predict_batch(
                 model=model,
@@ -96,7 +91,6 @@ def generate_roi_visualizations(
 
                 fname = filenames[i]
                 orig_img_path = Path(test_img_dir) / fname
-                sample_spacing = float(spacings[i]) if hasattr(spacings, "__getitem__") else 0.1
 
                 if orig_img_path.exists():
                     raw_bgr = cv2.imread(str(orig_img_path))
@@ -110,7 +104,6 @@ def generate_roi_visualizations(
                     gt_coords=gt_coords[i],
                     pred_coords=pred_coords[i],
                     sample_name=fname,
-                    pixel_spacing=sample_spacing,
                     panel_size=panel_size,
                 )
 

@@ -181,7 +181,6 @@ def create_side_by_side_roi_image(
     gt_coords: np.ndarray,
     pred_coords: np.ndarray,
     sample_name: str = "",
-    pixel_spacing: float = 0.1,
     panel_size: int = 560,
 ) -> np.ndarray:
     """
@@ -207,8 +206,7 @@ def create_side_by_side_roi_image(
         pred_px = pred_coords[valid_mask] * np.array([img_w, img_h])
         radial_errors_px = np.sqrt(np.sum((gt_px - pred_px) ** 2, axis=1))
         mre_px = float(np.mean(radial_errors_px))
-        mre_mm = mre_px * pixel_spacing
-        metric_str = f"Mean Radial Error: {mre_px:.2f} px ({mre_mm:.2f} mm)"
+        metric_str = f"Mean Radial Error: {mre_px:.2f} px"
     else:
         metric_str = "Mean Radial Error: N/A"
 
@@ -330,14 +328,11 @@ def main():
     raw_bgr = cv2.imread(str(orig_img_path))
     raw_rgb = cv2.cvtColor(raw_bgr, cv2.COLOR_BGR2RGB)
 
-    spacing = float(batch["pixel_spacing"][0]) if "pixel_spacing" in batch else 0.1
-
-    vis = create_side_by_side_roi_image(
+    vis = create_side_by_side_roi_visualization(
         image_rgb=raw_rgb,
         gt_coords=gt_coords,
         pred_coords=pred_coords,
         sample_name=fname,
-        pixel_spacing=spacing,
         panel_size=560,
     )
 

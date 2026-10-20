@@ -307,17 +307,15 @@ def compute_metrics(
     pred_coords: np.ndarray,
     gt_coords: np.ndarray,
     img_size: int = 640,
-    pixel_spacing: float | np.ndarray = 0.1,
     threshold_px: float = 2.5,
 ) -> tuple[dict, list[dict], np.ndarray]:
     """
-    Computes overall summary metrics and per-landmark metrics breakdown in both millimeters and pixels.
+    Computes overall summary metrics and per-landmark metrics breakdown in both normalized percentage of C3 reference length and canvas pixels.
 
     Args:
         pred_coords: Array of shape (N, 13, 2) in normalized [0, 1] range.
         gt_coords: Array of shape (N, 13, 2) in normalized [0, 1] range (-1.0 for missing).
         img_size: Image dimension in pixels (default 640).
-        pixel_spacing: Physical spacing in mm per pixel (float scalar or 1D array of shape (N,)).
         threshold_px: Tolerance threshold in pixels for binary detection metrics.
 
     Returns:
@@ -338,14 +336,34 @@ def compute_metrics(
     abs_dy = np.abs(dy)
     radial_errors = np.sqrt(dx**2 + dy**2)  # Shape: (N, 13) in pixels
 
+    # Reference length per sample (C3 inferior endplate width)
+    ref_lengths = compute_reference_length(gt_coords, img_size=img_size)
+    ref_lengths_2d = ref_lengths[:, None]  # shape (N, 1)
+    norm_errors = (radial_errors / ref_lengths_2d) * 100.0  # % of ref length
+
     valid_radial_errors = radial_errors[valid_mask]
+    valid_norm_errors = norm_errors[valid_mask]
     valid_abs_dx = abs_dx[valid_mask]
     valid_abs_dy = abs_dy[valid_mask]
 
     if len(valid_radial_errors) == 0:
         raise ValueError("No valid ground truth landmarks found for metric calculation.")
 
-    # 1. Pixel Regression Metrics
+    # 1. Normalized Metrics (% of C3 Inferior Endplate Width)
+    mean_norm = float(np.mean(valid_norm_errors))
+    median_norm = float(np.median(valid_norm_errors))
+    sd_norm = float(np.std(valid_norm_errors))
+    rmse_norm = float(np.sqrt(np.mean(valid_norm_errors ** 2)))
+    min_norm = float(np.min(valid_norm_errors))
+    max_norm = float(np.max(valid_norm_errors))
+
+    norm_sdr_thresholds = [1.0, 2.0, 2.5, 3.0, 5.0, 7.5, 10.0]
+    norm_sdr_dict = {}
+    for th in norm_sdr_thresholds:
+        clean_th = str(th).replace(".", "_")
+        norm_sdr_dict[f"share_within_{clean_th}pct"] = float(np.mean(valid_norm_errors <= th) * 100.0)
+
+    # 2. Pixel Scale Metrics
     mae_x = float(np.mean(valid_abs_dx))
     mae_y = float(np.mean(valid_abs_dy))
     mae = float(np.mean((valid_abs_dx + valid_abs_dy) / 2.0))
@@ -356,32 +374,6 @@ def compute_metrics(
     min_err = float(np.min(valid_radial_errors))
     max_err = float(np.max(valid_radial_errors))
 
-    # 2. Physical Millimeter Metrics (Sample-level adaptive or uniform)
-    if isinstance(pixel_spacing, np.ndarray):
-        radial_errors_mm = radial_errors * pixel_spacing[:, None]
-        valid_radial_errors_mm = radial_errors_mm[valid_mask]
-        spacing_report_val = float(np.mean(pixel_spacing))
-        spacing_mode = "adaptive_sample_level"
-    else:
-        valid_radial_errors_mm = valid_radial_errors * pixel_spacing
-        spacing_report_val = float(pixel_spacing)
-        spacing_mode = "uniform_fixed"
-
-    mre_mm = float(np.mean(valid_radial_errors_mm))
-    rmse_mm = float(np.sqrt(np.mean(valid_radial_errors_mm ** 2)))
-    medre_mm = float(np.median(valid_radial_errors_mm))
-    sdre_mm = float(np.std(valid_radial_errors_mm))
-    min_err_mm = float(np.min(valid_radial_errors_mm))
-    max_err_mm = float(np.max(valid_radial_errors_mm))
-
-    # 3. Clinical SDR Thresholds in Millimeters (Orthodontic Standards)
-    sdr_mm_thresholds = [2.0, 2.5, 3.0, 4.0]
-    sdr_mm_dict = {}
-    for th in sdr_mm_thresholds:
-        sdr_val = float(np.mean(valid_radial_errors_mm <= th) * 100.0)
-        sdr_mm_dict[f"sdr_{th}mm"] = sdr_val
-
-    # 4. SDR at various radial thresholds in pixels
     sdr_thresholds = [2.0, 2.5, 3.0, 4.0, 5.0, 10.0]
     sdr_dict = {}
     for th in sdr_thresholds:
@@ -393,18 +385,18 @@ def compute_metrics(
     summary_metrics = {
         "total_samples": int(pred_coords.shape[0]),
         "total_valid_landmarks": total_valid,
-        "pixel_spacing_mm_per_px": spacing_report_val,
-        "pixel_spacing_mode": spacing_mode,
         "img_size": img_size,
-        # Physical Millimeter Metrics (Primary Clinical)
-        "mre_mm": mre_mm,
-        "rmse_mm": rmse_mm,
-        "medre_mm": medre_mm,
-        "sdre_mm": sdre_mm,
-        "min_error_mm": min_err_mm,
-        "max_error_mm": max_err_mm,
-        **sdr_mm_dict,
-        # Canvas Pixel Metrics (Secondary)
+        # Normalized Percentage Metrics (Primary Clinical Benchmark)
+        "mean_norm_err": mean_norm,
+        "median_norm_err": median_norm,
+        "sd_norm_err": sd_norm,
+        "rmse_norm_err": rmse_norm,
+        "min_norm_err": min_norm,
+        "max_norm_err": max_norm,
+        "share_within_5pct": norm_sdr_dict.get("share_within_5_0pct", 0.0),
+        "share_within_10pct": norm_sdr_dict.get("share_within_10_0pct", 0.0),
+        **norm_sdr_dict,
+        # Canvas Pixel Metrics
         "mae_pixels": mae,
         "mae_x_pixels": mae_x,
         "mae_y_pixels": mae_y,
@@ -417,14 +409,17 @@ def compute_metrics(
         **sdr_dict,
     }
 
-    # 5. Per-landmark Breakdown
+    # 3. Per-landmark Breakdown
     landmark_metrics = []
     for i, name in enumerate(LANDMARK_CLASSES):
         l_mask = valid_mask[:, i]
         if not np.any(l_mask):
             continue
 
+        vert = name.split("_")[0] if "_" in name else ""
+        lm_type = name.split("_")[1] if "_" in name else ""
         l_radial = radial_errors[:, i][l_mask]
+        l_norm = norm_errors[:, i][l_mask]
         l_dx = dx[:, i][l_mask]
         l_dy = dy[:, i][l_mask]
         l_abs_dx = abs_dx[:, i][l_mask]
@@ -436,19 +431,13 @@ def compute_metrics(
         l_medre = float(np.median(l_radial))
         l_sdre = float(np.std(l_radial)) if len(l_radial) > 1 else 0.0
 
-        # Millimeters
-        if isinstance(pixel_spacing, np.ndarray):
-            l_radial_mm = l_radial * pixel_spacing[l_mask]
-        else:
-            l_radial_mm = l_radial * pixel_spacing
-        l_mre_mm = float(np.mean(l_radial_mm))
-        l_rmse_mm = float(np.sqrt(np.mean(l_radial_mm ** 2)))
-        l_medre_mm = float(np.median(l_radial_mm))
-        l_sdre_mm = float(np.std(l_radial_mm)) if len(l_radial_mm) > 1 else 0.0
-        l_sdr2_0mm = float(np.mean(l_radial_mm <= 2.0) * 100.0)
-        l_sdr2_5mm = float(np.mean(l_radial_mm <= 2.5) * 100.0)
-        l_sdr3_0mm = float(np.mean(l_radial_mm <= 3.0) * 100.0)
-        l_sdr4_0mm = float(np.mean(l_radial_mm <= 4.0) * 100.0)
+        l_mean_norm = float(np.mean(l_norm))
+        l_med_norm = float(np.median(l_norm))
+        l_sd_norm = float(np.std(l_norm)) if len(l_norm) > 1 else 0.0
+        l_share_2_5 = float(np.mean(l_norm <= 2.5) * 100.0)
+        l_share_5 = float(np.mean(l_norm <= 5.0) * 100.0)
+        l_share_7_5 = float(np.mean(l_norm <= 7.5) * 100.0)
+        l_share_10 = float(np.mean(l_norm <= 10.0) * 100.0)
 
         # Pixels
         l_sdr2_0 = float(np.mean(l_radial <= 2.0) * 100.0)
@@ -456,19 +445,20 @@ def compute_metrics(
         l_sdr3_0 = float(np.mean(l_radial <= 3.0) * 100.0)
         l_sdr4_0 = float(np.mean(l_radial <= 4.0) * 100.0)
 
-        landmark_metrics.append({
+        entry = {
             "id": i,
             "name": name,
+            "vertebra": vert,
+            "type": lm_type,
             "count": int(np.sum(l_mask)),
-            # Millimeters
-            "mre_mm": l_mre_mm,
-            "rmse_mm": l_rmse_mm,
-            "medre_mm": l_medre_mm,
-            "sdre_mm": l_sdre_mm,
-            "sdr_2.0mm": l_sdr2_0mm,
-            "sdr_2.5mm": l_sdr2_5mm,
-            "sdr_3.0mm": l_sdr3_0mm,
-            "sdr_4.0mm": l_sdr4_0mm,
+            # Normalized
+            "mean_norm_err": l_mean_norm,
+            "median_norm_err": l_med_norm,
+            "sd_norm_err": l_sd_norm,
+            "share_within_2_5pct": l_share_2_5,
+            "share_within_5pct": l_share_5,
+            "share_within_7_5pct": l_share_7_5,
+            "share_within_10pct": l_share_10,
             # Pixels
             "mae_px": l_mae,
             "rmse_px": l_rmse,
@@ -479,7 +469,29 @@ def compute_metrics(
             "sdr_2.5px": l_sdr2_5,
             "sdr_3.0px": l_sdr3_0,
             "sdr_4.0px": l_sdr4_0,
-        })
+        }
+
+        # Inferior border projections
+        if vert in ("C2", "C3", "C4") and lm_type in ("PI", "IC", "AI"):
+            try:
+                a_px, p_px, a_pct, p_pct = compute_inferior_border_projections(
+                    pred_coords,
+                    gt_coords,
+                    vertebra=vert,
+                    landmark_key=lm_type,
+                    img_size=img_size,
+                    ref_lengths=ref_lengths,
+                    return_pct=True,
+                )
+                if len(a_px) > 0:
+                    entry["mean_along_px"] = float(np.mean(a_px))
+                    entry["mean_perp_px"] = float(np.mean(p_px))
+                    entry["mean_along_pct"] = float(np.mean(a_pct))
+                    entry["mean_perp_pct"] = float(np.mean(p_pct))
+            except Exception:
+                pass
+
+        landmark_metrics.append(entry)
 
     return summary_metrics, landmark_metrics, valid_radial_errors
 
@@ -499,28 +511,28 @@ def format_metrics_table(
     lines.append("=" * 96)
     tta_str = f"Enabled (scales={summary.get('tta_scales')})" if summary.get("use_tta") else "Disabled"
     lines.append(f"Checkpoint Weights: {weights_path} | TTA: {tta_str}")
-    lines.append(f"Pixel Spacing: {summary.get('pixel_spacing_mm_per_px', 0.1)} mm/px | Image Size: {summary.get('img_size', 640)}x{summary.get('img_size', 640)}")
+    lines.append(f"Image Size: {summary.get('img_size', 640)}x{summary.get('img_size', 640)}")
     lines.append(f"Total Test Images: {summary['total_samples']} | Total Valid Landmarks: {summary['total_valid_landmarks']}")
     lines.append("-" * 96)
 
-    # 1. Physical Millimeter Metrics Table (Primary Clinical)
+    # 1. Normalized Landmark Metrics Table (Primary Benchmark)
     lines.append("\n" + "+" + "-" * 50 + "+" + "-" * 43 + "+")
-    lines.append(f"| {'CLINICAL METRIC (MILLIMETERS)':<48} | {'VALUE':<41} |")
+    lines.append(f"| {'NORMALIZED METRIC (% OF C3 REF LENGTH)':<48} | {'VALUE':<41} |")
     lines.append("+" + "-" * 50 + "+" + "-" * 43 + "+")
-    
-    mm_rows = [
-        ("MRE (Mean Radial Error)", f"{summary.get('mre_mm', 0.0):.3f} mm"),
-        ("MedRE (Median Radial Error)", f"{summary.get('medre_mm', 0.0):.3f} mm"),
-        ("RMSE (Root Mean Squared Error)", f"{summary.get('rmse_mm', 0.0):.3f} mm"),
-        ("SDRE (Std Dev Radial Error)", f"{summary.get('sdre_mm', 0.0):.3f} mm"),
-        ("Min Radial Error", f"{summary.get('min_error_mm', 0.0):.3f} mm"),
-        ("Max Radial Error", f"{summary.get('max_error_mm', 0.0):.3f} mm"),
-        ("SDR @ 2.0 mm (Clinical Standard)", f"{summary.get('sdr_2.0mm', 0.0):.2f} %"),
-        ("SDR @ 2.5 mm (Challenge Benchmark)", f"{summary.get('sdr_2.5mm', 0.0):.2f} %"),
-        ("SDR @ 3.0 mm", f"{summary.get('sdr_3.0mm', 0.0):.2f} %"),
-        ("SDR @ 4.0 mm (Coarse Localization)", f"{summary.get('sdr_4.0mm', 0.0):.2f} %"),
+
+    norm_rows = [
+        ("Mean Normalized Error", f"{summary.get('mean_norm_err', 0.0):.2f} %"),
+        ("Median Normalized Error", f"{summary.get('median_norm_err', 0.0):.2f} %"),
+        ("RMSE Normalized Error", f"{summary.get('rmse_norm_err', 0.0):.2f} %"),
+        ("SD Normalized Error", f"{summary.get('sd_norm_err', 0.0):.2f} %"),
+        ("Min Normalized Error", f"{summary.get('min_norm_err', 0.0):.2f} %"),
+        ("Max Normalized Error", f"{summary.get('max_norm_err', 0.0):.2f} %"),
+        ("Share ≤ 2.5% (High Precision)", f"{summary.get('share_within_2_5pct', 0.0):.2f} %"),
+        ("Share ≤ 5.0% (Primary Clinical Benchmark)", f"{summary.get('share_within_5pct', 0.0):.2f} %"),
+        ("Share ≤ 7.5%", f"{summary.get('share_within_7_5pct', 0.0):.2f} %"),
+        ("Share ≤ 10.0% (Coarse Localization)", f"{summary.get('share_within_10_0pct', 0.0):.2f} %"),
     ]
-    for label, val in mm_rows:
+    for label, val in norm_rows:
         lines.append(f"| {label:<48} | {val:<41} |")
     lines.append("+" + "-" * 50 + "+" + "-" * 43 + "+")
 
@@ -543,18 +555,18 @@ def format_metrics_table(
 
     # 3. Per-Landmark Breakdown Table
     lines.append("\n" + "+" + "-" * 96 + "+")
-    lines.append(f"| {'PER-LANDMARK CLINICAL PERFORMANCE BREAKDOWN':^94} |")
-    lines.append("+" + "-" * 4 + "+" + "-" * 11 + "+" + "-" * 11 + "+" + "-" * 11 + "+" + "-" * 12 + "+" + "-" * 12 + "+" + "-" * 12 + "+" + "-" * 10 + "+" + "-" * 11 + "+")
-    lines.append(f"| {'ID':<2} | {'Landmark':<9} | {'MRE (mm)':<9} | {'RMSE (mm)':<9} | {'SDR@2.0mm':<10} | {'SDR@2.5mm':<10} | {'SDR@4.0mm':<10} | {'MAE(px)':<8} | {'SDR@2.5px':<9} |")
-    lines.append("+" + "-" * 4 + "+" + "-" * 11 + "+" + "-" * 11 + "+" + "-" * 11 + "+" + "-" * 12 + "+" + "-" * 12 + "+" + "-" * 12 + "+" + "-" * 10 + "+" + "-" * 11 + "+")
+    lines.append(f"| {'PER-LANDMARK NORMALIZED PERFORMANCE BREAKDOWN':^94} |")
+    lines.append("+" + "-" * 4 + "+" + "-" * 11 + "+" + "-" * 12 + "+" + "-" * 12 + "+" + "-" * 12 + "+" + "-" * 12 + "+" + "-" * 10 + "+" + "-" * 11 + "+")
+    lines.append(f"| {'ID':<2} | {'Landmark':<9} | {'Mean Norm(%)':<12} | {'Med Norm(%)':<12} | {'Share≤2.5%':<12} | {'Share≤5.0%':<12} | {'MAE(px)':<10} | {'SDR@2.5px':<11} |")
+    lines.append("+" + "-" * 4 + "+" + "-" * 11 + "+" + "-" * 12 + "+" + "-" * 12 + "+" + "-" * 12 + "+" + "-" * 12 + "+" + "-" * 10 + "+" + "-" * 11 + "+")
 
     for lm in landmarks:
         lines.append(
-            f"| {lm['id']:<2} | {lm['name']:<9} | {lm.get('mre_mm', 0.0):<9.2f} | {lm.get('rmse_mm', 0.0):<9.2f} | "
-            f"{lm.get('sdr_2.0mm', 0.0):<9.1f}% | {lm.get('sdr_2.5mm', 0.0):<9.1f}% | {lm.get('sdr_4.0mm', 0.0):<9.1f}% | "
-            f"{lm['mae_px']:<8.2f} | {lm.get('sdr_2.5px', 0.0):<8.1f}% |"
+            f"| {lm['id']:<2} | {lm['name']:<9} | {lm.get('mean_norm_err', 0.0):<12.2f} | {lm.get('median_norm_err', 0.0):<12.2f} | "
+            f"{lm.get('share_within_2_5pct', 0.0):<11.1f}% | {lm.get('share_within_5pct', 0.0):<11.1f}% | "
+            f"{lm['mae_px']:<10.2f} | {lm.get('sdr_2.5px', 0.0):<10.1f}% |"
         )
-    lines.append("+" + "-" * 4 + "+" + "-" * 11 + "+" + "-" * 11 + "+" + "-" * 11 + "+" + "-" * 12 + "+" + "-" * 12 + "+" + "-" * 12 + "+" + "-" * 10 + "+" + "-" * 11 + "+")
+    lines.append("+" + "-" * 4 + "+" + "-" * 11 + "+" + "-" * 12 + "+" + "-" * 12 + "+" + "-" * 12 + "+" + "-" * 12 + "+" + "-" * 10 + "+" + "-" * 11 + "+")
 
     return "\n".join(lines)
 
@@ -563,12 +575,11 @@ def generate_evaluation_charts(
     summary_metrics: dict,
     landmark_metrics: list[dict],
     valid_radial_errors: np.ndarray,
-    pixel_spacing: float | np.ndarray = 0.1,
     save_dir: Path | str | None = None,
     log_to_mlflow: bool = True,
 ) -> dict[str, str]:
     """
-    Generates PNG diagram charts for all evaluation metrics (physical mm and canvas px)
+    Generates PNG diagram charts for all normalized and canvas pixel evaluation metrics
     and logs them as artifacts to MLflow.
     """
     use_temp = save_dir is None
@@ -581,7 +592,6 @@ def generate_evaluation_charts(
         target_dir.mkdir(parents=True, exist_ok=True)
 
     generated_charts = {}
-    eff_spacing = float(np.mean(pixel_spacing)) if isinstance(pixel_spacing, np.ndarray) else float(pixel_spacing)
 
     try:
         plt.style.use("seaborn-v0_8-whitegrid" if "seaborn-v0_8-whitegrid" in plt.style.available else "default")
@@ -591,18 +601,18 @@ def generate_evaluation_charts(
         lm_indices = np.arange(len(landmark_metrics))
         width = 0.35
 
-        # 1. Landmark Errors Bar Chart (MRE mm vs RMSE mm)
+        # 1. Landmark Errors Bar Chart (Mean Norm % vs Median Norm %)
         fig1, ax1 = plt.subplots(figsize=(10, 5), dpi=300)
-        mre_mm_vals = [lm.get("mre_mm", lm["mre_px"] * eff_spacing) for lm in landmark_metrics]
-        rmse_mm_vals = [lm.get("rmse_mm", lm["rmse_px"] * eff_spacing) for lm in landmark_metrics]
+        mean_norm_vals = [lm.get("mean_norm_err", 0.0) for lm in landmark_metrics]
+        med_norm_vals = [lm.get("median_norm_err", 0.0) for lm in landmark_metrics]
 
-        ax1.bar(lm_indices - width / 2, mre_mm_vals, width, label="MRE (mm)", color="#e76f51", alpha=0.9)
-        ax1.bar(lm_indices + width / 2, rmse_mm_vals, width, label="RMSE (mm)", color="#457b9d", alpha=0.9)
+        ax1.bar(lm_indices - width / 2, mean_norm_vals, width, label="Mean Norm Error (%)", color="#e76f51", alpha=0.9)
+        ax1.bar(lm_indices + width / 2, med_norm_vals, width, label="Median Norm Error (%)", color="#457b9d", alpha=0.9)
 
         ax1.set_xticks(lm_indices)
         ax1.set_xticklabels(lm_names, rotation=45, ha="right")
-        ax1.set_ylabel("Error (Millimeters)")
-        ax1.set_title("Per-Landmark Clinical Errors Breakdown (MRE mm vs RMSE mm)", fontsize=12, fontweight="bold")
+        ax1.set_ylabel("Normalized Error (% of C3 ref width)")
+        ax1.set_title("Per-Landmark Normalized Errors Breakdown (Mean vs Median %)", fontsize=12, fontweight="bold")
         ax1.legend(loc="upper right")
         ax1.grid(True, linestyle="--", alpha=0.5)
         plt.tight_layout()
@@ -611,22 +621,22 @@ def generate_evaluation_charts(
         plt.close(fig1)
         generated_charts["landmark_errors"] = str(p1)
 
-        # 2. Per-Landmark SDR Bar Chart (SDR@2.0mm vs SDR@2.5mm vs SDR@4.0mm)
+        # 2. Per-Landmark Tolerance Bar Chart (Share ≤ 2.5% vs Share ≤ 5.0% vs Share ≤ 10.0%)
         fig2, ax2 = plt.subplots(figsize=(11, 5), dpi=300)
         w3 = 0.25
-        sdr2_0 = [lm.get("sdr_2.0mm", 0.0) for lm in landmark_metrics]
-        sdr2_5 = [lm.get("sdr_2.5mm", 0.0) for lm in landmark_metrics]
-        sdr4_0 = [lm.get("sdr_4.0mm", 0.0) for lm in landmark_metrics]
+        sdr2_5 = [lm.get("share_within_2_5pct", 0.0) for lm in landmark_metrics]
+        sdr5_0 = [lm.get("share_within_5pct", 0.0) for lm in landmark_metrics]
+        sdr10_0 = [lm.get("share_within_10pct", 0.0) for lm in landmark_metrics]
 
-        ax2.bar(lm_indices - w3, sdr2_0, w3, label="SDR @ 2.0mm (Clinical Standard)", color="#2a9d8f", alpha=0.9)
-        ax2.bar(lm_indices, sdr2_5, w3, label="SDR @ 2.5mm (Challenge Benchmark)", color="#3a86ff", alpha=0.9)
-        ax2.bar(lm_indices + w3, sdr4_0, w3, label="SDR @ 4.0mm (Coarse)", color="#8338ec", alpha=0.9)
+        ax2.bar(lm_indices - w3, sdr2_5, w3, label="Share ≤ 2.5% (High Precision)", color="#2a9d8f", alpha=0.9)
+        ax2.bar(lm_indices, sdr5_0, w3, label="Share ≤ 5.0% (Primary Benchmark)", color="#3a86ff", alpha=0.9)
+        ax2.bar(lm_indices + w3, sdr10_0, w3, label="Share ≤ 10.0% (Coarse)", color="#8338ec", alpha=0.9)
 
         ax2.set_xticks(lm_indices)
         ax2.set_xticklabels(lm_names, rotation=45, ha="right")
-        ax2.set_ylabel("Detection Rate (%)")
+        ax2.set_ylabel("Share (%)")
         ax2.set_ylim(0, 105)
-        ax2.set_title("Per-Landmark SDR Comparison (2.0mm / 2.5mm / 4.0mm)", fontsize=12, fontweight="bold")
+        ax2.set_title("Per-Landmark Normalized Detection Rates (≤2.5% / ≤5.0% / ≤10.0%)", fontsize=12, fontweight="bold")
         ax2.legend(loc="lower right")
         ax2.grid(True, linestyle="--", alpha=0.5)
         plt.tight_layout()
@@ -635,23 +645,22 @@ def generate_evaluation_charts(
         plt.close(fig2)
         generated_charts["landmark_sdr"] = str(p2)
 
-        # 3. SDR Threshold Curve (Cumulative Detection Rate in mm)
+        # 3. SDR Threshold Curve (Cumulative Detection Rate across Normalized Thresholds)
         fig3, ax3 = plt.subplots(figsize=(8, 5), dpi=300)
-        th_mm = [1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0]
-        valid_radial_errors_mm = valid_radial_errors * eff_spacing
+        th_norm = [1.0, 2.0, 2.5, 3.0, 5.0, 7.5, 10.0, 15.0]
         sdr_values = [
-            summary_metrics.get(f"sdr_{th}mm", float(np.mean(valid_radial_errors_mm <= th) * 100.0))
-            for th in th_mm
+            summary_metrics.get(f"share_within_{str(th).replace('.', '_')}pct", 0.0)
+            for th in th_norm
         ]
 
-        ax3.plot(th_mm, sdr_values, marker="o", linewidth=2.5, color="#ff006e", markersize=8)
-        for th, val in zip(th_mm, sdr_values):
+        ax3.plot(th_norm, sdr_values, marker="o", linewidth=2.5, color="#ff006e", markersize=8)
+        for th, val in zip(th_norm, sdr_values):
             ax3.annotate(f"{val:.1f}%", (th, val), textcoords="offset points", xytext=(0, 8), ha="center", fontsize=9, fontweight="bold")
 
-        ax3.set_xlabel("Radius Threshold (Millimeters)")
+        ax3.set_xlabel("Error Threshold (% of C3 Inferior Endplate Width)")
         ax3.set_ylabel("Successful Detection Rate (%)")
         ax3.set_ylim(0, 108)
-        ax3.set_title("Cumulative SDR Curve Across Clinical Distance Thresholds (mm)", fontsize=12, fontweight="bold")
+        ax3.set_title("Cumulative SDR Curve Across Normalized Distance Thresholds (%)", fontsize=12, fontweight="bold")
         ax3.grid(True, linestyle="--", alpha=0.5)
         plt.tight_layout()
         p3 = target_dir / "chart_sdr_thresholds.png"
@@ -659,19 +668,21 @@ def generate_evaluation_charts(
         plt.close(fig3)
         generated_charts["sdr_thresholds"] = str(p3)
 
-        # 4. Radial Error Distribution Histogram (mm)
+        # 4. Error Distribution Histogram (Normalized % or Canvas px)
         fig4, ax4 = plt.subplots(figsize=(8, 4.5), dpi=300)
-        ax4.hist(valid_radial_errors_mm, bins=30, color="#fb8500", edgecolor="black", alpha=0.7, density=True, label="Radial Error (mm)")
+        mean_err_norm = summary_metrics.get("mean_norm_err", 0.0)
+        med_err_norm = summary_metrics.get("median_norm_err", 0.0)
 
-        mean_err_mm = summary_metrics.get("mre_mm", np.mean(valid_radial_errors_mm))
-        med_err_mm = summary_metrics.get("medre_mm", np.median(valid_radial_errors_mm))
+        # Plot pixel errors histogram
+        ax4.hist(valid_radial_errors, bins=30, color="#fb8500", edgecolor="black", alpha=0.7, density=True, label="Radial Error (px)")
+        mre_px = summary_metrics.get("mre_pixels", float(np.mean(valid_radial_errors)))
+        med_px = summary_metrics.get("medre_pixels", float(np.median(valid_radial_errors)))
+        ax4.axvline(mre_px, color="red", linestyle="--", linewidth=2, label=f"Mean (MRE): {mre_px:.2f} px")
+        ax4.axvline(med_px, color="green", linestyle="-.", linewidth=2, label=f"Median: {med_px:.2f} px")
 
-        ax4.axvline(mean_err_mm, color="red", linestyle="--", linewidth=2, label=f"Mean (MRE): {mean_err_mm:.2f} mm")
-        ax4.axvline(med_err_mm, color="green", linestyle="-.", linewidth=2, label=f"Median (MedRE): {med_err_mm:.2f} mm")
-
-        ax4.set_xlabel("Radial Error (Millimeters)")
+        ax4.set_xlabel("Radial Error (Pixels)")
         ax4.set_ylabel("Density")
-        ax4.set_title("Radial Error Distribution Across All Test Samples (mm)", fontsize=12, fontweight="bold")
+        ax4.set_title(f"Radial Error Distribution (Mean Norm: {mean_err_norm:.2f}%, Med Norm: {med_err_norm:.2f}%)", fontsize=12, fontweight="bold")
         ax4.legend(loc="upper right")
         ax4.grid(True, linestyle="--", alpha=0.5)
         plt.tight_layout()
@@ -683,42 +694,42 @@ def generate_evaluation_charts(
         # 5. Evaluation Dashboard (2x2 Grid)
         fig5, axes = plt.subplots(2, 2, figsize=(14, 10), dpi=300)
 
-        # Subplot (0,0): Landmark Errors
-        axes[0, 0].bar(lm_indices - width / 2, mre_mm_vals, width, label="MRE (mm)", color="#e76f51")
-        axes[0, 0].bar(lm_indices + width / 2, rmse_mm_vals, width, label="RMSE (mm)", color="#457b9d")
+        # Subplot (0,0): Landmark Normalized Errors
+        axes[0, 0].bar(lm_indices - width / 2, mean_norm_vals, width, label="Mean Norm (%)", color="#e76f51")
+        axes[0, 0].bar(lm_indices + width / 2, med_norm_vals, width, label="Med Norm (%)", color="#457b9d")
         axes[0, 0].set_xticks(lm_indices)
         axes[0, 0].set_xticklabels(lm_names, rotation=45, ha="right", fontsize=8)
-        axes[0, 0].set_ylabel("Error (mm)")
-        axes[0, 0].set_title("Landmark Clinical Errors Breakdown (mm)", fontsize=10, fontweight="bold")
+        axes[0, 0].set_ylabel("Error (% C3 width)")
+        axes[0, 0].set_title("Landmark Normalized Errors (% C3 width)", fontsize=10, fontweight="bold")
         axes[0, 0].legend(fontsize=8)
         axes[0, 0].grid(True, linestyle="--", alpha=0.5)
 
         # Subplot (0,1): Per-Landmark SDR
-        axes[0, 1].bar(lm_indices - w3, sdr2_0, w3, label="SDR@2.0mm", color="#2a9d8f")
-        axes[0, 1].bar(lm_indices, sdr2_5, w3, label="SDR@2.5mm", color="#3a86ff")
-        axes[0, 1].bar(lm_indices + w3, sdr4_0, w3, label="SDR@4.0mm", color="#8338ec")
+        axes[0, 1].bar(lm_indices - w3, sdr2_5, w3, label="≤2.5%", color="#2a9d8f")
+        axes[0, 1].bar(lm_indices, sdr5_0, w3, label="≤5.0%", color="#3a86ff")
+        axes[0, 1].bar(lm_indices + w3, sdr10_0, w3, label="≤10.0%", color="#8338ec")
         axes[0, 1].set_xticks(lm_indices)
         axes[0, 1].set_xticklabels(lm_names, rotation=45, ha="right", fontsize=8)
-        axes[0, 1].set_ylabel("SDR (%)")
-        axes[0, 1].set_title("Per-Landmark SDR (Clinical mm)", fontsize=10, fontweight="bold")
+        axes[0, 1].set_ylabel("Share (%)")
+        axes[0, 1].set_title("Per-Landmark Normalized Tolerances", fontsize=10, fontweight="bold")
         axes[0, 1].legend(fontsize=8)
         axes[0, 1].grid(True, linestyle="--", alpha=0.5)
 
         # Subplot (1,0): SDR Curve
-        axes[1, 0].plot(th_mm, sdr_values, marker="o", color="#ff006e", linewidth=2)
-        axes[1, 0].set_title("Cumulative SDR Curve (mm)", fontsize=10, fontweight="bold")
-        axes[1, 0].set_xlabel("Threshold (mm)", fontsize=9)
+        axes[1, 0].plot(th_norm, sdr_values, marker="o", color="#ff006e", linewidth=2)
+        axes[1, 0].set_title("Cumulative SDR Curve (% of C3 width)", fontsize=10, fontweight="bold")
+        axes[1, 0].set_xlabel("Threshold (%)", fontsize=9)
         axes[1, 0].set_ylabel("SDR (%)", fontsize=9)
         axes[1, 0].grid(True, linestyle="--", alpha=0.5)
 
         # Subplot (1,1): Error Distribution
-        axes[1, 1].hist(valid_radial_errors_mm, bins=25, color="#fb8500", alpha=0.7, density=True)
-        axes[1, 1].axvline(mean_err_mm, color="red", linestyle="--", label=f"MRE: {mean_err_mm:.2f}mm")
-        axes[1, 1].set_title("Radial Error Distribution (mm)", fontsize=10, fontweight="bold")
+        axes[1, 1].hist(valid_radial_errors, bins=25, color="#fb8500", alpha=0.7, density=True)
+        axes[1, 1].axvline(mre_px, color="red", linestyle="--", label=f"MRE: {mre_px:.2f}px")
+        axes[1, 1].set_title("Radial Error Distribution (px)", fontsize=10, fontweight="bold")
         axes[1, 1].legend(fontsize=8)
         axes[1, 1].grid(True, linestyle="--", alpha=0.5)
 
-        plt.suptitle("SWIN-GCN CLINICAL EVALUATION METRICS DASHBOARD", fontsize=14, fontweight="bold")
+        plt.suptitle("SWIN-GCN NORMALIZED EVALUATION METRICS DASHBOARD", fontsize=14, fontweight="bold")
         plt.tight_layout()
         p5 = target_dir / "chart_evaluation_dashboard.png"
         fig5.savefig(p5, bbox_inches="tight")
@@ -887,14 +898,13 @@ def create_side_by_side_roi_visualization(
     gt_coords: np.ndarray,
     pred_coords: np.ndarray,
     sample_name: str = "",
-    pixel_spacing: float = 0.1,
     panel_size: int = 560,
 ) -> np.ndarray:
     """
     Creates an interpretable side-by-side ROI comparison image showing only the cervical vertebrae:
     - Left panel: Ground Truth
     - Right panel: Model Prediction
-    - Top banner: Sample name and Mean Radial Error (pixels & mm)
+    - Top banner: Sample name and Mean Radial Error (pixels & normalized %)
     - Bottom banner: Clean 3-group landmark guide (C2, C3, C4)
     """
     img_h, img_w = image_rgb.shape[:2]
@@ -914,8 +924,12 @@ def create_side_by_side_roi_visualization(
         pred_px = pred_coords[valid_mask] * np.array([img_w, img_h])
         radial_errors_px = np.sqrt(np.sum((gt_px - pred_px) ** 2, axis=1))
         mre_px = float(np.mean(radial_errors_px))
-        mre_mm = mre_px * pixel_spacing
-        metric_str = f"Mean Radial Error: {mre_px:.2f} px ({mre_mm:.2f} mm)"
+        try:
+            ref_len = compute_reference_length(gt_coords[None, ...], img_size=max(img_w, img_h))[0]
+            norm_pct = (mre_px / ref_len) * 100.0 if ref_len > 1e-4 else 0.0
+            metric_str = f"Mean Radial Error: {mre_px:.2f} px ({norm_pct:.1f}% C3 width)"
+        except Exception:
+            metric_str = f"Mean Radial Error: {mre_px:.2f} px"
     else:
         metric_str = "Mean Radial Error: N/A"
 
@@ -1135,7 +1149,6 @@ def visualize_batch_and_save(
     use_tta: bool = False,
     tta_scales: list[float] | tuple[float, ...] = (0.95, 1.0, 1.05),
     tta_shifts: list[tuple[int, int]] | None = None,
-    pixel_spacing: float = 0.1,
     roi_only: bool = True,
     panel_size: int = 560,
 ) -> None:
@@ -1155,11 +1168,6 @@ def visualize_batch_and_save(
             images = batch["image"].to(device)
             gt_coords = batch["coords"].cpu().numpy()
             filenames = batch["filename"]
-            spacings = (
-                batch["pixel_spacing"].cpu().numpy()
-                if "pixel_spacing" in batch
-                else np.full(len(filenames), pixel_spacing)
-            )
 
             _, pred_coords = predict_batch(
                 model=model,
@@ -1176,7 +1184,6 @@ def visualize_batch_and_save(
 
                 fname = filenames[i]
                 orig_img_path = Path(test_img_dir) / fname
-                sample_spacing = float(spacings[i]) if hasattr(spacings, "__getitem__") else float(pixel_spacing)
 
                 if orig_img_path.exists():
                     raw_bgr = cv2.imread(str(orig_img_path))
@@ -1191,7 +1198,6 @@ def visualize_batch_and_save(
                         gt_coords=gt_coords[i],
                         pred_coords=pred_coords[i],
                         sample_name=fname,
-                        pixel_spacing=sample_spacing,
                         panel_size=panel_size,
                     )
                 else:
@@ -1217,7 +1223,6 @@ def run_evaluation(
     run_name: str | None = None,
     batch_size: int = 8,
     img_size: int = 640,
-    pixel_spacing: float = 0.1,
     num_samples: int = 8,
     threshold_px: float = 2.5,
     device_str: str | None = None,
@@ -1283,14 +1288,12 @@ def run_evaluation(
         test_npz_dir=test_npz_dir,
         batch_size=batch_size,
         img_size=img_size,
-        pixel_spacing=pixel_spacing,
         num_workers=0,  # Safety for cross-platform evaluation
     )
 
     # 3. Aggregate all predictions and ground truth targets
     all_preds = []
     all_gts = []
-    all_spacings = []
     all_filenames = []
 
     with torch.no_grad():
@@ -1308,15 +1311,9 @@ def run_evaluation(
 
             all_preds.append(pred_coords.cpu().numpy())
             all_gts.append(gt_coords)
-            if "pixel_spacing" in batch:
-                all_spacings.append(batch["pixel_spacing"].cpu().numpy())
 
     pred_array = np.concatenate(all_preds, axis=0)  # (N, 13, 2)
     gt_array = np.concatenate(all_gts, axis=0)      # (N, 13, 2)
-    if len(all_spacings) > 0:
-        spacings_array = np.concatenate(all_spacings, axis=0)
-    else:
-        spacings_array = pixel_spacing
 
     # 4. Un-Letterboxing to Native Scanner Dimensions & Per-Landmark CSV Rows
     dims_map = {}
@@ -1563,7 +1560,6 @@ def run_evaluation(
         gt_coords=unletterboxed_gts_arr,
         sample_ids=all_filenames,
         orig_dims=all_orig_dims,
-        pixel_spacing=spacings_array,
         img_size=img_size,
         pred_stages=pred_stages_list,
         gt_stages=gt_stages_list,
@@ -1572,12 +1568,11 @@ def run_evaluation(
         n_bootstrap=1000,
     )
 
-    # Legacy Canvas Metrics (for backward compatibility and continuity)
+    # Normalized & Canvas Metrics
     summary_metrics, landmark_metrics, valid_radial_errors = compute_metrics(
         pred_coords=pred_array,
         gt_coords=gt_array,
         img_size=img_size,
-        pixel_spacing=spacings_array,
         threshold_px=threshold_px,
     )
 
@@ -1593,7 +1588,6 @@ def run_evaluation(
         summary_metrics=summary_metrics,
         landmark_metrics=landmark_metrics,
         valid_radial_errors=valid_radial_errors,
-        pixel_spacing=spacings_array,
         save_dir=run_folder / "charts",
         log_to_mlflow=False,
     )
@@ -1637,7 +1631,6 @@ def run_evaluation(
         use_tta=use_tta,
         tta_scales=tta_scales,
         tta_shifts=tta_shifts,
-        pixel_spacing=pixel_spacing,
         roi_only=roi_only,
     )
 
@@ -1685,7 +1678,6 @@ def run_evaluation(
                     mlflow.log_params({
                         "eval_weights_path": weights_path,
                         "eval_img_size": img_size,
-                        "eval_pixel_spacing": pixel_spacing,
                         "eval_threshold_px": threshold_px,
                         "eval_batch_size": batch_size,
                         "eval_use_tta": use_tta,
@@ -1749,12 +1741,6 @@ def main():
         type=int,
         default=640,
         help="Target image dimension in pixels (default: 640).",
-    )
-    parser.add_argument(
-        "--pixel-spacing",
-        type=float,
-        default=0.1,
-        help="Physical spacing in mm per pixel (default: 0.1 mm/px).",
     )
     parser.add_argument(
         "--num-samples",
@@ -1858,7 +1844,6 @@ def main():
         run_name=args.run_name,
         batch_size=args.batch_size,
         img_size=args.img_size,
-        pixel_spacing=args.pixel_spacing,
         num_samples=args.num_samples,
         threshold_px=args.threshold_px,
         device_str=args.device,

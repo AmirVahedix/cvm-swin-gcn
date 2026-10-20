@@ -211,7 +211,6 @@ def get_dataloaders(
     val_npz_dir=VAL_NPZ_DIR,
     batch_size=8,
     img_size=640,
-    pixel_spacing=0.1,
     num_workers=4,
     use_balanced_sampling=True,
     sampling_power: float | None = None,
@@ -232,7 +231,6 @@ def get_dataloaders(
         train_files,
         transform=train_transform,
         img_size=img_size,
-        pixel_spacing=pixel_spacing,
     )
     val_dataset = CVMDataset(
         val_img_dir,
@@ -240,7 +238,6 @@ def get_dataloaders(
         val_files,
         transform=val_transform,
         img_size=img_size,
-        pixel_spacing=pixel_spacing,
     )
 
     sampler = None
@@ -292,7 +289,6 @@ def get_test_dataloader(
     test_npz_dir=TEST_NPZ_DIR,
     batch_size=8,
     img_size=640,
-    pixel_spacing=0.1,
     num_workers=4,
 ):
     """
@@ -310,7 +306,6 @@ def get_test_dataloader(
         image_filenames=test_files,
         transform=test_transform,
         img_size=img_size,
-        pixel_spacing=pixel_spacing,
     )
 
     pin_memory = torch.cuda.is_available() or (num_workers > 0)

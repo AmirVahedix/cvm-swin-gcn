@@ -147,7 +147,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda", "mps"])
     parser.add_argument("--compute-cvm", action="store_true", default=True, help="Compute clinical CVM stage (CS1-6)")
-    parser.add_argument("--pixel-to-mm", type=float, default=0.375, help="Calibration factor (mm/pixel)")
     parser.add_argument("--limit", type=int, default=None, help="Limit number of images processed")
     return parser
 
@@ -195,12 +194,11 @@ def main():
     cvm_calc = None
     if args.compute_cvm:
         try:
-            from src.cvm_calculator import CVMInput, CVMThresholds, classify_cvm_stage
-            cvm_thresholds = CVMThresholds(mode="calibrated", pixel_to_mm=args.pixel_to_mm)
-            cvm_calc = lambda lm_dict: classify_cvm_stage(CVMInput.from_dict(lm_dict), thresholds=cvm_thresholds)
+            from src.utils.cvm_calculator import evaluate_landmarks_dict
+            cvm_calc = lambda lm_dict: evaluate_landmarks_dict(lm_dict)
             print("🩺 Clinical CVM Calculator (CS1-CS6) activated.")
         except ImportError:
-            print("ℹ️ symcvm not in path; skipping CVM staging.")
+            print("ℹ️ CVM calculator not available; skipping CVM staging.")
 
     results_json = {}
     csv_rows = []

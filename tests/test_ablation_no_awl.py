@@ -110,8 +110,8 @@ class TestAblationNoAWL(unittest.TestCase):
         )
         self.assertGreater(val_loss, 0.0)
         self.assertFalse(torch.isnan(torch.tensor(val_loss)))
-        self.assertIn("mre_mm", metrics)
-        self.assertIn("sdr_2_0mm", metrics)
+        self.assertIn("mean_norm_err", metrics)
+        self.assertIn("share_within_5pct", metrics)
 
     def test_end_to_end_gradient_flow_without_awl(self):
         """Verify gradients flow all the way to convolutional feature layers without explicit heatmap loss."""
