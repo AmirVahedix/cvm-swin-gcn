@@ -90,6 +90,26 @@ class TestTwoStageCascade(unittest.TestCase):
         self.assertIn("Stage 2 Oracle", content)
         self.assertIn("Two-Stage Cascade", content)
 
+    def test_two_stage_evaluation_run_with_2pass(self):
+        """Tests the two-stage evaluation pipeline with 2-pass refinement enabled."""
+        metrics, run_folder = run_two_stage_evaluation(
+            stage1_weights=str(self.stage1_weights),
+            stage2_weights=str(self.stage2_weights),
+            img_dir=str(self.img_dir),
+            npz_dir=str(self.npz_dir),
+            output_dir=str(self.out_dir),
+            run_name="test_cascade_run_2pass",
+            stage1_img_size=640,
+            stage2_img_size=448,
+            margin_ratio=0.18,
+            refine_2pass=True,
+            num_visualizations=1,
+            device_str="cpu",
+            log_to_mlflow=False,
+        )
+        self.assertIn("two_stage_cascade", metrics)
+        self.assertTrue((Path(run_folder) / "summary_report.txt").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

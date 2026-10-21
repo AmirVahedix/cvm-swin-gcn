@@ -368,6 +368,30 @@ def run_two_stage_evaluation(
                     output_normalized=True,
                 )
 
+                # Optional Pass 2: Iterative re-centering refinement
+                if refine_2pass and not s1_bbox.is_fallback:
+                    s2_bbox = compute_roi_bbox(
+                        coords=cascaded_coords_canvas,
+                        img_w=stage1_img_size,
+                        img_h=stage1_img_size,
+                        margin_ratio=margin_ratio,
+                    )
+                    if not s2_bbox.is_fallback:
+                        casc_patch_2, _ = crop_roi_with_padding(
+                            image=canvas_img,
+                            bbox=s2_bbox,
+                            target_size=stage2_img_size,
+                        )
+                        casc_in_2 = torch.from_numpy(casc_patch_2.transpose(2, 0, 1)).float().unsqueeze(0).to(device)
+                        _, casc_coords_roi_2_t = stage2_model(casc_in_2)
+                        casc_coords_roi_2 = casc_coords_roi_2_t.squeeze(0).cpu().numpy()
+                        cascaded_coords_canvas = inverse_transform_coords(
+                            roi_coords=casc_coords_roi_2,
+                            bbox=s2_bbox,
+                            target_size=stage2_img_size,
+                            output_normalized=True,
+                        )
+
         # Unletterbox all coordinates from canvas [0, 1] to native radiograph pixel space
         gt_canvas_px = gt_canvas_norm * float(stage1_img_size)
         s1_canvas_px = s1_coords_canvas * float(stage1_img_size)
@@ -679,9 +703,9 @@ def run_two_stage_evaluation(
                     "samples": len(all_filenames),
                 })
                 mlflow.log_metrics({
-                    "s1_mean_norm_err": gen_s1["mean_norm_err"],
-                    "cascade_mean_norm_err": gen_casc["mean_norm_err"],
-                    "oracle_mean_norm_err": gen_oracle["mean_norm_err"],
+                    "s1_mean_norm_err": gen_s1["mean"],
+                    "cascade_mean_norm_err": gen_casc["mean"],
+                    "oracle_mean_norm_err": gen_oracle["mean"],
                     "delta_mean_norm_err": delta_mean_norm,
                     "relative_reduction_pct": pct_reduction,
                     "cascade_share_within_5pct": gen_casc["share_within_5pct"],
