@@ -25,15 +25,14 @@ import torch
 import torch.nn.functional as F
 from PIL import Image
 
-# Ensure project root is in sys.path
+# Ensure project root is first in sys.path
 ROOT_DIR = Path(__file__).resolve().parent.parent
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
+sys.path.insert(0, str(ROOT_DIR))
 
-# Also add symcvm to sys.path if present
+# Also add symcvm to sys.path if present (appended, not prepended, so local src takes precedence)
 SYMCVM_DIR = ROOT_DIR.parent / "symcvm"
 if SYMCVM_DIR.is_dir() and str(SYMCVM_DIR) not in sys.path:
-    sys.path.insert(0, str(SYMCVM_DIR))
+    sys.path.append(str(SYMCVM_DIR))
 
 from src.data.constants import LANDMARK_CLASSES, NUM_LANDMARKS
 from src.models.model import CephalometricSwinGCN
@@ -137,14 +136,106 @@ def predict_landmarks_single(
     return pixel_coords, norm_coords
 
 
+def predict_landmarks_two_stage(
+    stage1_model: CephalometricSwinGCN,
+    stage2_model: CephalometricSwinGCN,
+    pil_img: Image.Image,
+    device: torch.device,
+    stage1_img_size: int = 640,
+    stage2_img_size: int = 448,
+    margin_ratio: float = 0.18,
+) -> Tuple[List[Tuple[float, float]], List[Tuple[float, float]]]:
+    from src.utils.roi_utils import (
+        compute_roi_bbox,
+        crop_roi_with_padding,
+        inverse_transform_coords,
+    )
+
+    tensor_s1, (orig_w, orig_h, pad_left, pad_top) = preprocess_image(pil_img, stage1_img_size)
+    tensor_s1 = tensor_s1.to(device)
+
+    # 1. Stage 1 Forward Pass
+    with torch.no_grad():
+        _, pred_coords_s1 = stage1_model(tensor_s1)
+
+    s1_canvas_norm = pred_coords_s1.squeeze(0).cpu().numpy()  # [13, 2] in [0, 1]
+
+    # 2. Extract strictly square ROI bounding box
+    bbox = compute_roi_bbox(
+        coords=s1_canvas_norm,
+        img_w=stage1_img_size,
+        img_h=stage1_img_size,
+        margin_ratio=margin_ratio,
+    )
+
+    # Reconstruct 640x640 canvas for cropping
+    scale = stage1_img_size / max(orig_w, orig_h)
+    new_w = int(round(orig_w * scale))
+    new_h = int(round(orig_h * scale))
+    resized_canvas = pil_img.resize((new_w, new_h), Image.Resampling.BILINEAR)
+    canvas = Image.new("RGB", (stage1_img_size, stage1_img_size), (0, 0, 0))
+    canvas.paste(resized_canvas, (pad_left, pad_top))
+    canvas_np = np.array(canvas, dtype=np.uint8)
+
+    # 3. Crop ROI with boundary padding
+    roi_crop_np, _ = crop_roi_with_padding(
+        image=canvas_np,
+        bbox=bbox,
+        target_size=stage2_img_size,
+        interpolation=cv2.INTER_LINEAR,
+    )
+
+    # Preprocess ROI crop for Stage 2
+    arr = roi_crop_np.astype(np.float32) / 255.0
+    mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+    std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+    norm = (arr - mean) / std
+    tensor_s2 = torch.from_numpy(norm).permute(2, 0, 1).unsqueeze(0).float().to(device)
+
+    # 4. Stage 2 Forward Pass
+    with torch.no_grad():
+        _, pred_coords_s2 = stage2_model(tensor_s2)
+
+    s2_roi_norm = pred_coords_s2.squeeze(0).cpu().numpy()
+
+    # 5. Inversely map coordinates back to canvas space with half-pixel alignment
+    if bbox.is_fallback:
+        final_canvas_norm = s1_canvas_norm
+    else:
+        final_canvas_norm = inverse_transform_coords(
+            roi_coords=s2_roi_norm,
+            bbox=bbox,
+            target_size=stage2_img_size,
+            output_normalized=True,
+        )
+
+    # 6. Un-letterbox to native pixel space
+    pixel_coords = []
+    norm_coords = []
+    for x_c_norm, y_c_norm in final_canvas_norm:
+        x_c_px = x_c_norm * stage1_img_size
+        y_c_px = y_c_norm * stage1_img_size
+        orig_x = max(0.0, min(float(orig_w), (x_c_px - pad_left) / scale))
+        orig_y = max(0.0, min(float(orig_h), (y_c_px - pad_top) / scale))
+        pixel_coords.append((orig_x, orig_y))
+        norm_coords.append((orig_x / orig_w, orig_y / orig_h))
+
+    return pixel_coords, norm_coords
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Cephalometric Swin-GCN Landmark & CVM Inference CLI")
     parser.add_argument("--image", "-i", type=str, default=None, help="Path to a single X-ray image")
     parser.add_argument("--images-dir", "-d", type=str, default=None, help="Path to directory of X-ray images")
     parser.add_argument("--output-dir", "-o", type=str, default="inference_results", help="Directory for saving outputs")
     parser.add_argument(
-        "--weights", "-w", type=str, default="artifacts/best.pth", help="Path to model weights checkpoint"
+        "--weights", "-w", type=str, default="artifacts/best.pth", help="Path to Stage 1 (or standalone) weights checkpoint"
     )
+    parser.add_argument(
+        "--stage2-weights", type=str, default=None, help="Optional Stage 2 fine refiner weights for Two-Stage inference"
+    )
+    parser.add_argument("--stage2-size", type=int, default=448, help="Stage 2 ROI resolution (default: 448)")
+    parser.add_argument("--margin-ratio", type=float, default=0.18, help="ROI margin ratio (default: 0.18)")
     parser.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda", "mps"])
     parser.add_argument("--compute-cvm", action="store_true", default=True, help="Compute clinical CVM stage (CS1-6)")
     parser.add_argument("--limit", type=int, default=None, help="Limit number of images processed")
@@ -173,9 +264,18 @@ def main():
             print(f"❌ Weights not found at '{args.weights}'", file=sys.stderr)
             sys.exit(1)
 
-    print(f"🧠 Loading CephalometricSwinGCN on {device}...")
+    print(f"🧠 Loading Stage 1 CephalometricSwinGCN on {device}...")
     model = load_model(weights_path, device)
-    print(f"✅ Model successfully loaded from '{weights_path}'.")
+    print(f"✅ Stage 1 model successfully loaded from '{weights_path}'.")
+
+    stage2_model = None
+    if args.stage2_weights:
+        if os.path.exists(args.stage2_weights):
+            print(f"🧠 Loading Stage 2 Fine CephalometricSwinGCN from '{args.stage2_weights}'...")
+            stage2_model = load_model(args.stage2_weights, device, img_size=args.stage2_size)
+            print(f"✅ Stage 2 model successfully loaded ({args.stage2_size}x{args.stage2_size}).")
+        else:
+            print(f"⚠️ Warning: Stage 2 weights not found at '{args.stage2_weights}'; falling back to single-stage.")
 
     # Gather images
     if args.image:
@@ -206,7 +306,19 @@ def main():
     for p in image_paths:
         with Image.open(p) as img:
             pil_img = img.convert("RGB")
-        px_coords, norm_coords = predict_landmarks_single(model, pil_img, device)
+
+        if stage2_model is not None:
+            px_coords, norm_coords = predict_landmarks_two_stage(
+                stage1_model=model,
+                stage2_model=stage2_model,
+                pil_img=pil_img,
+                device=device,
+                stage1_img_size=640,
+                stage2_img_size=args.stage2_size,
+                margin_ratio=args.margin_ratio,
+            )
+        else:
+            px_coords, norm_coords = predict_landmarks_single(model, pil_img, device)
 
         lm_dict = {
             name: {"x": px_coords[idx][0], "y": px_coords[idx][1]}

@@ -366,7 +366,7 @@ def split_dataset(
             return ls_mapping[stem]
         if name in ls_mapping:
             return ls_mapping[name]
-        return int(stem) if stem.isdigit() else stem
+        return f"file_{stem}" if ls_mapping else (int(stem) if stem.isdigit() else stem)
 
     # Extract all cohort identifiers (test, val, train, excluded, review_needed)
     cohort_info = extract_all_cohort_identifiers(export_json_path=export_json_path)
