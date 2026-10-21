@@ -292,14 +292,14 @@ def main():
     parser.add_argument(
         "--lambda-hm",
         type=float,
-        default=float(os.getenv("LAMBDA_HM", 1.0)),
-        help="Weight for Adaptive Wing Loss on heatmaps (default: 1.0 or $LAMBDA_HM).",
+        default=float(os.getenv("LAMBDA_HM", 50.0)),
+        help="Weight for Adaptive Wing Loss on heatmaps (default: 50.0 or $LAMBDA_HM).",
     )
     parser.add_argument(
         "--lambda-cd",
         type=float,
-        default=float(os.getenv("LAMBDA_CD", 5.0)),
-        help="Weight for Wing Loss on coordinates (default: 5.0 or $LAMBDA_CD).",
+        default=float(os.getenv("LAMBDA_CD", 2.0)),
+        help="Weight for Wing Loss on coordinates (default: 2.0 or $LAMBDA_CD).",
     )
     parser.add_argument(
         "--lambda-graph",

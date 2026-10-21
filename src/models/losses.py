@@ -96,10 +96,13 @@ class AnatomicalGraphLoss(nn.Module):
     Anatomical Edge Length Consistency Loss.
     Penalizes deviations in pairwise Euclidean distance between connected GCN landmark nodes
     relative to ground-truth pairwise distances.
+    Supports relative deformation scaling (|pred - gt| / (gt + eps)) to prevent the loss
+    from vanishing into insignificance (~0.004) compared to coordinate loss.
     """
-    def __init__(self, adj_matrix: torch.Tensor):
+    def __init__(self, adj_matrix: torch.Tensor, relative: bool = True):
         super().__init__()
         self.register_buffer("adj_matrix", adj_matrix)
+        self.relative = relative
 
     def forward(self, pred_coords: torch.Tensor, gt_coords: torch.Tensor) -> torch.Tensor:
         """
@@ -131,7 +134,13 @@ class AnatomicalGraphLoss(nn.Module):
         valid_j = (gt_coords[:, j_idx, 0] >= 0) & (gt_coords[:, j_idx, 1] >= 0)
         valid_pairs = (valid_i & valid_j).float()
 
-        edge_error = (pred_dist - gt_dist).abs() * valid_pairs
+        if self.relative:
+            # Scale-invariant relative edge length distortion (|pred - gt| / (gt + eps))
+            # Ensures meaningful gradient contribution on the order of 0.03 - 0.05
+            edge_error = ((pred_dist - gt_dist).abs() / (gt_dist + 1e-4)) * valid_pairs
+        else:
+            edge_error = (pred_dist - gt_dist).abs() * valid_pairs
+
         valid_count = valid_pairs.sum().clamp(min=1.0)
 
         return edge_error.sum() / valid_count
