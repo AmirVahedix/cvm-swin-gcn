@@ -308,6 +308,12 @@ def main():
         help="Weight for Anatomical Graph Loss on landmark edges (default: 1.0 or $LAMBDA_GRAPH).",
     )
     parser.add_argument(
+        "--lambda-morph",
+        type=float,
+        default=float(os.getenv("LAMBDA_MORPH", 1.0)),
+        help="Weight for Morphometric Shape Loss on Shape Index and Taper Ratio (default: 1.0 or $LAMBDA_MORPH).",
+    )
+    parser.add_argument(
         "--test-ids-file",
         type=str,
         default=None,
@@ -508,6 +514,7 @@ def main():
             lambda_hm=args.lambda_hm,
             lambda_cd=args.lambda_cd,
             lambda_graph=args.lambda_graph,
+            lambda_morph=args.lambda_morph,
             img_size=args.target_size,
             experiment_name=args.mlflow_experiment_name,
             tracking_uri=args.mlflow_tracking_uri,

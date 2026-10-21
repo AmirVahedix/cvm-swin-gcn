@@ -21,7 +21,7 @@ if str(ROOT_DIR) not in sys.path:
 
 from src.data import get_dataloaders, NUM_LANDMARKS, LANDMARK_CLASSES
 from src.models.model import CephalometricSwinGCN
-from src.models.losses import AdaptiveWingLoss, WingLoss, AnatomicalGraphLoss
+from src.models.losses import AdaptiveWingLoss, WingLoss, AnatomicalGraphLoss, MorphometricShapeLoss
 from src.eval import run_evaluation
 from src.utils.ftp_utils import upload_files_to_ftp
 from src.utils.metrics import (
@@ -46,6 +46,7 @@ LLRD_DECAY_RATE = float(os.getenv("LLRD_DECAY_RATE", 0.8))
 LAMBDA_HM = float(os.getenv("LAMBDA_HM", 1.0))
 LAMBDA_CD = float(os.getenv("LAMBDA_CD", 5.0))
 LAMBDA_GRAPH = float(os.getenv("LAMBDA_GRAPH", 1.0))
+LAMBDA_MORPH = float(os.getenv("LAMBDA_MORPH", 1.0))
 EARLY_STOPPING_PATIENCE = int(os.getenv("EARLY_STOPPING_PATIENCE", 40))
 WARMUP_COORD_EPOCHS = int(os.getenv("WARMUP_COORD_EPOCHS", 5))
 SAVE_PATH = "./artifacts/best.pth"
@@ -160,24 +161,26 @@ def get_landmark_weights(device: torch.device) -> torch.Tensor:
 class EpochLossResult(float):
     """
     Subclass of float that can be unpacked as (epoch_loss, loss_hm, loss_cd, loss_graph)
+    or (epoch_loss, loss_hm, loss_cd, loss_graph, loss_morph)
     or used directly as a scalar float loss value.
     """
-    def __new__(cls, epoch_loss: float, loss_hm: float, loss_cd: float, loss_graph: float):
+    def __new__(cls, epoch_loss: float, loss_hm: float, loss_cd: float, loss_graph: float, loss_morph: float = 0.0):
         instance = super().__new__(cls, epoch_loss)
         instance.epoch_loss = float(epoch_loss)
         instance.loss_hm = float(loss_hm)
         instance.loss_cd = float(loss_cd)
         instance.loss_graph = float(loss_graph)
+        instance.loss_morph = float(loss_morph)
         return instance
 
     def __iter__(self):
-        return iter((float(self), self.loss_hm, self.loss_cd, self.loss_graph))
+        return iter((float(self), self.loss_hm, self.loss_cd, self.loss_graph, self.loss_morph))
 
     def __getitem__(self, idx):
-        return (float(self), self.loss_hm, self.loss_cd, self.loss_graph)[idx]
+        return (float(self), self.loss_hm, self.loss_cd, self.loss_graph, self.loss_morph)[idx]
 
     def __len__(self):
-        return 4
+        return 5
 
 
 def train_epoch(
@@ -187,10 +190,12 @@ def train_epoch(
     awl_loss=None,
     wing_loss=None,
     graph_loss=None,
+    morph_loss=None,
     landmark_weights=None,
     lambda_hm: float = 0.0,
     lambda_cd: float = 5.0,
     lambda_graph: float = 1.0,
+    lambda_morph: float = 1.0,
     device=None,
     epoch: int = 1,
     epochs: int = 1,
@@ -203,6 +208,7 @@ def train_epoch(
     epoch_loss_cd = 0.0
     epoch_loss_g = 0.0
     epoch_loss_hm = 0.0
+    epoch_loss_morph = 0.0
 
     pbar = tqdm(
         dataloader,
@@ -227,6 +233,10 @@ def train_epoch(
             if graph_loss is not None and lambda_graph > 0.0:
                 loss_g = graph_loss(pred_coords.float(), gt_coords.float())
                 total_loss = total_loss + (lambda_graph * loss_g)
+            loss_morph = None
+            if morph_loss is not None and lambda_morph > 0.0:
+                loss_morph = morph_loss(pred_coords.float(), gt_coords.float())
+                total_loss = total_loss + (lambda_morph * loss_morph)
             loss_hm = None
             if awl_loss is not None and lambda_hm > 0.0:
                 gt_heatmaps = batch["heatmaps"].to(device)
@@ -248,6 +258,8 @@ def train_epoch(
         epoch_loss_cd += (lambda_cd * loss_cd).item()
         if loss_g is not None:
             epoch_loss_g += (lambda_graph * loss_g).item()
+        if loss_morph is not None:
+            epoch_loss_morph += (lambda_morph * loss_morph).item()
         if loss_hm is not None:
             epoch_loss_hm += (lambda_hm * loss_hm).item()
 
@@ -258,6 +270,7 @@ def train_epoch(
     avg_loss_cd = epoch_loss_cd / n_batches
     avg_loss_g = epoch_loss_g / n_batches
     avg_loss_hm = epoch_loss_hm / n_batches
+    avg_loss_morph = epoch_loss_morph / n_batches
 
     import inspect, dis
     caller_frame = inspect.currentframe().f_back
@@ -275,6 +288,8 @@ def train_epoch(
 
     if unpack_count == 4:
         return (avg_loss, avg_loss_hm, avg_loss_cd, avg_loss_g)
+    if unpack_count == 5:
+        return (avg_loss, avg_loss_hm, avg_loss_cd, avg_loss_g, avg_loss_morph)
 
     if return_components:
         return avg_loss, {
@@ -282,6 +297,7 @@ def train_epoch(
             "heatmap": avg_loss_hm,
             "coord": avg_loss_cd,
             "graph": avg_loss_g,
+            "morph": avg_loss_morph,
         }
 
     return float(avg_loss)
@@ -454,10 +470,12 @@ def validate_epoch(
     awl_loss=None,
     wing_loss=None,
     graph_loss=None,
+    morph_loss=None,
     landmark_weights=None,
     lambda_hm: float = 0.0,
     lambda_cd: float = 5.0,
     lambda_graph: float = 1.0,
+    lambda_morph: float = 1.0,
     device=None,
     img_size=DEFAULT_IMG_SIZE,
     epoch: int = 1,
@@ -470,6 +488,7 @@ def validate_epoch(
     epoch_loss_cd = 0.0
     epoch_loss_g = 0.0
     epoch_loss_hm = 0.0
+    epoch_loss_morph = 0.0
     all_radial_errors = []
     all_pred_coords = []
     all_gt_coords = []
@@ -495,6 +514,10 @@ def validate_epoch(
                 if graph_loss is not None and lambda_graph > 0.0:
                     loss_g = graph_loss(pred_coords.float(), gt_coords.float())
                     total_loss = total_loss + (lambda_graph * loss_g)
+                loss_morph = None
+                if morph_loss is not None and lambda_morph > 0.0:
+                    loss_morph = morph_loss(pred_coords.float(), gt_coords.float())
+                    total_loss = total_loss + (lambda_morph * loss_morph)
                 loss_hm = None
                 if awl_loss is not None and lambda_hm > 0.0:
                     gt_heatmaps = batch["heatmaps"].to(device)
@@ -505,6 +528,8 @@ def validate_epoch(
             epoch_loss_cd += (lambda_cd * loss_cd).item()
             if loss_g is not None:
                 epoch_loss_g += (lambda_graph * loss_g).item()
+            if loss_morph is not None:
+                epoch_loss_morph += (lambda_morph * loss_morph).item()
             if loss_hm is not None:
                 epoch_loss_hm += (lambda_hm * loss_hm).item()
 
@@ -523,6 +548,7 @@ def validate_epoch(
     val_loss_cd = epoch_loss_cd / n_batches
     val_loss_g = epoch_loss_g / n_batches
     val_loss_hm = epoch_loss_hm / n_batches
+    val_loss_morph = epoch_loss_morph / n_batches
 
     if len(all_radial_errors) > 0:
         all_errors = torch.cat(all_radial_errors, dim=0)  # [Total_Samples, N]
@@ -566,6 +592,7 @@ def validate_epoch(
         "loss_hm": val_loss_hm,
         "loss_cd": val_loss_cd,
         "loss_graph": val_loss_g,
+        "loss_morph": val_loss_morph,
         "mean_norm_err": norm_summary["mean_norm_err"],
         "median_norm_err": norm_summary["median_norm_err"],
         "share_within_5pct": norm_summary["share_within_5pct"],
@@ -954,6 +981,7 @@ def main(
     lambda_hm: float = LAMBDA_HM,
     lambda_cd: float = LAMBDA_CD,
     lambda_graph: float = LAMBDA_GRAPH,
+    lambda_morph: float = LAMBDA_MORPH,
     val_img_dir: str = VAL_IMG_DIR,
     val_npz_dir: str = VAL_NPZ_DIR,
     test_img_dir: str = TEST_IMG_DIR,
@@ -1062,6 +1090,7 @@ def main(
     awl_loss = AdaptiveWingLoss().to(device) if lambda_hm > 0.0 else None
     wing_loss = WingLoss(img_size=float(img_size)).to(device)
     graph_loss = AnatomicalGraphLoss(model.adj_matrix).to(device) if lambda_graph > 0.0 else None
+    morph_loss = MorphometricShapeLoss().to(device) if lambda_morph > 0.0 else None
     landmark_weights = get_landmark_weights(device)
 
     best_val_loss = float("inf")
@@ -1085,6 +1114,7 @@ def main(
                 "lambda_heatmap": lambda_hm,
                 "lambda_coord": lambda_cd,
                 "lambda_graph": lambda_graph,
+                "lambda_morph": lambda_morph,
                 "warmup_coord_epochs": warmup_coord_epochs,
                 "early_stopping_patience": patience,
                 "save_path": SAVE_PATH,
@@ -1095,6 +1125,7 @@ def main(
                 "heatmap_loss": "AdaptiveWingLoss" if lambda_hm > 0.0 else "None",
                 "coord_loss": "WingLoss",
                 "graph_loss": "AnatomicalGraphLoss" if lambda_graph > 0.0 else "None",
+                "morph_loss": "MorphometricShapeLoss" if lambda_morph > 0.0 else "None",
                 "device": str(device),
                 "use_amp": use_amp,
                 "compile_model": compile_model,
@@ -1115,10 +1146,12 @@ def main(
             "train_loss_hm": [],
             "train_loss_cd": [],
             "train_loss_graph": [],
+            "train_loss_morph": [],
             "val_loss": [],
             "val_loss_hm": [],
             "val_loss_cd": [],
             "val_loss_graph": [],
+            "val_loss_morph": [],
             "val_mean_norm_err": [],
             "val_median_norm_err": [],
             "val_share_within_5pct": [],
@@ -1144,6 +1177,7 @@ def main(
             coord_warmup_factor = get_coord_loss_warmup_factor(epoch + 1, warmup_coord_epochs, lambda_hm=lambda_hm)
             effective_lambda_cd = lambda_cd * coord_warmup_factor
             effective_lambda_graph = lambda_graph * coord_warmup_factor
+            effective_lambda_morph = lambda_morph * coord_warmup_factor
 
             train_loss, train_loss_dict = train_epoch(
                 model=model,
@@ -1152,10 +1186,12 @@ def main(
                 awl_loss=awl_loss,
                 wing_loss=wing_loss,
                 graph_loss=graph_loss,
+                morph_loss=morph_loss,
                 landmark_weights=landmark_weights,
                 lambda_hm=lambda_hm,
                 lambda_cd=effective_lambda_cd,
                 lambda_graph=effective_lambda_graph,
+                lambda_morph=effective_lambda_morph,
                 device=device,
                 epoch=epoch + 1,
                 epochs=epochs,
@@ -1170,10 +1206,12 @@ def main(
                 awl_loss=awl_loss,
                 wing_loss=wing_loss,
                 graph_loss=graph_loss,
+                morph_loss=morph_loss,
                 landmark_weights=landmark_weights,
                 lambda_hm=lambda_hm,
                 lambda_cd=effective_lambda_cd,
                 lambda_graph=effective_lambda_graph,
+                lambda_morph=effective_lambda_morph,
                 device=device,
                 img_size=img_size,
                 epoch=epoch + 1,
@@ -1201,10 +1239,12 @@ def main(
             history["train_loss_hm"].append(float(train_loss_dict.get("heatmap", 0.0)))
             history["train_loss_cd"].append(float(train_loss_dict.get("coord", 0.0)))
             history["train_loss_graph"].append(float(train_loss_dict.get("graph", 0.0)))
+            history["train_loss_morph"].append(float(train_loss_dict.get("morph", 0.0)))
             history["val_loss"].append(float(val_loss))
             history["val_loss_hm"].append(float(metrics.get("loss_hm", 0.0)))
             history["val_loss_cd"].append(float(metrics.get("loss_cd", 0.0)))
             history["val_loss_graph"].append(float(metrics.get("loss_graph", 0.0)))
+            history["val_loss_morph"].append(float(metrics.get("loss_morph", 0.0)))
             history["val_mean_norm_err"].append(float(curr_mean_norm))
             history["val_median_norm_err"].append(float(curr_median_norm))
             history["val_share_within_5pct"].append(float(curr_share_5))
@@ -1331,11 +1371,13 @@ def main(
                     "train_loss_hm": train_loss_dict.get("heatmap", 0.0),
                     "train_loss_cd": train_loss_dict.get("coord", 0.0),
                     "train_loss_graph": train_loss_dict.get("graph", 0.0),
+                    "train_loss_morph": train_loss_dict.get("morph", 0.0),
                     "val_loss_total": val_loss,
                     "val_loss": val_loss,
                     "val_loss_hm": metrics.get("loss_hm", 0.0),
                     "val_loss_cd": metrics.get("loss_cd", 0.0),
                     "val_loss_graph": metrics.get("loss_graph", 0.0),
+                    "val_loss_morph": metrics.get("loss_morph", 0.0),
                     "val_mean_norm_err": curr_mean_norm,
                     "val_median_norm_err": curr_median_norm,
                     "val_share_within_5pct": curr_share_5,
@@ -1346,6 +1388,7 @@ def main(
                     "epoch_time_seconds": epoch_time,
                     "lambda_coord": effective_lambda_cd,
                     "lambda_graph": effective_lambda_graph,
+                    "lambda_morph": effective_lambda_morph,
                     "val_share_within_2_5pct": curr_share_2_5,
                     "val_share_within_7_5pct": curr_share_7_5,
                     "val_share_within_10pct": curr_share_10,
@@ -1362,8 +1405,8 @@ def main(
 
             print(
                 f"Epoch [{epoch + 1}/{epochs}] | Time: {epoch_time:.2f}s | "
-                f"Train Loss: {train_loss:.4f} (HM: {train_loss_dict.get('heatmap', 0.0):.4f}, CD: {train_loss_dict.get('coord', 0.0):.4f}, G: {train_loss_dict.get('graph', 0.0):.4f}) | "
-                f"Val Loss: {val_loss:.4f} (HM: {metrics.get('loss_hm', 0.0):.4f}, CD: {metrics.get('loss_cd', 0.0):.4f}, G: {metrics.get('loss_graph', 0.0):.4f}) | "
+                f"Train Loss: {train_loss:.4f} (HM: {train_loss_dict.get('heatmap', 0.0):.4f}, CD: {train_loss_dict.get('coord', 0.0):.4f}, G: {train_loss_dict.get('graph', 0.0):.4f}, M: {train_loss_dict.get('morph', 0.0):.4f}) | "
+                f"Val Loss: {val_loss:.4f} (HM: {metrics.get('loss_hm', 0.0):.4f}, CD: {metrics.get('loss_cd', 0.0):.4f}, G: {metrics.get('loss_graph', 0.0):.4f}, M: {metrics.get('loss_morph', 0.0):.4f}) | "
                 f"Norm Err: {curr_mean_norm:.2f}% (Med: {curr_median_norm:.2f}%) | "
                 f"Share ≤5%: {curr_share_5:.1f}% | LR: {current_lr:.2e} | Best Ep: {best_checkpoint_epoch}"
             )
@@ -1656,6 +1699,12 @@ if __name__ == "__main__":
         help=f"Weight for Anatomical Graph Loss on landmark edges (default: {LAMBDA_GRAPH})",
     )
     parser.add_argument(
+        "--lambda-morph",
+        type=float,
+        default=LAMBDA_MORPH,
+        help=f"Weight for Morphometric Shape Loss (Shape Index & Taper Ratio) (default: {LAMBDA_MORPH})",
+    )
+    parser.add_argument(
         "--balanced-sampling",
         dest="use_balanced_sampling",
         action="store_true",
@@ -1685,6 +1734,7 @@ if __name__ == "__main__":
         lambda_hm=args.lambda_hm,
         lambda_cd=args.lambda_cd,
         lambda_graph=args.lambda_graph,
+        lambda_morph=args.lambda_morph,
         img_size=args.img_size,
         experiment_name=args.experiment_name,
         tracking_uri=args.tracking_uri,

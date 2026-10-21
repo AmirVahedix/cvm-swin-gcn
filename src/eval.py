@@ -16,6 +16,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import csv
 import math
+import requests
 from dotenv import load_dotenv
 import mlflow
 
@@ -31,7 +32,6 @@ from src.utils.metrics import (
     format_summary_report,
     compute_inferior_border_projections,
     compute_reference_length,
-    determine_image_source,
     C3_PI_IDX,
     C3_AI_IDX,
     VERTEBRA_INFERIOR_LANDMARKS,
@@ -125,6 +125,149 @@ def draw_legend_box(vis_img: np.ndarray, num_landmarks: int):
             thickness,
             cv2.LINE_AA,
         )
+
+
+def load_cvm_stage_mapping(
+    export_json_path: str | None = None,
+    api_url: str | None = None,
+    api_token: str | None = None,
+) -> dict[str, int]:
+    """
+    Loads ground-truth CVM stages (1-6) from CVM Backend API, local export JSON, or SQLite database.
+    Maps filenames, stem identifiers, and task IDs to integer stage levels.
+    """
+    stage_map: dict[str, int] = {}
+
+    def _register(key, stage_val):
+        if key is None or stage_val is None:
+            return
+        try:
+            istg = int(stage_val)
+            if 1 <= istg <= 6:
+                k_str = str(key).strip()
+                stage_map[k_str] = istg
+                stem = Path(k_str).stem
+                stage_map[stem] = istg
+                if k_str.isdigit():
+                    stage_map[f"{int(k_str)}.jpg"] = istg
+                    stage_map[f"{int(k_str)}.png"] = istg
+                    stage_map[f"{int(k_str):04d}"] = istg
+                    stage_map[f"{int(k_str):04d}.jpg"] = istg
+                    stage_map[f"{int(k_str):04d}.png"] = istg
+        except (ValueError, TypeError):
+            pass
+
+    # 1. Custom or explicitly provided export JSON
+    if export_json_path and os.path.exists(export_json_path):
+        try:
+            with open(export_json_path, "r", encoding="utf-8") as f:
+                raw_data = json.load(f)
+            tasks = raw_data.get("data", raw_data) if isinstance(raw_data, dict) else raw_data
+            if isinstance(tasks, list):
+                for t in tasks:
+                    if not isinstance(t, dict):
+                        continue
+                    stg = (
+                        t.get("finalStage")
+                        or t.get("final_stage")
+                        or t.get("cvmStage")
+                        or t.get("cvm_stage")
+                        or t.get("stage")
+                    )
+                    fn = t.get("filename") or t.get("file_upload") or t.get("data", {}).get("img")
+                    tid = t.get("taskId") or t.get("task_id") or t.get("id")
+                    if fn:
+                        _register(os.path.basename(str(fn).split("?")[0]), stg)
+                    if tid is not None:
+                        _register(tid, stg)
+            print(f"--> Loaded stage mapping from export file: {export_json_path}")
+        except Exception as e:
+            print(f"⚠️ Warning: Could not parse export file '{export_json_path}': {e}")
+
+    # 2. CVM Backend API
+    chosen_url = (api_url or os.getenv("CVM_API_URL") or "https://cvm.amirlogedixyz.ir").rstrip("/")
+    chosen_token = api_token or os.getenv("CVM_API_TOKEN") or "O0s66Vi.r8e8WBGfY9I3x4neIm"
+    if chosen_url:
+        try:
+            headers = {"Authorization": f"Bearer {chosen_token}"} if chosen_token else {}
+            resp = requests.get(
+                f"{chosen_url}/api/export?exclude_review_needed=false&exclude_excluded=false",
+                headers=headers,
+                timeout=12,
+            )
+            if resp.status_code == 200:
+                tasks = resp.json().get("data", [])
+                for t in tasks:
+                    stg = (
+                        t.get("finalStage")
+                        or t.get("final_stage")
+                        or t.get("cvmStage")
+                        or t.get("cvm_stage")
+                    )
+                    fn = t.get("filename") or t.get("file_upload") or t.get("imageUrl") or t.get("data", {}).get("img")
+                    tid = t.get("taskId") or t.get("task_id") or t.get("id")
+                    if fn:
+                        _register(os.path.basename(str(fn).split("?")[0]), stg)
+                    if tid is not None:
+                        _register(tid, stg)
+                print(f"--> Loaded stage mapping from CVM Backend API at {chosen_url} ({len(stage_map)} entries).")
+        except Exception as e:
+            print(f"ℹ️ Note: Live CVM API fetch skipped/failed ({e}). Checking local database fallbacks...")
+
+    # 3. Local SQLite database fallbacks
+    db_candidates = [
+        Path("/Users/macbookair/cvm-project/cvm-backend/data/annotations.db"),
+        Path("data/annotations.db"),
+        Path("../cvm-backend/data/annotations.db"),
+    ]
+    for db_path in db_candidates:
+        if db_path.exists():
+            try:
+                import sqlite3
+                conn = sqlite3.connect(str(db_path))
+                c = conn.cursor()
+                c.execute("SELECT task_id, filename, final_stage, cvm_stage FROM annotations")
+                for tid, fn, fstg, cstg in c.fetchall():
+                    stg = fstg if fstg is not None else cstg
+                    if fn:
+                        _register(os.path.basename(str(fn)), stg)
+                    if tid is not None:
+                        _register(tid, stg)
+                conn.close()
+                print(f"--> Supplemented stage mapping from local database: {db_path}")
+                break
+            except Exception as e:
+                print(f"⚠️ Warning: Could not read local SQLite DB '{db_path}': {e}")
+
+    # 4. Local export JSON candidates
+    if len(stage_map) == 0:
+        local_candidates = [
+            Path("data/exports/export.json"),
+            Path("/Users/macbookair/cvm-project/cvm-backend/data/dataset_backup.json"),
+        ]
+        for lc in local_candidates:
+            if lc.exists():
+                try:
+                    with open(lc, "r", encoding="utf-8") as f:
+                        raw_data = json.load(f)
+                    tasks = raw_data.get("data", raw_data) if isinstance(raw_data, dict) else raw_data
+                    if isinstance(tasks, list):
+                        for t in tasks:
+                            if not isinstance(t, dict):
+                                continue
+                            stg = t.get("finalStage") or t.get("final_stage") or t.get("cvmStage") or t.get("cvm_stage")
+                            fn = t.get("filename") or t.get("file_upload") or t.get("data", {}).get("img")
+                            tid = t.get("taskId") or t.get("id")
+                            if fn:
+                                _register(os.path.basename(str(fn).split("?")[0]), stg)
+                            if tid is not None:
+                                _register(tid, stg)
+                    print(f"--> Supplemented stage mapping from local JSON: {lc}")
+                    break
+                except Exception:
+                    pass
+
+    return stage_map
 
 
 def load_model(weights_path: str, device: torch.device, img_size: int = 640) -> torch.nn.Module:
@@ -1236,6 +1379,9 @@ def run_evaluation(
     tta_scales: list[float] | tuple[float, ...] = (0.95, 1.0, 1.05),
     tta_shifts: list[tuple[int, int]] | None = None,
     roi_only: bool = True,
+    export_json: str | None = None,
+    api_url: str | None = None,
+    api_token: str | None = None,
 ) -> tuple[dict, str]:
     """
     Main programmatic evaluation routine.
@@ -1289,6 +1435,13 @@ def run_evaluation(
         batch_size=batch_size,
         img_size=img_size,
         num_workers=0,  # Safety for cross-platform evaluation
+    )
+
+    # Load CVM stage ground truth mapping (API priority with database/file fallbacks)
+    stage_map = load_cvm_stage_mapping(
+        export_json_path=export_json,
+        api_url=api_url,
+        api_token=api_token,
     )
 
     # 3. Aggregate all predictions and ground truth targets
@@ -1411,24 +1564,42 @@ def run_evaluation(
 
         try:
             gt_cvm = evaluate_landmarks_dict(gt_dict, img_width=orig_w_int, img_height=orig_h_int)
-            true_stage = int(gt_cvm.get("stage", -1))
         except Exception:
             gt_cvm = {}
-            true_stage = -1
 
         try:
             pred_cvm = evaluate_landmarks_dict(pred_dict, img_width=orig_w_int, img_height=orig_h_int)
-            predicted_stage = int(pred_cvm.get("stage", -1))
         except Exception:
             pred_cvm = {}
-            predicted_stage = -1
+
+        # Determine predicted stage (from PercentCVMEngine using latest JS rules)
+        predicted_stage = pred_cvm.get("stage_number", -1)
+        if predicted_stage == -1 and "stage" in pred_cvm:
+            try:
+                predicted_stage = int(str(pred_cvm["stage"]).replace("CS", ""))
+            except (ValueError, TypeError):
+                predicted_stage = -1
+
+        # Determine ground-truth clinical stage (API export data priority, fallback to GT geometry)
+        true_stage = -1
+        fn_stem = Path(fn).stem
+        for cand in (fn, fn_stem, str(int(fn_stem)) if fn_stem.isdigit() else None):
+            if cand and cand in stage_map:
+                true_stage = stage_map[cand]
+                break
+        if true_stage == -1 or not (1 <= true_stage <= 6):
+            true_stage = gt_cvm.get("stage_number", -1)
+            if true_stage == -1 and "stage" in gt_cvm:
+                try:
+                    true_stage = int(str(gt_cvm["stage"]).replace("CS", ""))
+                except (ValueError, TypeError):
+                    true_stage = -1
 
         pred_stages_list.append(predicted_stage)
         gt_stages_list.append(true_stage)
         pred_cvm_list.append(pred_cvm)
         gt_cvm_list.append(gt_cvm)
 
-        source = determine_image_source(fn, orig_w_int, orig_h_int)
         split = "test"
 
         # Calculate inferior border projections for this sample (along tangent & perpendicular normal)
@@ -1486,7 +1657,7 @@ def run_evaluation(
                 perp_pct_str = ""
 
             csv_rows.append([
-                fn, source, split, true_stage, predicted_stage,
+                fn, split, true_stage, predicted_stage,
                 orig_w_int, orig_h_int, pad_x, pad_y, f"{scale_x:.6f}", f"{scale_y:.6f}",
                 lm_name, f"{gt_x:.4f}", f"{gt_y:.4f}", f"{pred_x:.4f}", f"{pred_y:.4f}",
                 f"{ref_length:.4f}", f"{rad_px:.4f}", f"{norm_pct:.4f}",
@@ -1497,7 +1668,7 @@ def run_evaluation(
     # Save predictions_landmarks.csv
     csv_path = run_folder / "predictions_landmarks.csv"
     csv_headers = [
-        "image_id", "source", "split", "true_stage", "predicted_stage",
+        "image_id", "split", "true_stage", "predicted_stage",
         "orig_w", "orig_h", "pad_x", "pad_y", "scale_x", "scale_y",
         "landmark_name", "gt_x", "gt_y", "pred_x", "pred_y", "ref_length",
         "radial_error_px", "normalized_error_pct",
@@ -1513,18 +1684,18 @@ def run_evaluation(
     # 5. Compute Comprehensive Publication-Grade Evaluation Suite
     pred_morphometrics = {
         "concavities": {
-            "C2": [c.get("concavities", {}).get("C2", {}).get("concavity_percentage", 0.0) for c in pred_cvm_list],
-            "C3": [c.get("concavities", {}).get("C3", {}).get("concavity_percentage", 0.0) for c in pred_cvm_list],
-            "C4": [c.get("concavities", {}).get("C4", {}).get("concavity_percentage", 0.0) for c in pred_cvm_list],
+            "C2": [c.get("percentages", {}).get("C2", 0.0) for c in pred_cvm_list],
+            "C3": [c.get("percentages", {}).get("C3", 0.0) for c in pred_cvm_list],
+            "C4": [c.get("percentages", {}).get("C4", 0.0) for c in pred_cvm_list],
         },
         "shape_indices": {
             "C3": [c.get("shapes", {}).get("C3", {}).get("shape_index", 1.0) for c in pred_cvm_list],
             "C4": [c.get("shapes", {}).get("C4", {}).get("shape_index", 1.0) for c in pred_cvm_list],
         },
         "notches": {
-            "C2": [c.get("concavities", {}).get("C2", {}).get("has_notch", False) for c in pred_cvm_list],
-            "C3": [c.get("concavities", {}).get("C3", {}).get("has_notch", False) for c in pred_cvm_list],
-            "C4": [c.get("concavities", {}).get("C4", {}).get("has_notch", False) for c in pred_cvm_list],
+            "C2": [c.get("notches", {}).get("C2", False) for c in pred_cvm_list],
+            "C3": [c.get("notches", {}).get("C3", False) for c in pred_cvm_list],
+            "C4": [c.get("notches", {}).get("C4", False) for c in pred_cvm_list],
         },
         "shapes": {
             "C3": [c.get("shapes", {}).get("C3", {}).get("shape", "Unknown") for c in pred_cvm_list],
@@ -1533,18 +1704,18 @@ def run_evaluation(
     }
     gt_morphometrics = {
         "concavities": {
-            "C2": [c.get("concavities", {}).get("C2", {}).get("concavity_percentage", 0.0) for c in gt_cvm_list],
-            "C3": [c.get("concavities", {}).get("C3", {}).get("concavity_percentage", 0.0) for c in gt_cvm_list],
-            "C4": [c.get("concavities", {}).get("C4", {}).get("concavity_percentage", 0.0) for c in gt_cvm_list],
+            "C2": [c.get("percentages", {}).get("C2", 0.0) for c in gt_cvm_list],
+            "C3": [c.get("percentages", {}).get("C3", 0.0) for c in gt_cvm_list],
+            "C4": [c.get("percentages", {}).get("C4", 0.0) for c in gt_cvm_list],
         },
         "shape_indices": {
             "C3": [c.get("shapes", {}).get("C3", {}).get("shape_index", 1.0) for c in gt_cvm_list],
             "C4": [c.get("shapes", {}).get("C4", {}).get("shape_index", 1.0) for c in gt_cvm_list],
         },
         "notches": {
-            "C2": [c.get("concavities", {}).get("C2", {}).get("has_notch", False) for c in gt_cvm_list],
-            "C3": [c.get("concavities", {}).get("C3", {}).get("has_notch", False) for c in gt_cvm_list],
-            "C4": [c.get("concavities", {}).get("C4", {}).get("has_notch", False) for c in gt_cvm_list],
+            "C2": [c.get("notches", {}).get("C2", False) for c in gt_cvm_list],
+            "C3": [c.get("notches", {}).get("C3", False) for c in gt_cvm_list],
+            "C4": [c.get("notches", {}).get("C4", False) for c in gt_cvm_list],
         },
         "shapes": {
             "C3": [c.get("shapes", {}).get("C3", {}).get("shape", "Unknown") for c in gt_cvm_list],
@@ -1598,6 +1769,23 @@ def run_evaluation(
         title=f"CVM SWIN-GCN EVALUATION REPORT — {run_name}",
     )
     print("\n" + report_text + "\n")
+
+    # Attach staging metrics to summary_metrics for MLflow logging and reporting
+    staging_eval = comprehensive_metrics.get("staging", {})
+    if staging_eval and staging_eval.get("valid_samples", 0) > 0:
+        summary_metrics["staging"] = staging_eval
+        if "overall_accuracy" in staging_eval:
+            summary_metrics["staging_accuracy"] = float(staging_eval["overall_accuracy"])
+        if "adjacent_accuracy" in staging_eval:
+            summary_metrics["staging_adjacent_accuracy"] = float(staging_eval["adjacent_accuracy"])
+        if "quadratic_weighted_kappa" in staging_eval:
+            summary_metrics["staging_qwk"] = float(staging_eval["quadratic_weighted_kappa"])
+        if "unweighted_cohen_kappa" in staging_eval:
+            summary_metrics["staging_uwk"] = float(staging_eval["unweighted_cohen_kappa"])
+        if "mean_absolute_stage_error" in staging_eval:
+            summary_metrics["staging_mase"] = float(staging_eval["mean_absolute_stage_error"])
+        if "macro_average" in staging_eval:
+            summary_metrics["staging_macro_f1"] = float(staging_eval["macro_average"].get("f1_score", 0.0))
 
     # 6. Save JSON metrics and summary report TXT
     metrics_export = {
@@ -1820,6 +2008,24 @@ def main():
         action="store_true",
         help="Render full 640x640 cephalometric image instead of cropped vertebrae ROI side-by-side.",
     )
+    parser.add_argument(
+        "--export-json",
+        type=str,
+        default=None,
+        help="Path to CVM/Label-Studio export JSON file to load ground-truth CVM stages.",
+    )
+    parser.add_argument(
+        "--api-url",
+        type=str,
+        default=None,
+        help="CVM Backend API URL to fetch test stage cohort ground truth (overrides CVM_API_URL).",
+    )
+    parser.add_argument(
+        "--api-token",
+        type=str,
+        default=None,
+        help="CVM Backend API Bearer token (overrides CVM_API_TOKEN).",
+    )
 
     args = parser.parse_args()
 
@@ -1857,6 +2063,9 @@ def main():
         tta_scales=parsed_tta_scales,
         tta_shifts=parsed_tta_shifts if len(parsed_tta_shifts) > 0 else None,
         roi_only=not args.full_image,
+        export_json=args.export_json,
+        api_url=args.api_url,
+        api_token=args.api_token,
     )
 
 

@@ -135,3 +135,168 @@ class AnatomicalGraphLoss(nn.Module):
         valid_count = valid_pairs.sum().clamp(min=1.0)
 
         return edge_error.sum() / valid_count
+
+
+class MorphometricShapeLoss(nn.Module):
+    """
+    Morphometric Shape Loss for Vertebrae C3 and C4.
+    Penalizes deviations in Shape Index (SI) and Taper Ratio (TR) using the exact
+    anatomical midline axis formulation from cvm-backend/app/static/calculator.js (classifyC3C4Shape).
+
+    Mathematical Formulation (Anatomical Midline Axis Mode):
+      - Inferior Midline: m_inf = (pi + ai) / 2
+      - Superior Midline: m_sup = (ps + as) / 2
+      - Longitudinal Axis Vector: v = m_sup - m_inf, h_mid = ||v||
+      - Unit Vector Longitudinal: u = (ux, uy) = v / h_mid
+      - Transverse Axis Unit Vector (pointing anteriorly): w = (-uy, ux) (flipped if w . (ai - pi) < 0)
+      - Projected Widths along transverse axis:
+          wi = |(ai - pi) . w|
+          ws = |(as - ps) . w|
+          mean_width = (wi + ws) / 2
+      - Projected Heights along longitudinal axis:
+          hp = |(ps - pi) . u|
+          ha = |(as - ai) . u|
+          mean_height = (hp + ha) / 2
+      - Shape Index: SI = mean_height / mean_width
+      - Taper Ratio: TR = ha / hp
+    """
+    def __init__(
+        self,
+        weight_si: float = 1.0,
+        weight_taper: float = 1.0,
+        beta: float = 0.05,
+        eps: float = 1e-6,
+    ):
+        super().__init__()
+        self.weight_si = weight_si
+        self.weight_taper = weight_taper
+        self.beta = beta
+        self.eps = eps
+
+    @staticmethod
+    def compute_vertebra_metrics(
+        ps: torch.Tensor,
+        as_pt: torch.Tensor,
+        pi: torch.Tensor,
+        ai: torch.Tensor,
+        eps: float = 1e-6,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Computes Shape Index (SI) and Taper Ratio (TR) for a batch of vertebrae,
+        strictly matching cvm-backend/app/static/calculator.js.
+
+        Args:
+            ps: Posterior-Superior coordinates [B, 2]
+            as_pt: Anterior-Superior coordinates [B, 2]
+            pi: Posterior-Inferior coordinates [B, 2]
+            ai: Anterior-Inferior coordinates [B, 2]
+            eps: Epsilon for division stability
+
+        Returns:
+            si: Shape Index [B, 1] (mean_height / mean_width)
+            tr: Taper Ratio [B, 1] (ha / hp)
+        """
+        # Midline points
+        m_inf = (pi + ai) / 2.0  # [B, 2]
+        m_sup = (ps + as_pt) / 2.0  # [B, 2]
+
+        # Midline longitudinal axis vector pointing superiorly
+        v = m_sup - m_inf  # [B, 2]
+        h_mid = torch.sqrt(torch.sum(v ** 2, dim=-1, keepdim=True) + 1e-8)  # [B, 1]
+
+        # Unit vector along longitudinal axis
+        u = v / h_mid  # [B, 2]
+        ux = u[:, 0:1]  # [B, 1]
+        uy = u[:, 1:2]  # [B, 1]
+
+        # Orthogonal transverse axis unit vector (pointing anteriorly)
+        wx = -uy  # [B, 1]
+        wy = ux  # [B, 1]
+        base_dx = ai[:, 0:1] - pi[:, 0:1]  # [B, 1]
+        base_dy = ai[:, 1:2] - pi[:, 1:2]  # [B, 1]
+
+        dot_proj = wx * base_dx + wy * base_dy
+        sign = torch.where(dot_proj < 0, -1.0, 1.0)
+        wx = wx * sign
+        wy = wy * sign
+
+        # Projected widths along transverse axis
+        wi = torch.abs((ai[:, 0:1] - pi[:, 0:1]) * wx + (ai[:, 1:2] - pi[:, 1:2]) * wy)
+        ws = torch.abs((as_pt[:, 0:1] - ps[:, 0:1]) * wx + (as_pt[:, 1:2] - ps[:, 1:2]) * wy)
+        mean_width = (wi + ws) / 2.0
+
+        # Projected heights along longitudinal axis
+        hp = torch.abs((ps[:, 0:1] - pi[:, 0:1]) * ux + (ps[:, 1:2] - pi[:, 1:2]) * uy)
+        ha = torch.abs((as_pt[:, 0:1] - ai[:, 0:1]) * ux + (as_pt[:, 1:2] - ai[:, 1:2]) * uy)
+        mean_height = (hp + ha) / 2.0
+
+        si = mean_height / (mean_width + eps)
+        tr = ha / (hp + eps)
+
+        return si, tr
+
+    def forward(
+        self,
+        pred_coords: torch.Tensor,
+        gt_coords: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Args:
+            pred_coords: Shape [B, N, 2] in normalized scale [0, 1]
+            gt_coords: Shape [B, N, 2] in normalized scale [0, 1]
+
+        Returns:
+            Scalar Smooth L1 morphometric shape loss.
+        """
+        device = pred_coords.device
+        total_loss = torch.tensor(0.0, device=device)
+        total_valid = 0.0
+
+        # Vertebra landmark quadruplets (ps, as, pi, ai)
+        # C3: ps=3, as=4, pi=5, ai=7
+        # C4: ps=8, as=9, pi=10, ai=12
+        vertebrae_indices = [(3, 4, 5, 7), (8, 9, 10, 12)]
+
+        for ps_idx, as_idx, pi_idx, ai_idx in vertebrae_indices:
+            # Check validity of ground-truth corners across batch
+            valid = (
+                (gt_coords[:, ps_idx, 0] >= 0) & (gt_coords[:, ps_idx, 1] >= 0) &
+                (gt_coords[:, as_idx, 0] >= 0) & (gt_coords[:, as_idx, 1] >= 0) &
+                (gt_coords[:, pi_idx, 0] >= 0) & (gt_coords[:, pi_idx, 1] >= 0) &
+                (gt_coords[:, ai_idx, 0] >= 0) & (gt_coords[:, ai_idx, 1] >= 0)
+            )  # [B]
+
+            if not valid.any():
+                continue
+
+            # Compute predicted SI and TR (differentiable)
+            pred_si, pred_tr = self.compute_vertebra_metrics(
+                pred_coords[:, ps_idx, :],
+                pred_coords[:, as_idx, :],
+                pred_coords[:, pi_idx, :],
+                pred_coords[:, ai_idx, :],
+                eps=self.eps,
+            )
+
+            # Compute ground truth SI and TR
+            with torch.no_grad():
+                gt_si, gt_tr = self.compute_vertebra_metrics(
+                    gt_coords[:, ps_idx, :],
+                    gt_coords[:, as_idx, :],
+                    gt_coords[:, pi_idx, :],
+                    gt_coords[:, ai_idx, :],
+                    eps=self.eps,
+                )
+
+            # Smooth L1 loss per sample
+            loss_si = F.smooth_l1_loss(pred_si, gt_si, beta=self.beta, reduction="none").squeeze(-1)
+            loss_tr = F.smooth_l1_loss(pred_tr, gt_tr, beta=self.beta, reduction="none").squeeze(-1)
+
+            vert_loss = (self.weight_si * loss_si + self.weight_taper * loss_tr) * valid.float()
+            total_loss = total_loss + vert_loss.sum()
+            total_valid += valid.float().sum()
+
+        if total_valid > 0.0:
+            return total_loss / total_valid
+        return torch.tensor(0.0, device=device)
+

@@ -17,8 +17,9 @@ from src.utils.metrics import (
     compute_borderline_analysis,
     bootstrap_image_confidence_interval,
     compute_test_comprehensive_metrics,
+    compute_staging_metrics,
+    compute_wilson_confidence_interval,
     format_summary_report,
-    determine_image_source,
     C3_PI_IDX,
     C3_AI_IDX,
 )
@@ -165,22 +166,17 @@ class TestNormalizedMetricsSuite(unittest.TestCase):
         self.assertGreater(upper, lower)
         self.assertTrue(2.0 <= lower <= 5.0)
 
-    def test_determine_image_source(self):
-        self.assertEqual(determine_image_source("TUMS_001.png", 1935, 2400), "institutional")
-        self.assertEqual(determine_image_source("0515.png", 640, 640), "public")
-        self.assertEqual(determine_image_source("tums_scan.jpg", None, None), "institutional")
-
     def test_csv_output_schema_and_comprehensive_metrics(self):
-        # Verify complete schema has exactly 27 required columns
+        # Verify complete schema has exactly 26 required columns
         expected_columns = [
-            "image_id", "source", "split", "true_stage", "predicted_stage",
+            "image_id", "split", "true_stage", "predicted_stage",
             "orig_w", "orig_h", "pad_x", "pad_y", "scale_x", "scale_y",
             "landmark_name", "gt_x", "gt_y", "pred_x", "pred_y", "ref_length",
             "radial_error_px", "normalized_error_pct",
             "signed_dx_px", "signed_dy_px", "signed_dx_pct", "signed_dy_pct",
             "error_along_px", "error_along_pct", "error_perp_px", "error_perp_pct"
         ]
-        self.assertEqual(len(expected_columns), 27)
+        self.assertEqual(len(expected_columns), 26)
 
         # Generate synthetic test set evaluation
         n_samples = 3
@@ -235,17 +231,68 @@ class TestNormalizedMetricsSuite(unittest.TestCase):
         self.assertIn("general", comp_metrics)
         self.assertIn("by_vertebra", comp_metrics)
         self.assertIn("by_landmark", comp_metrics)
-        self.assertIn("by_source", comp_metrics)
+        self.assertNotIn("by_source", comp_metrics)
         self.assertIn("bootstrap_ci_95", comp_metrics)
         self.assertIn("clinical", comp_metrics)
+        self.assertIn("staging", comp_metrics)
+        self.assertNotIn("legacy", comp_metrics)
 
         # Formatted report generation
         report_str = format_summary_report(comp_metrics, title="TEST REPORT")
         self.assertIn("SECTION B.1: OVERALL NORMALIZED LANDMARK PERFORMANCE", report_str)
         self.assertIn("SECTION B.2: PER-VERTEBRA BREAKDOWN", report_str)
         self.assertIn("SECTION B.3: PER-LANDMARK PERFORMANCE", report_str)
-        self.assertIn("SECTION B.4: CROSS-SOURCE STRATIFICATION", report_str)
+        self.assertNotIn("SECTION B.4: CROSS-SOURCE STRATIFICATION", report_str)
         self.assertIn("SECTION C.1: BLAND-ALTMAN AGREEMENT", report_str)
+        self.assertIn("SECTION D: STAGING EVALUATION (TEST SET)", report_str)
+
+    def test_compute_staging_metrics(self):
+        # Synthetic cohort with 12 samples across CS1 to CS6
+        gts = [1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 1]
+        preds = [1, 2, 3, 3, 2, 4, 5, 5, 6, 6, 6, 1]
+
+        stg = compute_staging_metrics(
+            pred_stages=preds,
+            gt_stages=gts,
+            n_bootstrap=100,
+            seed=42,
+        )
+
+        # 1. Overall & Adjacent Accuracy
+        self.assertEqual(stg["valid_samples"], 12)
+        self.assertGreater(stg["overall_accuracy"], 50.0)
+        self.assertGreaterEqual(stg["adjacent_accuracy"], stg["overall_accuracy"])
+        self.assertIn("lower", stg["accuracy_ci_95_wilson"])
+        self.assertIn("upper", stg["accuracy_ci_95_wilson"])
+        self.assertIn("lower", stg["accuracy_ci_95_bootstrap"])
+        self.assertIn("upper", stg["accuracy_ci_95_bootstrap"])
+
+        # 2. Kappa Metrics
+        self.assertIn("quadratic_weighted_kappa", stg)
+        self.assertIn("unweighted_cohen_kappa", stg)
+        self.assertGreater(stg["quadratic_weighted_kappa"], 0.5)
+
+        # 3. 6x6 Confusion Matrix
+        cm = np.array(stg["confusion_matrix"])
+        self.assertEqual(cm.shape, (6, 6))
+        self.assertEqual(np.sum(cm), 12)
+
+        # 4. Per-stage & Macro Averages
+        self.assertEqual(len(stg["per_stage"]), 6)
+        self.assertIn("precision", stg["macro_average"])
+        self.assertIn("recall", stg["macro_average"])
+        self.assertIn("f1_score", stg["macro_average"])
+
+        # 5. Transitions
+        self.assertIn("CS2_CS3", stg["transitions"])
+        self.assertIn("CS3_CS4", stg["transitions"])
+        self.assertIn("CS5_CS6", stg["transitions"])
+        self.assertIn("error_rate_pct", stg["transitions"]["CS2_CS3"])
+        self.assertIn("cross_boundary_error_rate_pct", stg["transitions"]["CS2_CS3"])
+
+        # 6. MASE
+        self.assertIn("mean_absolute_stage_error", stg)
+        self.assertNotIn("by_source", stg)
 
 
 if __name__ == "__main__":

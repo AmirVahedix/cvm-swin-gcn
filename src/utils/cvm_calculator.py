@@ -106,7 +106,7 @@ def calculate_shear_angle(pi: Point, ai: Point, as_pt: Point) -> float:
 
 @dataclass
 class PercentEngineConfig:
-    engine_mode: str = "axis"  # "axis" (Anatomical Midline Axis Calibrated) or "legacy"
+    engine_mode: str = "axis"  # "axis" (Anatomical Midline Axis Calibrated)
     c2_concavity_percent: float = 5.0
     c3_concavity_percent: float = 5.0
     c4_concavity_percent: float = 6.0
@@ -121,8 +121,8 @@ class PercentEngineConfig:
     square_si_lower: float = 0.94
     square_si_upper: float = 1.08
     rect_vertical_si_threshold: float = 1.08
-    trapezoid_taper_threshold: float = 1.15
-    trapezoid_width_taper_threshold: float = 1.20
+    trapezoid_taper_threshold: float = 1.14
+    trapezoid_width_taper_threshold: float = 1.18
     width_taper_threshold: float = 1.15
     max_square_shear_angle: float = 18.0
     joint_square_si_threshold: float = 0.94
@@ -248,6 +248,11 @@ class PercentCVMEngine:
                 "C3": round(c3_pct, 2),
                 "C4": round(c4_pct, 2),
             },
+            "concavities": {
+                "C2": {"concavity_percentage": round(c2_pct, 2), "has_notch": bool(n2)},
+                "C3": {"concavity_percentage": round(c3_pct, 2), "has_notch": bool(n3)},
+                "C4": {"concavity_percentage": round(c4_pct, 2), "has_notch": bool(n4)},
+            },
             "shapes": {
                 "C3": c3_shape,
                 "C4": c4_shape,
@@ -259,7 +264,7 @@ class PercentCVMEngine:
             },
             "anomaly_detected": anomaly_detected,
             "mean_shape_index": round(mean_si, 3),
-            "engine_mode": getattr(self.config, "engine_mode", "legacy"),
+            "engine_mode": getattr(self.config, "engine_mode", "axis"),
         }
 
     def _classify_shape(self, vertebra: VertebraC3C4, concavity_pct: float = 0.0) -> Dict[str, Any]:
@@ -268,7 +273,7 @@ class PercentCVMEngine:
         ps = vertebra.superior_posterior
         as_pt = vertebra.superior_anterior
 
-        mode = getattr(self.config, "engine_mode", "legacy")
+        mode = getattr(self.config, "engine_mode", "axis")
 
         if mode == "axis":
             # Anatomical Midline Axis Mode

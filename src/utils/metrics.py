@@ -10,15 +10,21 @@ Features:
 - Borderline analysis (±1-2 percentage points from concavity cutoffs)
 - Source breakdown: institutional (TUMS) vs public (Roboflow)
 - Detailed per-sample, per-landmark CSV export rows
-- Legacy mm conversion preservation
+- Comprehensive CVM staging evaluation (Section D)
 """
 
 import math
 import csv
+import warnings
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 import numpy as np
 import torch
+from sklearn.metrics import (
+    cohen_kappa_score,
+    confusion_matrix,
+    precision_recall_fscore_support,
+)
 
 from src.data.constants import LANDMARK_CLASSES, NUM_LANDMARKS
 from src.utils.cvm_calculator import (
@@ -46,27 +52,6 @@ VERTEBRA_GROUPS = {
     "C3": [3, 4, 5, 6, 7],
     "C4": [8, 9, 10, 11, 12],
 }
-
-
-def determine_image_source(
-    filename: str,
-    orig_w: Optional[int] = None,
-    orig_h: Optional[int] = None,
-) -> str:
-    """
-    Determines whether a radiograph originates from the institutional clinical cohort
-    (TUMS Department of Oral & Maxillofacial Radiology, native scanner resolutions e.g. 1935x2400)
-    or public multi-center repositories (Roboflow Universe, pre-resized 640x640).
-    """
-    fname = str(filename).lower()
-    if fname.startswith("tums") or "tums" in fname:
-        return "institutional"
-    if orig_w is not None and orig_h is not None:
-        if orig_w == 640 and orig_h == 640:
-            return "public"
-        if max(orig_w, orig_h) > 640:
-            return "institutional"
-    return "institutional" if (orig_w and orig_w > 640) else "public"
 
 
 def compute_reference_length(
@@ -439,33 +424,6 @@ def compute_landmark_breakdown(
     return results
 
 
-def compute_source_breakdown(
-    norm_errors: np.ndarray,
-    valid_mask: np.ndarray,
-    sources: List[str],
-) -> Dict[str, Dict[str, Any]]:
-    """
-    Stratifies metrics by image source (institutional vs public).
-    """
-    sources_arr = np.asarray(sources)
-    unique_sources = sorted(list(set(sources)))
-    results = {}
-    for src in unique_sources:
-        src_mask = sources_arr == src
-        if not np.any(src_mask):
-            continue
-        sub_errors = norm_errors[src_mask]
-        sub_valid = valid_mask[src_mask]
-        pooled_errors = sub_errors[sub_valid]
-
-        stats = compute_distribution_statistics(pooled_errors)
-        vert_stats = compute_vertebra_breakdown(sub_errors, sub_valid)
-        stats["by_vertebra"] = vert_stats
-        results[src] = stats
-
-    return results
-
-
 def compute_bland_altman(pred: np.ndarray, gt: np.ndarray) -> Dict[str, float]:
     """
     Computes Bland-Altman statistics:
@@ -621,6 +579,245 @@ def compute_borderline_analysis(
         }
 
     return results
+
+
+def compute_wilson_confidence_interval(k: int, n: int, confidence: float = 0.95) -> Dict[str, float]:
+    """
+    Computes exact Wilson score confidence interval for a binomial proportion.
+    Returns {'lower': lower_pct, 'upper': upper_pct}.
+    """
+    if n == 0:
+        return {"lower": 0.0, "upper": 0.0}
+    p = k / n
+    z = 1.959963984540054  # 95% two-sided
+    denom = 1.0 + (z**2) / n
+    center = (p + (z**2) / (2.0 * n)) / denom
+    margin = (z * math.sqrt((p * (1.0 - p) / n) + ((z**2) / (4.0 * (n**2))))) / denom
+    lower = max(0.0, center - margin) * 100.0
+    upper = min(1.0, center + margin) * 100.0
+    return {"lower": float(round(lower, 2)), "upper": float(round(upper, 2))}
+
+
+def compute_staging_metrics(
+    pred_stages: Union[np.ndarray, List[int]],
+    gt_stages: Union[np.ndarray, List[int]],
+    n_bootstrap: int = 1000,
+    seed: int = 42,
+) -> Dict[str, Any]:
+    """
+    Section D: Comprehensive CVM Staging Evaluation Suite on the test set.
+    Calculates:
+    - Overall accuracy with 95% CI (Wilson score & bootstrap)
+    - Adjacent-stage accuracy (±1) with 95% CI (Wilson score & bootstrap)
+    - Quadratic weighted kappa and unweighted Cohen's kappa, with 95% bootstrap CIs
+    - 6×6 confusion matrix (raw counts and row-normalized percentages)
+    - Per-stage precision, recall, F1, and support, plus macro average
+    - Error rates at clinically important transitions: CS2/3, CS3/4, CS5/6
+      (cohort error rate and cross-boundary error rate)
+    - Mean absolute stage error (MASE)
+    """
+    p_raw = np.asarray(pred_stages)
+    g_raw = np.asarray(gt_stages)
+
+    total_samples = len(g_raw)
+    valid_mask = (g_raw >= 1) & (g_raw <= 6) & (p_raw >= 1) & (p_raw <= 6)
+    valid_samples = int(np.sum(valid_mask))
+
+    labels = [1, 2, 3, 4, 5, 6]
+    stage_names = ["CS1", "CS2", "CS3", "CS4", "CS5", "CS6"]
+
+    if valid_samples == 0:
+        return {
+            "total_samples": total_samples,
+            "valid_samples": 0,
+            "overall_accuracy": 0.0,
+            "accuracy_ci_95_wilson": {"lower": 0.0, "upper": 0.0},
+            "accuracy_ci_95_bootstrap": {"lower": 0.0, "upper": 0.0},
+            "adjacent_accuracy": 0.0,
+            "adjacent_accuracy_ci_95_wilson": {"lower": 0.0, "upper": 0.0},
+            "adjacent_accuracy_ci_95_bootstrap": {"lower": 0.0, "upper": 0.0},
+            "quadratic_weighted_kappa": 0.0,
+            "quadratic_weighted_kappa_ci_95": {"lower": 0.0, "upper": 0.0},
+            "unweighted_cohen_kappa": 0.0,
+            "unweighted_cohen_kappa_ci_95": {"lower": 0.0, "upper": 0.0},
+            "mean_absolute_stage_error": 0.0,
+            "confusion_matrix": [[0] * 6 for _ in range(6)],
+            "confusion_matrix_normalized": [[0.0] * 6 for _ in range(6)],
+            "labels": stage_names,
+            "per_stage": [],
+            "macro_average": {"precision": 0.0, "recall": 0.0, "f1_score": 0.0},
+            "transitions": {},
+        }
+
+    p = p_raw[valid_mask].astype(int)
+    g = g_raw[valid_mask].astype(int)
+    n = valid_samples
+
+    # 1. Overall Accuracy & Adjacent-Stage Accuracy (±1)
+    correct_count = int(np.sum(p == g))
+    overall_acc = float(round(correct_count / n * 100.0, 2))
+    wilson_acc_ci = compute_wilson_confidence_interval(correct_count, n)
+
+    adjacent_count = int(np.sum(np.abs(p - g) <= 1))
+    adjacent_acc = float(round(adjacent_count / n * 100.0, 2))
+    wilson_adj_ci = compute_wilson_confidence_interval(adjacent_count, n)
+
+    # 2. Kappa Statistics (Quadratic Weighted & Unweighted Cohen)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        try:
+            qwk_raw = cohen_kappa_score(g, p, labels=labels, weights="quadratic")
+            qwk = float(round(qwk_raw, 4)) if not np.isnan(qwk_raw) else 0.0
+        except Exception:
+            qwk = 0.0
+
+        try:
+            uwk_raw = cohen_kappa_score(g, p, labels=labels)
+            uwk = float(round(uwk_raw, 4)) if not np.isnan(uwk_raw) else 0.0
+        except Exception:
+            uwk = 0.0
+
+    # 3. Bootstrap 95% Confidence Intervals (Accuracy, Adjacent, QWK, UWK)
+    rng = np.random.RandomState(seed)
+    boot_accs = []
+    boot_adjs = []
+    boot_qwks = []
+    boot_uwks = []
+
+    for _ in range(n_bootstrap):
+        idx = rng.randint(0, n, size=n)
+        b_p = p[idx]
+        b_g = g[idx]
+        boot_accs.append(np.mean(b_p == b_g) * 100.0)
+        boot_adjs.append(np.mean(np.abs(b_p - b_g) <= 1) * 100.0)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            try:
+                k_val = cohen_kappa_score(b_g, b_p, labels=labels, weights="quadratic")
+                if not np.isnan(k_val):
+                    boot_qwks.append(k_val)
+            except Exception:
+                pass
+            try:
+                u_val = cohen_kappa_score(b_g, b_p, labels=labels)
+                if not np.isnan(u_val):
+                    boot_uwks.append(u_val)
+            except Exception:
+                pass
+
+    boot_acc_ci = {
+        "lower": float(round(np.percentile(boot_accs, 2.5), 2)),
+        "upper": float(round(np.percentile(boot_accs, 97.5), 2)),
+    }
+    boot_adj_ci = {
+        "lower": float(round(np.percentile(boot_adjs, 2.5), 2)),
+        "upper": float(round(np.percentile(boot_adjs, 97.5), 2)),
+    }
+    qwk_ci = {
+        "lower": float(round(np.percentile(boot_qwks, 2.5), 3)) if boot_qwks else round(qwk, 3),
+        "upper": float(round(np.percentile(boot_qwks, 97.5), 3)) if boot_qwks else round(qwk, 3),
+    }
+    uwk_ci = {
+        "lower": float(round(np.percentile(boot_uwks, 2.5), 3)) if boot_uwks else round(uwk, 3),
+        "upper": float(round(np.percentile(boot_uwks, 97.5), 3)) if boot_uwks else round(uwk, 3),
+    }
+
+    # 4. 6×6 Confusion Matrix
+    cm = confusion_matrix(g, p, labels=labels)
+    cm_row_sums = cm.sum(axis=1, keepdims=True)
+    cm_norm = np.where(cm_row_sums > 0, (cm / np.maximum(cm_row_sums, 1)) * 100.0, 0.0)
+
+    # 5. Per-Stage Precision, Recall, F1, Support & Macro Average
+    prec, rec, f1, sup = precision_recall_fscore_support(g, p, labels=labels, zero_division=0)
+    per_stage = []
+    for i, s_name in enumerate(stage_names):
+        per_stage.append({
+            "stage": s_name,
+            "stage_num": i + 1,
+            "precision": float(round(prec[i] * 100.0, 2)),
+            "recall": float(round(rec[i] * 100.0, 2)),
+            "f1_score": float(round(f1[i] * 100.0, 2)),
+            "support": int(sup[i]),
+        })
+
+    macro_p, macro_r, macro_f1, _ = precision_recall_fscore_support(g, p, labels=labels, average="macro", zero_division=0)
+    macro_average = {
+        "precision": float(round(macro_p * 100.0, 2)),
+        "recall": float(round(macro_r * 100.0, 2)),
+        "f1_score": float(round(macro_f1 * 100.0, 2)),
+    }
+
+    # 6. Clinically Important Transitions (CS2/3, CS3/4, CS5/6)
+    transitions_spec = [
+        ("CS2_CS3", "CS2/3", 2, 3, "Spurt Onset (Pre-peak to Peak transition)"),
+        ("CS3_CS4", "CS3/4", 3, 4, "Peak Velocity (Peak to Deceleration transition)"),
+        ("CS5_CS6", "CS5/6", 5, 6, "Spurt Completion (Maturation transition)"),
+    ]
+    transitions_metrics = {}
+
+    for key, name, st_a, st_b, desc in transitions_spec:
+        cohort_mask = (g == st_a) | (g == st_b)
+        n_cohort = int(np.sum(cohort_mask))
+
+        if n_cohort > 0:
+            p_sub = p[cohort_mask]
+            g_sub = g[cohort_mask]
+            n_misclass = int(np.sum(p_sub != g_sub))
+            err_rate = float(round(n_misclass / n_cohort * 100.0, 2))
+            acc_rate = float(round((1.0 - n_misclass / n_cohort) * 100.0, 2))
+
+            # Cross-boundary errors
+            if st_a == 2 and st_b == 3:
+                cross_mask = ((g == 2) & (p >= 3)) | ((g == 3) & (p <= 2))
+            elif st_a == 3 and st_b == 4:
+                cross_mask = ((g == 3) & (p >= 4)) | ((g == 4) & (p <= 3))
+            else:  # 5 and 6
+                cross_mask = ((g == 5) & (p >= 6)) | ((g == 6) & (p <= 5))
+
+            n_cross = int(np.sum(cross_mask))
+            cross_err_rate = float(round(n_cross / n_cohort * 100.0, 2))
+        else:
+            n_misclass = 0
+            err_rate = 0.0
+            acc_rate = 100.0
+            n_cross = 0
+            cross_err_rate = 0.0
+
+        transitions_metrics[key] = {
+            "name": name,
+            "clinical_significance": desc,
+            "cohort_total": n_cohort,
+            "misclassified": n_misclass,
+            "error_rate_pct": err_rate,
+            "accuracy_pct": acc_rate,
+            "cross_boundary_errors": n_cross,
+            "cross_boundary_error_rate_pct": cross_err_rate,
+        }
+
+    # 7. Mean Absolute Stage Error (MASE)
+    mase = float(round(np.mean(np.abs(p - g)), 3))
+
+    return {
+        "total_samples": total_samples,
+        "valid_samples": valid_samples,
+        "overall_accuracy": overall_acc,
+        "accuracy_ci_95_wilson": wilson_acc_ci,
+        "accuracy_ci_95_bootstrap": boot_acc_ci,
+        "adjacent_accuracy": adjacent_acc,
+        "adjacent_accuracy_ci_95_wilson": wilson_adj_ci,
+        "adjacent_accuracy_ci_95_bootstrap": boot_adj_ci,
+        "quadratic_weighted_kappa": qwk,
+        "quadratic_weighted_kappa_ci_95": qwk_ci,
+        "unweighted_cohen_kappa": uwk,
+        "unweighted_cohen_kappa_ci_95": uwk_ci,
+        "mean_absolute_stage_error": mase,
+        "confusion_matrix": cm.tolist(),
+        "confusion_matrix_normalized": [[round(x, 2) for x in row] for row in cm_norm.tolist()],
+        "labels": stage_names,
+        "per_stage": per_stage,
+        "macro_average": macro_average,
+        "transitions": transitions_metrics,
+    }
 
 
 def bootstrap_image_confidence_interval(
@@ -825,17 +1022,7 @@ def compute_test_comprehensive_metrics(
         perp_errors_pct=perp_pct_dict,
     )
 
-    # 7. Section B.4: Cross-Source Stratification
-    sources = []
-    for i in range(n_samples):
-        fn = sample_ids[i]
-        orig_w = orig_dims[i][0] if orig_dims and i < len(orig_dims) else None
-        orig_h = orig_dims[i][1] if orig_dims and i < len(orig_dims) else None
-        sources.append(determine_image_source(fn, orig_w, orig_h))
-
-    source_breakdown = compute_source_breakdown(norm_pct, valid_mask, sources)
-
-    # 8. Section B.5: Image-Level Bootstrapping (1,000 resamples)
+    # 7. Section B.4: Image-Level Bootstrapping (1,000 resamples)
     sample_values_by_image = [norm_pct[i][valid_mask[i]] for i in range(n_samples) if np.any(valid_mask[i])]
     mean_ci = bootstrap_image_confidence_interval(
         sample_values_by_image, stat_fn=np.mean, n_resamples=n_bootstrap, seed=bootstrap_seed
@@ -844,7 +1031,7 @@ def compute_test_comprehensive_metrics(
         sample_values_by_image, stat_fn=np.median, n_resamples=n_bootstrap, seed=bootstrap_seed
     )
 
-    # 9. Section C: Clinical Morphometrics
+    # 8. Section C: Clinical Morphometrics
     clinical_metrics: Dict[str, Any] = {}
     if pred_morphometrics is not None and gt_morphometrics is not None:
         # Bland-Altman for Concavity % (C2, C3, C4)
@@ -900,12 +1087,15 @@ def compute_test_comprehensive_metrics(
                     deltas=(1.0, 2.0),
                 )
 
-    # 10. Validation summary metrics
-    val_summary = compute_validation_summary_metrics(
-        pred_coords=p_coords,
-        gt_coords=g_coords,
-        img_size=img_size,
-    )
+    # 9. Section D: Staging evaluation suite
+    staging_metrics: Dict[str, Any] = {}
+    if pred_stages is not None and gt_stages is not None:
+        staging_metrics = compute_staging_metrics(
+            pred_stages=pred_stages,
+            gt_stages=gt_stages,
+            n_bootstrap=n_bootstrap,
+            seed=bootstrap_seed,
+        )
 
     return {
         "general": general_stats,
@@ -916,9 +1106,8 @@ def compute_test_comprehensive_metrics(
         },
         "by_vertebra": vertebra_breakdown,
         "by_landmark": landmark_breakdown,
-        "by_source": source_breakdown,
         "clinical": clinical_metrics,
-        "summary": val_summary,
+        "staging": staging_metrics,
         "total_samples": n_samples,
     }
 
@@ -987,17 +1176,6 @@ def format_summary_report(metrics_dict: Dict[str, Any], title: str = "CVM SWIN-G
             f"{lm.get('index', 0):02d}  {lm.get('name', ''):<8} | {m_sd:<16} | {lm.get('median', 0.0):<8.1f} | {lm.get('share_within_5pct', 0.0):<6.1f}% | {along_px_str:<10} | {along_pct_str:<9} | {perp_px_str:<9} | {perp_pct_str:<9}"
         )
 
-    # Section B.4: Cross-Source Stratification
-    lines.append("\n" + "SECTION B.4: CROSS-SOURCE STRATIFICATION (INSTITUTIONAL VS PUBLIC)".center(88))
-    lines.append("-" * 88)
-    lines.append(f"{'Source':<16} | {'Mean ± SD (%)':<18} | {'Median (%)':<12} | {'Share <= 5%':<14} | {'Landmarks':<10}")
-    lines.append("-" * 88)
-    for src, s_stats in metrics_dict.get("by_source", {}).items():
-        m_sd = f"{s_stats.get('mean', 0.0):.2f} ± {s_stats.get('sd', 0.0):.2f}"
-        lines.append(
-            f"{src.capitalize():<16} | {m_sd:<18} | {s_stats.get('median', 0.0):<12.2f} | {s_stats.get('share_within_5pct', 0.0):<13.2f}% | {s_stats.get('count', 0):<10}"
-        )
-
     # Section C: Clinical Morphometric Validation
     clin = metrics_dict.get("clinical", {})
     if clin:
@@ -1045,6 +1223,85 @@ def format_summary_report(metrics_dict: Dict[str, Any], title: str = "CVM SWIN-G
                 bl_cases = f"{d_res.get('borderline_count', 0)} ({d_res.get('borderline_share_pct', 0.0):.1f}%)"
                 lines.append(
                     f"{w_str:<10} | {bl_cases:<18} | {d_res.get('borderline_accuracy_pct', 0.0):<15.2f}% | {d_res.get('outside_borderline_count', 0):<14} | {d_res.get('outside_borderline_accuracy_pct', 0.0):<11.2f}% | {d_res.get('overall_accuracy_pct', 0.0):<11.2f}%"
+                )
+
+    # Section D: Staging Evaluation (Test Set)
+    stg = metrics_dict.get("staging", {})
+    if stg and stg.get("valid_samples", 0) > 0:
+        lines.append("\n" + "SECTION D: STAGING EVALUATION (TEST SET)".center(88))
+        lines.append("-" * 88)
+        lines.append(f" Total Evaluated Staging Samples : {stg.get('valid_samples', 0)} / {stg.get('total_samples', 0)}")
+
+        w_ci = stg.get("accuracy_ci_95_wilson", {})
+        b_ci = stg.get("accuracy_ci_95_bootstrap", {})
+        lines.append(f" Overall Accuracy                : {stg.get('overall_accuracy', 0.0):.2f}%")
+        lines.append(f"   • 95% Wilson CI               : [{w_ci.get('lower', 0.0):.2f}%, {w_ci.get('upper', 0.0):.2f}%]")
+        lines.append(f"   • 95% Bootstrap CI            : [{b_ci.get('lower', 0.0):.2f}%, {b_ci.get('upper', 0.0):.2f}%]")
+
+        adj_w_ci = stg.get("adjacent_accuracy_ci_95_wilson", {})
+        adj_b_ci = stg.get("adjacent_accuracy_ci_95_bootstrap", {})
+        lines.append(f" Adjacent-Stage Accuracy (±1)    : {stg.get('adjacent_accuracy', 0.0):.2f}%")
+        lines.append(f"   • 95% Wilson CI               : [{adj_w_ci.get('lower', 0.0):.2f}%, {adj_w_ci.get('upper', 0.0):.2f}%]")
+        lines.append(f"   • 95% Bootstrap CI            : [{adj_b_ci.get('lower', 0.0):.2f}%, {adj_b_ci.get('upper', 0.0):.2f}%]")
+
+        lines.append(f" Mean Absolute Stage Error (MASE): {stg.get('mean_absolute_stage_error', 0.0):.3f} stages")
+
+        qwk_ci = stg.get("quadratic_weighted_kappa_ci_95", {})
+        uwk_ci = stg.get("unweighted_cohen_kappa_ci_95", {})
+        lines.append("\n" + "Inter-Rater Reliability Agreement:")
+        lines.append(f" • Quadratic Weighted Kappa (κw) : {stg.get('quadratic_weighted_kappa', 0.0):.3f} (95% CI: [{qwk_ci.get('lower', 0.0):.3f}, {qwk_ci.get('upper', 0.0):.3f}])")
+        lines.append(f" • Unweighted Cohen's Kappa (κ)  : {stg.get('unweighted_cohen_kappa', 0.0):.3f} (95% CI: [{uwk_ci.get('lower', 0.0):.3f}, {uwk_ci.get('upper', 0.0):.3f}])")
+
+        # 6×6 Confusion Matrix
+        cm = stg.get("confusion_matrix", [])
+        if len(cm) == 6:
+            lines.append("\n" + "6×6 Confusion Matrix (Rows: Ground Truth, Columns: Predicted):")
+            lines.append("  True \\ Pred |   CS1   CS2   CS3   CS4   CS5   CS6 | Total | Recall (%)")
+            lines.append("  " + "-" * 66)
+            col_totals = [0] * 6
+            for r_idx, row in enumerate(cm):
+                row_sum = sum(row)
+                row_rec = (row[r_idx] / row_sum * 100.0) if row_sum > 0 else 0.0
+                for c_idx in range(6):
+                    col_totals[c_idx] += row[c_idx]
+                row_str = " ".join(f"{val:>5d}" for val in row)
+                lines.append(f"  CS{r_idx+1:<8} | {row_str} | {row_sum:>5d} | {row_rec:>9.2f}%")
+            lines.append("  " + "-" * 66)
+            col_str = " ".join(f"{val:>5d}" for val in col_totals)
+            lines.append(f"  Total       | {col_str} | {sum(col_totals):>5d} |")
+            prec_vals = []
+            for c_idx in range(6):
+                p_v = (cm[c_idx][c_idx] / col_totals[c_idx] * 100.0) if col_totals[c_idx] > 0 else 0.0
+                prec_vals.append(f"{p_v:>5.1f}%")
+            lines.append(f"  Precision   | {' '.join(prec_vals)} |")
+
+        # Per-stage precision, recall, F1
+        per_stage = stg.get("per_stage", [])
+        macro = stg.get("macro_average", {})
+        if per_stage:
+            lines.append("\n" + "Per-Stage Classification Performance:")
+            lines.append("  Stage | Precision (%) | Recall (%) | F1-Score (%) | Support")
+            lines.append("  " + "-" * 56)
+            for row in per_stage:
+                lines.append(
+                    f"  {row.get('stage', ''):<5} | {row.get('precision', 0.0):>13.2f}% | {row.get('recall', 0.0):>10.2f}% | {row.get('f1_score', 0.0):>12.2f}% | {row.get('support', 0):>7d}"
+                )
+            lines.append("  " + "-" * 56)
+            lines.append(
+                f"  Macro | {macro.get('precision', 0.0):>13.2f}% | {macro.get('recall', 0.0):>10.2f}% | {macro.get('f1_score', 0.0):>12.2f}% | {stg.get('valid_samples', 0):>7d}"
+            )
+
+        # Clinically important transitions
+        trans = stg.get("transitions", {})
+        if trans:
+            lines.append("\n" + "Clinically Important Transitions:")
+            lines.append("  Transition | Clinical Significance | Cohort | Misclass | Error Rate (%) | Cross-Boundary Err (%)")
+            lines.append("  " + "-" * 88)
+            for _, t_data in trans.items():
+                t_name = t_data.get("name", "")
+                t_sig = t_data.get("clinical_significance", "").split("(")[0].strip()[:21]
+                lines.append(
+                    f"  {t_name:<10} | {t_sig:<21} | {t_data.get('cohort_total', 0):>6d} | {t_data.get('misclassified', 0):>8d} | {t_data.get('error_rate_pct', 0.0):>13.2f}% | {t_data.get('cross_boundary_error_rate_pct', 0.0):>21.2f}%"
                 )
 
     lines.append("=" * 88)
