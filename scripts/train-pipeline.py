@@ -377,6 +377,37 @@ def main():
         default=int(os.getenv("MAX_WORKERS", "10")),
         help="Number of concurrent worker threads for downloading images (default: 10 or $MAX_WORKERS).",
     )
+    parser.add_argument(
+        "--batch-inference",
+        dest="run_batch_inference_step",
+        action="store_true",
+        default=True,
+        help="Run batch inference on the whole dataset and generate lightweight predicted landmark location files when training completes (default: True).",
+    )
+    parser.add_argument(
+        "--no-batch-inference",
+        dest="run_batch_inference_step",
+        action="store_false",
+        help="Disable automatic batch inference on the whole dataset after training.",
+    )
+    parser.add_argument(
+        "--whole-data-images-dir",
+        type=str,
+        default="data/images",
+        help="Directory containing the whole un-split dataset images for batch inference (default: data/images).",
+    )
+    parser.add_argument(
+        "--light-predictions-dir",
+        type=str,
+        default="evaluation/predictions_light",
+        help="Output directory to store lightweight predicted landmark location files (default: evaluation/predictions_light).",
+    )
+    parser.add_argument(
+        "--inference-batch-size",
+        type=int,
+        default=8,
+        help="Batch size for batch inference (default: 8).",
+    )
 
     args = parser.parse_args()
     if args.legacy_label_studio:
@@ -577,6 +608,55 @@ def main():
             print("-" * 20)
         else:
             print("\n[6/6] Skipping model evaluation step (--skip-eval set).")
+
+        # Step 7: Batch Inference on Whole Dataset & Lightweight Landmark Location Generation
+        if args.run_batch_inference_step:
+            print(
+                f"\n[7/7] Executing: Batch Inference on Whole Data & Generating Lightweight Landmark Location Files..."
+            )
+            best_weights_path = (
+                args.eval_weights
+                if (args.eval_weights and os.path.exists(args.eval_weights))
+                else "artifacts/best.pth"
+            )
+            if not os.path.exists(best_weights_path):
+                print(
+                    f"⚠️ Warning: Checkpoint weights '{best_weights_path}' not found. Skipping Step 7."
+                )
+            elif not os.path.isdir(args.whole_data_images_dir):
+                print(
+                    f"⚠️ Warning: Whole data images directory '{args.whole_data_images_dir}' not found. Skipping Step 7."
+                )
+            else:
+                from scripts.batch_inference import run_batch_inference
+
+                run_batch_inference(
+                    images_dir=args.whole_data_images_dir,
+                    output_json=Path(args.light_predictions_dir) / "predictions_full.json",
+                    weights=best_weights_path,
+                    device="auto",
+                    batch_size=args.inference_batch_size,
+                    img_size=args.target_size,
+                    dataset_dir="dataset",
+                    test_ids_file="dataset/test_image_ids.json",
+                    val_ids_file="dataset/val_image_ids.json",
+                    export_json="data/exports/export.json",
+                    light_output_dir=args.light_predictions_dir,
+                    export_light=True,
+                    save_csv=True,
+                    compute_metrics=True,
+                    labels_dir="data/labels",
+                    metrics_splits=["val", "train"],
+                    metrics_output_dir="evaluation",
+                    log_to_mlflow=True,
+                )
+                print(
+                    f"--> Step 7 completed: Lightweight landmark files generated in '{args.light_predictions_dir}'"
+                    f" and full metrics files ('metrics_val.json', 'metrics_train.json') saved to 'evaluation/'."
+                )
+                print("-" * 20)
+        else:
+            print("\n[7/7] Skipping batch inference on whole data (--no-batch-inference set).")
 
         print("\n" + "=" * 40)
         print("Pipeline execution completed successfully.")

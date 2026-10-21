@@ -17,7 +17,7 @@ import re
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 # Automatically re-exec with .venv if torch is missing
 try:
@@ -57,6 +57,11 @@ if str(ROOT_DIR) not in sys.path:
 
 from src.data.constants import LANDMARK_CLASSES, NUM_LANDMARKS
 from src.models.model import CephalometricSwinGCN
+from src.data.preprocessing.split_dataset import (
+    load_fixed_id_set,
+    load_label_studio_mapping,
+)
+from sklearn.model_selection import train_test_split
 
 VALID_EXTENSIONS = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp"}
 
@@ -149,6 +154,231 @@ def preprocess_image(
     return tensor, (orig_w, orig_h), scale, pad_x, pad_y
 
 
+def build_split_mapping(
+    image_paths: List[Path],
+    dataset_dir: Optional[Path] = None,
+    test_ids_path: Optional[Path] = None,
+    val_ids_path: Optional[Path] = None,
+    export_json_path: Optional[Path] = None,
+    seed: int = 42,
+    val_ratio: float = 0.15,
+) -> Dict[str, str]:
+    """
+    Builds a deterministic mapping from image stem/id to split ('train', 'val', 'test').
+    Priority:
+    1. Direct folder membership in dataset/<split>/images
+    2. Fixed ID files (test_image_ids.json, val_image_ids.json)
+    3. Label Studio / CVM export task mappings
+    4. Deterministic ratio split fallback for remaining unassigned samples
+    """
+    split_map: Dict[str, str] = {}
+
+    test_stems = set()
+    val_stems = set()
+    train_stems = set()
+
+    if dataset_dir:
+        d_path = Path(dataset_dir)
+        for split_name, stem_set in [("test", test_stems), ("val", val_stems), ("train", train_stems)]:
+            split_img_dir = d_path / split_name / "images"
+            if split_img_dir.is_dir():
+                for p in split_img_dir.iterdir():
+                    if p.is_file() and p.suffix.lower() in VALID_EXTENSIONS:
+                        stem_set.add(p.stem)
+
+    fixed_test_ids = load_fixed_id_set(test_ids_path) if test_ids_path else set()
+    fixed_val_ids = load_fixed_id_set(val_ids_path) if val_ids_path else set()
+
+    ls_mapping = {}
+    if export_json_path and Path(export_json_path).exists():
+        try:
+            ls_mapping = load_label_studio_mapping(export_json_path)
+        except Exception:
+            ls_mapping = {}
+
+    unassigned = []
+
+    for img_p in image_paths:
+        stem = img_p.stem
+        task_id = ls_mapping.get(stem)
+        task_id_alt = int(stem) if stem.isdigit() else stem
+
+        # Test check
+        is_test = (
+            stem in test_stems
+            or (task_id is not None and task_id in fixed_test_ids)
+            or (task_id_alt in fixed_test_ids)
+            or (stem in fixed_test_ids)
+        )
+        if is_test:
+            split_map[stem] = "test"
+            continue
+
+        # Val check
+        is_val = (
+            stem in val_stems
+            or (task_id is not None and task_id in fixed_val_ids)
+            or (task_id_alt in fixed_val_ids)
+            or (stem in fixed_val_ids)
+        )
+        if is_val:
+            split_map[stem] = "val"
+            continue
+
+        # Train check
+        if stem in train_stems:
+            split_map[stem] = "train"
+            continue
+
+        unassigned.append(stem)
+
+    if unassigned:
+        if len(unassigned) > 1 and val_ratio > 0:
+            try:
+                train_sub, val_sub = train_test_split(
+                    unassigned, test_size=val_ratio, random_state=seed
+                )
+                for s in train_sub:
+                    split_map[s] = "train"
+                for s in val_sub:
+                    split_map[s] = "val"
+            except Exception:
+                for s in unassigned:
+                    split_map[s] = "train"
+        else:
+            for s in unassigned:
+                split_map[s] = "train"
+
+    return split_map
+
+
+def export_lightweight_predictions(
+    results_dict: Dict[str, Any],
+    light_output_dir: Path,
+) -> Dict[str, Any]:
+    """
+    Exports clean, ultra-lightweight JSON and CSV files for visualization in external environments.
+    Generates:
+      ├── individual/<img_id>.json
+      ├── train/<img_id>.json
+      ├── val/<img_id>.json
+      ├── test/<img_id>.json
+      ├── by_landmark/<landmark_name>.json
+      ├── all_landmarks.json
+      ├── train_landmarks.json
+      ├── val_landmarks.json
+      ├── test_landmarks.json
+      └── predictions_light.csv
+    """
+    light_output_dir = Path(light_output_dir)
+    individual_dir = light_output_dir / "individual"
+    by_landmark_dir = light_output_dir / "by_landmark"
+
+    individual_dir.mkdir(parents=True, exist_ok=True)
+    by_landmark_dir.mkdir(parents=True, exist_ok=True)
+
+    for split in ["train", "val", "test"]:
+        (light_output_dir / split).mkdir(parents=True, exist_ok=True)
+
+    all_landmarks_compact: Dict[str, Any] = {}
+    split_landmarks_compact: Dict[str, Dict[str, Any]] = {"train": {}, "val": {}, "test": {}}
+    by_landmark_data: Dict[str, Dict[str, Any]] = {lm: {} for lm in LANDMARK_CLASSES}
+    csv_rows: List[Dict[str, Any]] = []
+
+    for img_id, item in results_dict.items():
+        split = item.get("split", "train")
+        landmarks = item.get("landmarks", {})
+        norm_landmarks = item.get("normalized_landmarks", {})
+        img_size = item.get("image_size", {})
+        w = img_size.get("width", 0)
+        h = img_size.get("height", 0)
+
+        # 1. Individual lightweight JSON per image
+        light_item = {
+            "id": img_id,
+            "filename": item.get("filename", f"{img_id}.png"),
+            "split": split,
+            "image_size": {"width": w, "height": h},
+            "landmarks": landmarks,
+            "normalized_landmarks": norm_landmarks,
+        }
+
+        indiv_path = individual_dir / f"{img_id}.json"
+        with open(indiv_path, "w", encoding="utf-8") as f:
+            json.dump(light_item, f, indent=2)
+
+        split_indiv_path = light_output_dir / split / f"{img_id}.json"
+        with open(split_indiv_path, "w", encoding="utf-8") as f:
+            json.dump(light_item, f, indent=2)
+
+        # 2. Aggregations
+        all_landmarks_compact[img_id] = {
+            "split": split,
+            "image_size": [w, h],
+            "landmarks": landmarks,
+        }
+        if split in split_landmarks_compact:
+            split_landmarks_compact[split][img_id] = {
+                "image_size": [w, h],
+                "landmarks": landmarks,
+            }
+
+        # 3. By Landmark
+        for lm_name, coords in landmarks.items():
+            if lm_name in by_landmark_data:
+                by_landmark_data[lm_name][img_id] = {
+                    "split": split,
+                    "x": coords[0],
+                    "y": coords[1],
+                }
+
+        # 4. CSV rows
+        for lm_name, coords in landmarks.items():
+            norm_c = norm_landmarks.get(lm_name, [0.0, 0.0])
+            csv_rows.append({
+                "id": img_id,
+                "split": split,
+                "width": w,
+                "height": h,
+                "landmark": lm_name,
+                "x": coords[0],
+                "y": coords[1],
+                "norm_x": norm_c[0],
+                "norm_y": norm_c[1],
+            })
+
+    # Save aggregated files
+    with open(light_output_dir / "all_landmarks.json", "w", encoding="utf-8") as f:
+        json.dump(all_landmarks_compact, f, indent=2)
+
+    for s_name, s_data in split_landmarks_compact.items():
+        with open(light_output_dir / f"{s_name}_landmarks.json", "w", encoding="utf-8") as f:
+            json.dump(s_data, f, indent=2)
+
+    for lm_name, lm_dict in by_landmark_data.items():
+        with open(by_landmark_dir / f"{lm_name}.json", "w", encoding="utf-8") as f:
+            json.dump(lm_dict, f, indent=2)
+
+    # Save summary CSV
+    if csv_rows:
+        import csv
+        csv_file = light_output_dir / "predictions_light.csv"
+        with open(csv_file, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=list(csv_rows[0].keys()))
+            writer.writeheader()
+            writer.writerows(csv_rows)
+
+    print(f"✨ Lightweight visualization predictions successfully written to: {light_output_dir}")
+    print(f"   • Individual files: {len(results_dict)} in {individual_dir}")
+    print(f"   • By landmark files: {len(LANDMARK_CLASSES)} in {by_landmark_dir}")
+    print(f"   • Combined JSON: {light_output_dir / 'all_landmarks.json'}")
+    return {
+        "individual_dir": str(individual_dir),
+        "by_landmark_dir": str(by_landmark_dir),
+        "all_landmarks_json": str(light_output_dir / "all_landmarks.json"),
+    }
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Batch Inference CLI: Cephalometric Swin-GCN Landmark Detection"
@@ -158,7 +388,7 @@ def parse_args():
         "-i",
         type=str,
         required=True,
-        help="Path to folder containing cephalometric images (e.g. /workspace/500_images)",
+        help="Path to folder containing cephalometric images (e.g. data/images)",
     )
     parser.add_argument(
         "--output-json",
@@ -178,9 +408,9 @@ def parse_args():
         "--device",
         "-d",
         type=str,
-        default="cuda",
+        default="auto",
         choices=["cuda", "mps", "cpu", "auto"],
-        help="Compute device (default: cuda)",
+        help="Compute device (default: auto)",
     )
     parser.add_argument(
         "--batch-size",
@@ -207,81 +437,198 @@ def parse_args():
         default=None,
         help="Only process the first N images (useful for quick verification)",
     )
+    parser.add_argument(
+        "--dataset-dir",
+        type=str,
+        default="dataset",
+        help="Path to dataset directory containing train/val/test splits (default: dataset)",
+    )
+    parser.add_argument(
+        "--test-ids-file",
+        type=str,
+        default="dataset/test_image_ids.json",
+        help="Path to JSON file with fixed test image IDs (default: dataset/test_image_ids.json)",
+    )
+    parser.add_argument(
+        "--val-ids-file",
+        type=str,
+        default="dataset/val_image_ids.json",
+        help="Path to JSON file with fixed validation image IDs (default: dataset/val_image_ids.json)",
+    )
+    parser.add_argument(
+        "--export-json",
+        type=str,
+        default="data/exports/export.json",
+        help="Path to Label Studio or CVM export JSON mapping task IDs (default: data/exports/export.json)",
+    )
+    parser.add_argument(
+        "--light-output-dir",
+        type=str,
+        default="evaluation/predictions_light",
+        help="Output directory to store lightweight predicted landmark location files (default: evaluation/predictions_light)",
+    )
+    parser.add_argument(
+        "--export-light",
+        dest="export_light",
+        action="store_true",
+        default=True,
+        help="Generate clean ultra-lightweight landmark location files for external visualization (default: True)",
+    )
+    parser.add_argument(
+        "--no-export-light",
+        dest="export_light",
+        action="store_false",
+        help="Disable generating lightweight landmark files",
+    )
+    parser.add_argument(
+        "--compute-metrics",
+        dest="compute_metrics",
+        action="store_true",
+        default=True,
+        help="Compute full comprehensive metrics (metrics_val.json, metrics_train.json) on splits (default: True)",
+    )
+    parser.add_argument(
+        "--no-compute-metrics",
+        dest="compute_metrics",
+        action="store_false",
+        help="Disable computing full split metrics",
+    )
+    parser.add_argument(
+        "--labels-dir",
+        type=str,
+        default="data/labels",
+        help="Directory containing ground truth .npz label files (default: data/labels)",
+    )
+    parser.add_argument(
+        "--metrics-splits",
+        type=str,
+        default="val,train",
+        help="Comma-separated splits to compute full metrics for (default: 'val,train')",
+    )
+    parser.add_argument(
+        "--metrics-output-dir",
+        type=str,
+        default=None,
+        help="Directory to save metrics_<split>.json files (default: parent of output-json or evaluation)",
+    )
+    parser.add_argument(
+        "--no-mlflow",
+        dest="log_to_mlflow",
+        action="store_false",
+        default=True,
+        help="Disable logging metrics to MLflow",
+    )
     return parser.parse_args()
 
 
-def main():
-    args = parse_args()
-
+def run_batch_inference(
+    images_dir: str | Path,
+    output_json: Optional[str | Path] = "predictions.json",
+    weights: str | Path = "artifacts/best.pth",
+    device: str = "auto",
+    batch_size: int = 8,
+    img_size: int = 640,
+    save_csv: bool = False,
+    limit: Optional[int] = None,
+    dataset_dir: Optional[str | Path] = "dataset",
+    test_ids_file: Optional[str | Path] = "dataset/test_image_ids.json",
+    val_ids_file: Optional[str | Path] = "dataset/val_image_ids.json",
+    export_json: Optional[str | Path] = "data/exports/export.json",
+    light_output_dir: Optional[str | Path] = "evaluation/predictions_light",
+    export_light: bool = True,
+    compute_metrics: bool = True,
+    labels_dir: Union[str, Path] = "data/labels",
+    metrics_splits: Union[str, List[str]] = "val,train",
+    metrics_output_dir: Optional[Union[str, Path]] = None,
+    log_to_mlflow: bool = True,
+    **kwargs,
+) -> Dict[str, Any]:
+    """
+    Executes Cephalometric Swin-GCN batch landmark inference over an image directory.
+    Identifies train/val/test split for each image and exports lightweight landmark location files.
+    """
     # 1. Resolve Device
-    if args.device == "auto":
+    if device == "auto":
         device_str = "cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu")
     else:
-        device_str = args.device
+        device_str = device
 
     if device_str == "cuda" and not torch.cuda.is_available():
         print("⚠️ Warning: CUDA requested but not available. Falling back to CPU.", file=sys.stderr)
         device_str = "cpu"
 
-    device = torch.device(device_str)
+    dev = torch.device(device_str)
 
     # 2. Check input path
-    images_dir = Path(args.images_dir).resolve()
-    if not images_dir.is_dir():
-        print(f"❌ Error: Images directory not found at '{images_dir}'", file=sys.stderr)
-        sys.exit(1)
+    images_path = Path(images_dir).resolve()
+    if not images_path.is_dir():
+        raise FileNotFoundError(f"Images directory not found at '{images_path}'")
 
     # 3. Find and sort images
     image_paths = [
-        p for p in images_dir.iterdir()
+        p for p in images_path.iterdir()
         if p.is_file() and p.suffix.lower() in VALID_EXTENSIONS and not p.name.startswith(".")
     ]
     image_paths.sort(key=natural_sort_key)
 
     if not image_paths:
-        print(f"❌ Error: No valid image files found in '{images_dir}'", file=sys.stderr)
-        sys.exit(1)
+        raise ValueError(f"No valid image files found in '{images_path}'")
 
-    if args.limit and args.limit > 0:
-        image_paths = image_paths[:args.limit]
+    if limit and limit > 0:
+        image_paths = image_paths[:limit]
 
-    output_json_path = Path(args.output_json).resolve()
-    output_json_path.parent.mkdir(parents=True, exist_ok=True)
+    # 4. Resolve train/val/test splits
+    split_map = build_split_mapping(
+        image_paths=image_paths,
+        dataset_dir=Path(dataset_dir) if dataset_dir else None,
+        test_ids_path=Path(test_ids_file) if test_ids_file else None,
+        val_ids_path=Path(val_ids_file) if val_ids_file else None,
+        export_json_path=Path(export_json) if export_json else None,
+    )
+
+    counts = {"train": 0, "val": 0, "test": 0}
+    for s in split_map.values():
+        if s in counts:
+            counts[s] += 1
 
     print("=" * 80)
     print("      CEPHALOMETRIC SWIN-GCN BATCH LANDMARK INFERENCE PIPELINE       ")
     print("=" * 80)
-    print(f"📁 Input Directory:   {images_dir}")
-    print(f"💾 Output JSON:       {output_json_path}")
+    print(f"📁 Input Directory:   {images_path}")
     print(f"🖼️ Images Found:      {len(image_paths)}")
-    print(f"⚡ Device:            {device} {f'({torch.cuda.get_device_name(0)})' if device.type == 'cuda' else ''}")
-    print(f"📦 Batch Size:        {args.batch_size}")
-    print(f"⚖️ Model Weights:     {args.weights}")
+    print(f"📊 Dataset Splits:    Train={counts['train']} | Val={counts['val']} | Test={counts['test']}")
+    print(f"⚡ Device:            {dev} {f'({torch.cuda.get_device_name(0)})' if dev.type == 'cuda' else ''}")
+    print(f"📦 Batch Size:        {batch_size}")
+    print(f"⚖️ Model Weights:     {weights}")
+    if output_json:
+        print(f"💾 Output Full JSON:  {output_json}")
+    if export_light and light_output_dir:
+        print(f"✨ Lightweight Files: {light_output_dir}")
     print("-" * 80)
 
-    # 4. Load Model
+    # 5. Load Model
     start_load = time.time()
-    model = load_model(args.weights, device=device, img_size=args.img_size)
+    model = load_model(str(weights), device=dev, img_size=img_size)
     print(f"Model ready in {time.time() - start_load:.2f}s.\n")
 
-    # 5. Process in batches
+    # 6. Process in batches
     results_dict: Dict[str, Any] = {}
     failed_images: List[str] = []
     total_images = len(image_paths)
 
     start_infer = time.time()
-    batch_size = max(1, args.batch_size)
+    bs = max(1, batch_size)
 
     with torch.no_grad():
-        for start_idx in tqdm(range(0, total_images, batch_size), desc="Inferring Batches", unit="batch"):
-            batch_slice = image_paths[start_idx : start_idx + batch_size]
+        for start_idx in tqdm(range(0, total_images, bs), desc="Inferring Batches", unit="batch"):
+            batch_slice = image_paths[start_idx : start_idx + bs]
             batch_tensors = []
             batch_meta = []
 
             for img_p in batch_slice:
                 try:
                     tensor, (orig_w, orig_h), scale, pad_x, pad_y = preprocess_image(
-                        img_p, target_size=args.img_size
+                        img_p, target_size=img_size
                     )
                     batch_tensors.append(tensor)
                     batch_meta.append((img_p, orig_w, orig_h, scale, pad_x, pad_y))
@@ -292,7 +639,7 @@ def main():
             if not batch_tensors:
                 continue
 
-            input_batch = torch.stack(batch_tensors, dim=0).to(device)
+            input_batch = torch.stack(batch_tensors, dim=0).to(dev)
 
             # Model forward pass: outputs (heatmaps, normalized_coords)
             # coords shape: [B, 13, 2] in normalized canvas coordinates [0.0, 1.0]
@@ -300,11 +647,11 @@ def main():
             pred_coords = pred_coords.cpu().numpy()
 
             for b_i, (img_p, orig_w, orig_h, scale, pad_x, pad_y) in enumerate(batch_meta):
-                # Preserves image name without extension as ID
                 img_id = img_p.stem
                 filename = img_p.name
+                split_val = split_map.get(img_id, "train")
 
-                coords_canvas = pred_coords[b_i] * float(args.img_size)  # [13, 2] in canvas px
+                coords_canvas = pred_coords[b_i] * float(img_size)  # [13, 2] in canvas px
 
                 landmarks_px: Dict[str, List[float]] = {}
                 landmarks_norm: Dict[str, List[float]] = {}
@@ -343,6 +690,7 @@ def main():
                 results_dict[img_id] = {
                     "id": img_id,
                     "filename": filename,
+                    "split": split_val,
                     "image_size": {"width": orig_w, "height": orig_h},
                     "landmarks": landmarks_px,
                     "normalized_landmarks": landmarks_norm,
@@ -352,19 +700,23 @@ def main():
     elapsed = time.time() - start_infer
     fps = total_images / elapsed if elapsed > 0 else 0.0
 
-    # 6. Save JSON
-    with open(output_json_path, "w", encoding="utf-8") as f:
-        json.dump(results_dict, f, indent=2)
+    # 7. Save Output Full JSON
+    if output_json:
+        out_p = Path(output_json).resolve()
+        out_p.parent.mkdir(parents=True, exist_ok=True)
+        with open(out_p, "w", encoding="utf-8") as f:
+            json.dump(results_dict, f, indent=2)
 
-    # 7. Optional CSV
-    if args.save_csv:
+    # 8. Optional Summary CSV
+    if save_csv and output_json:
         import csv
-        csv_path = output_json_path.with_suffix(".csv")
+        csv_path = Path(output_json).resolve().with_suffix(".csv")
         csv_rows = []
         for img_id, data in results_dict.items():
             row = {
                 "id": img_id,
                 "filename": data["filename"],
+                "split": data.get("split", "train"),
                 "width": data["image_size"]["width"],
                 "height": data["image_size"]["height"],
             }
@@ -380,6 +732,36 @@ def main():
                 writer.writerows(csv_rows)
             print(f"📊 Summary CSV saved to: {csv_path}")
 
+    # 9. Export clean lightweight visualization files
+    if export_light and light_output_dir:
+        export_lightweight_predictions(results_dict, light_output_dir=Path(light_output_dir))
+
+    # 10. Compute full comprehensive metrics for val and train sets
+    if compute_metrics:
+        splits_list = (
+            [s.strip() for s in metrics_splits.split(",") if s.strip()]
+            if isinstance(metrics_splits, str)
+            else metrics_splits
+        )
+        metrics_out = Path(
+            metrics_output_dir
+            or (Path(output_json).parent if output_json else "evaluation")
+        )
+        try:
+            from src.eval import compute_and_log_split_metrics
+
+            compute_and_log_split_metrics(
+                results_dict=results_dict,
+                labels_dir=labels_dir,
+                output_dir=metrics_out,
+                export_json_path=export_json,
+                img_size=img_size,
+                log_to_mlflow=log_to_mlflow,
+                splits_to_eval=splits_list,
+            )
+        except Exception as m_err:
+            print(f"⚠️ Warning: Could not compute split metrics: {m_err}")
+
     print("\n" + "=" * 80)
     print("                    BATCH INFERENCE COMPLETED                       ")
     print("=" * 80)
@@ -387,9 +769,15 @@ def main():
     print(f"✅ Successful:         {len(results_dict)} / {total_images}")
     if failed_images:
         print(f"❌ Failed:             {len(failed_images)}")
-    print(f"💾 Output JSON:        {output_json_path}")
+    if output_json:
+        print(f"💾 Output Full JSON:   {output_json}")
+    if export_light and light_output_dir:
+        print(f"✨ Lightweight Files:  {light_output_dir}")
     print("=" * 80)
 
+    return results_dict
 
-if __name__ == "__main__":
-    main()
+
+def main():
+    args = parse_args()
+    run_batch_inference(**vars(args))

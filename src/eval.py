@@ -17,6 +17,7 @@ import matplotlib.pyplot as plt
 import csv
 import math
 import requests
+from typing import Any, Dict, List, Optional, Tuple, Union
 from dotenv import load_dotenv
 import mlflow
 
@@ -1880,6 +1881,431 @@ def run_evaluation(
     print(f"All artifacts saved in directory: '{run_folder}'\n" + "=" * 80)
 
     return summary_metrics, str(run_folder)
+
+
+def compute_and_log_split_metrics(
+    results_dict: Dict[str, Any],
+    labels_dir: Union[str, Path] = "data/labels",
+    output_dir: Union[str, Path] = "evaluation",
+    export_json_path: Optional[Union[str, Path]] = "data/exports/export.json",
+    img_size: int = 640,
+    threshold_px: float = 2.5,
+    log_to_mlflow: bool = True,
+    splits_to_eval: Optional[List[str]] = None,
+    save_landmarks_csv: bool = True,
+) -> Dict[str, Dict[str, Any]]:
+    """
+    Computes full comprehensive evaluation metrics (identical structure to evaluation/metrics.json)
+    for specified dataset splits (e.g. 'val', 'train') using whole-data batch model predictions.
+    
+    Generates:
+      ├── metrics_<split>.json
+      ├── summary_report_<split>.txt
+      └── predictions_landmarks_<split>.csv
+      
+    And logs scalar metrics & JSON/TXT artifacts directly into the active MLflow experiment.
+    """
+    splits = splits_to_eval if splits_to_eval is not None else ["val", "train"]
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    # 1. Load ground truth CVM stages mapping from export JSON if available
+    stage_map: Dict[str, int] = {}
+    if export_json_path and os.path.exists(export_json_path):
+        try:
+            with open(export_json_path, "r", encoding="utf-8") as f:
+                raw_export = json.load(f)
+            tasks = raw_export.get("data", raw_export) if isinstance(raw_export, dict) else raw_export
+            for t in tasks:
+                t_id = t.get("id") or t.get("task_id") or t.get("taskId")
+                fn = t.get("filename") or os.path.basename(
+                    t.get("file_upload", "") or t.get("data", {}).get("img", "") or ""
+                )
+                st = t.get("finalStage") or t.get("stage") or t.get("meta", {}).get("finalStage")
+                if st is not None:
+                    try:
+                        st_num = int(str(st).replace("CS", ""))
+                        if fn:
+                            stage_map[fn] = st_num
+                            stage_map[Path(fn).stem] = st_num
+                        if t_id is not None:
+                            stage_map[str(t_id)] = st_num
+                    except (ValueError, TypeError):
+                        pass
+        except Exception as e:
+            print(f"⚠️ Warning loading stage map from {export_json_path}: {e}")
+
+    all_split_metrics: Dict[str, Dict[str, Any]] = {}
+
+    for split_name in splits:
+        split_items = [
+            (img_id, item) for img_id, item in results_dict.items()
+            if item.get("split") == split_name
+        ]
+
+        if not split_items:
+            print(f"ℹ️ No samples found for split '{split_name}'. Skipping metrics calculation.")
+            continue
+
+        print("\n" + "=" * 80)
+        print(f"      COMPUTING FULL METRICS FOR SPLIT: {split_name.upper()} ({len(split_items)} samples)      ")
+        print("=" * 80)
+
+        unletterboxed_preds_list: List[np.ndarray] = []
+        unletterboxed_gts_list: List[np.ndarray] = []
+        pred_canvas_list: List[np.ndarray] = []
+        gt_canvas_list: List[np.ndarray] = []
+        sample_ids: List[str] = []
+        orig_dims: List[Tuple[int, int]] = []
+        pred_stages_list: List[int] = []
+        gt_stages_list: List[int] = []
+        pred_cvm_list: List[Dict[str, Any]] = []
+        gt_cvm_list: List[Dict[str, Any]] = []
+        csv_rows: List[List[Any]] = []
+
+        labels_p = Path(labels_dir)
+
+        for img_id, item in split_items:
+            # Candidate paths for ground-truth .npz label file
+            npz_candidates = [
+                labels_p / f"{img_id}.npz",
+                Path("data/labels") / f"{img_id}.npz",
+                Path("dataset") / split_name / "labels" / f"{img_id}.npz",
+                Path("dataset/test/labels") / f"{img_id}.npz",
+            ]
+            npz_path = next((p for p in npz_candidates if p.is_file()), None)
+
+            if not npz_path:
+                continue
+
+            try:
+                npz_data = np.load(npz_path)
+                gt_coords_canvas = npz_data["coords"]  # shape (13, 2) in normalized [0, 1]
+            except Exception as read_err:
+                print(f"⚠️ Warning: Could not read GT label file '{npz_path}': {read_err}")
+                continue
+
+            orig_w = int(item.get("image_size", {}).get("width", img_size))
+            orig_h = int(item.get("image_size", {}).get("height", img_size))
+            orig_dims.append((orig_w, orig_h))
+            sample_ids.append(img_id)
+
+            scale = float(img_size) / max(orig_w, orig_h)
+            new_w = int(round(orig_w * scale))
+            new_h = int(round(orig_h * scale))
+            pad_x = (img_size - new_w) // 2
+            pad_y = (img_size - new_h) // 2
+            scale_x = float(new_w) / float(orig_w) if orig_w > 0 else 1.0
+            scale_y = float(new_h) / float(orig_h) if orig_h > 0 else 1.0
+
+            p_orig = np.zeros((NUM_LANDMARKS, 2), dtype=float)
+            g_orig = np.zeros((NUM_LANDMARKS, 2), dtype=float)
+            p_canvas = np.zeros((NUM_LANDMARKS, 2), dtype=float)
+            g_canvas = np.zeros((NUM_LANDMARKS, 2), dtype=float)
+
+            pred_landmarks_dict = item.get("landmarks", {})
+
+            for k in range(NUM_LANDMARKS):
+                lm_name = LANDMARK_CLASSES[k]
+                p_pt = pred_landmarks_dict.get(lm_name, [0.0, 0.0])
+                p_orig[k, 0] = float(p_pt[0])
+                p_orig[k, 1] = float(p_pt[1])
+
+                p_canvas[k, 0] = (p_orig[k, 0] * scale_x + pad_x) / float(img_size)
+                p_canvas[k, 1] = (p_orig[k, 1] * scale_y + pad_y) / float(img_size)
+
+                if gt_coords_canvas[k, 0] >= 0 and gt_coords_canvas[k, 1] >= 0:
+                    g_c_x = gt_coords_canvas[k, 0] * float(img_size)
+                    g_c_y = gt_coords_canvas[k, 1] * float(img_size)
+                    g_orig[k, 0] = (g_c_x - pad_x) / scale_x
+                    g_orig[k, 1] = (g_c_y - pad_y) / scale_y
+                    g_canvas[k, 0] = float(gt_coords_canvas[k, 0])
+                    g_canvas[k, 1] = float(gt_coords_canvas[k, 1])
+                else:
+                    g_orig[k, 0] = -1.0
+                    g_orig[k, 1] = -1.0
+                    g_canvas[k, 0] = -1.0
+                    g_canvas[k, 1] = -1.0
+
+            unletterboxed_preds_list.append(p_orig)
+            unletterboxed_gts_list.append(g_orig)
+            pred_canvas_list.append(p_canvas)
+            gt_canvas_list.append(g_canvas)
+
+            # C3 inferior endplate reference length
+            if g_orig[C3_AI_IDX, 0] >= 0 and g_orig[C3_PI_IDX, 0] >= 0:
+                ref_length = math.hypot(
+                    g_orig[C3_AI_IDX, 0] - g_orig[C3_PI_IDX, 0],
+                    g_orig[C3_AI_IDX, 1] - g_orig[C3_PI_IDX, 1],
+                )
+            else:
+                ref_length = float(orig_w)
+            if ref_length <= 1e-4:
+                ref_length = float(orig_w)
+
+            # Clinical morphometrics & stage evaluation
+            gt_dict = {LANDMARK_CLASSES[k]: (g_orig[k, 0], g_orig[k, 1]) for k in range(NUM_LANDMARKS)}
+            pred_dict = {LANDMARK_CLASSES[k]: (p_orig[k, 0], p_orig[k, 1]) for k in range(NUM_LANDMARKS)}
+
+            try:
+                gt_cvm = evaluate_landmarks_dict(gt_dict, img_width=orig_w, img_height=orig_h)
+            except Exception:
+                gt_cvm = {}
+
+            try:
+                pred_cvm = evaluate_landmarks_dict(pred_dict, img_width=orig_w, img_height=orig_h)
+            except Exception:
+                pred_cvm = {}
+
+            # Determine predicted clinical stage
+            predicted_stage = pred_cvm.get("stage_number", -1)
+            if predicted_stage == -1 and "stage" in pred_cvm:
+                try:
+                    predicted_stage = int(str(pred_cvm["stage"]).replace("CS", ""))
+                except (ValueError, TypeError):
+                    predicted_stage = -1
+
+            # Determine ground-truth clinical stage
+            true_stage = -1
+            fn_cand = item.get("filename", f"{img_id}.png")
+            for cand in (fn_cand, img_id, str(int(img_id)) if img_id.isdigit() else None):
+                if cand and cand in stage_map:
+                    true_stage = stage_map[cand]
+                    break
+            if true_stage == -1 or not (1 <= true_stage <= 6):
+                true_stage = gt_cvm.get("stage_number", -1)
+                if true_stage == -1 and "stage" in gt_cvm:
+                    try:
+                        true_stage = int(str(gt_cvm["stage"]).replace("CS", ""))
+                    except (ValueError, TypeError):
+                        true_stage = -1
+
+            pred_stages_list.append(predicted_stage)
+            gt_stages_list.append(true_stage)
+            pred_cvm_list.append(pred_cvm)
+            gt_cvm_list.append(gt_cvm)
+
+            # Calculate inferior border projections for error breakdown
+            projections = {}
+            for vert, lm_map in VERTEBRA_INFERIOR_LANDMARKS.items():
+                pi_k = lm_map["PI"]
+                ai_k = lm_map["AI"]
+                if g_orig[ai_k, 0] >= 0 and g_orig[pi_k, 0] >= 0:
+                    base_dx = g_orig[ai_k, 0] - g_orig[pi_k, 0]
+                    base_dy = g_orig[ai_k, 1] - g_orig[pi_k, 1]
+                    base_len = math.hypot(base_dx, base_dy)
+                    base_len_safe = base_len if base_len > 1e-4 else 1.0
+                    u_along_x = base_dx / base_len_safe
+                    u_along_y = base_dy / base_len_safe
+                    s = 1.0 if base_dx >= 0 else -1.0
+                    norm_x = s * base_dy
+                    norm_y = s * (-base_dx)
+                    norm_len = math.hypot(norm_x, norm_y)
+                    norm_len_safe = norm_len if norm_len > 1e-4 else 1.0
+                    u_perp_x = norm_x / norm_len_safe
+                    u_perp_y = norm_y / norm_len_safe
+
+                    for lm_type, lm_idx in lm_map.items():
+                        err_dx = p_orig[lm_idx, 0] - g_orig[lm_idx, 0]
+                        err_dy = p_orig[lm_idx, 1] - g_orig[lm_idx, 1]
+                        e_along_px = err_dx * u_along_x + err_dy * u_along_y
+                        e_perp_px = err_dx * u_perp_x + err_dy * u_perp_y
+                        e_along_pct = (e_along_px / ref_length) * 100.0
+                        e_perp_pct = (e_perp_px / ref_length) * 100.0
+                        projections[lm_idx] = (e_along_px, e_along_pct, e_perp_px, e_perp_pct)
+
+            for k in range(NUM_LANDMARKS):
+                lm_name = LANDMARK_CLASSES[k]
+                gt_x = g_orig[k, 0]
+                gt_y = g_orig[k, 1]
+                pred_x = p_orig[k, 0]
+                pred_y = p_orig[k, 1]
+                dx = pred_x - gt_x
+                dy = pred_y - gt_y
+                rad_px = math.hypot(dx, dy)
+                norm_pct = (rad_px / ref_length) * 100.0
+                dx_pct = (dx / ref_length) * 100.0
+                dy_pct = (dy / ref_length) * 100.0
+
+                if k in projections:
+                    e_al_px, e_al_pct, e_pr_px, e_pr_pct = projections[k]
+                    along_px_str = f"{e_al_px:.4f}"
+                    along_pct_str = f"{e_al_pct:.4f}"
+                    perp_px_str = f"{e_pr_px:.4f}"
+                    perp_pct_str = f"{e_pr_pct:.4f}"
+                else:
+                    along_px_str, along_pct_str, perp_px_str, perp_pct_str = "", "", "", ""
+
+                csv_rows.append([
+                    img_id, split_name, true_stage, predicted_stage,
+                    orig_w, orig_h, pad_x, pad_y, f"{scale_x:.6f}", f"{scale_y:.6f}",
+                    lm_name, f"{gt_x:.4f}", f"{gt_y:.4f}", f"{pred_x:.4f}", f"{pred_y:.4f}",
+                    f"{ref_length:.4f}", f"{rad_px:.4f}", f"{norm_pct:.4f}",
+                    f"{dx:.4f}", f"{dy:.4f}", f"{dx_pct:.4f}", f"{dy_pct:.4f}",
+                    along_px_str, along_pct_str, perp_px_str, perp_pct_str,
+                ])
+
+        if not unletterboxed_preds_list:
+            print(f"⚠️ No paired GT labels found for split '{split_name}'. Skipping.")
+            continue
+
+        # Format morphometrics structures for comprehensive suite
+        pred_morphometrics = {
+            "concavities": {
+                "C2": [c.get("percentages", {}).get("C2", 0.0) for c in pred_cvm_list],
+                "C3": [c.get("percentages", {}).get("C3", 0.0) for c in pred_cvm_list],
+                "C4": [c.get("percentages", {}).get("C4", 0.0) for c in pred_cvm_list],
+            },
+            "shape_indices": {
+                "C3": [c.get("shapes", {}).get("C3", {}).get("shape_index", 1.0) for c in pred_cvm_list],
+                "C4": [c.get("shapes", {}).get("C4", {}).get("shape_index", 1.0) for c in pred_cvm_list],
+            },
+            "notches": {
+                "C2": [c.get("notches", {}).get("C2", False) for c in pred_cvm_list],
+                "C3": [c.get("notches", {}).get("C3", False) for c in pred_cvm_list],
+                "C4": [c.get("notches", {}).get("C4", False) for c in pred_cvm_list],
+            },
+            "shapes": {
+                "C3": [c.get("shapes", {}).get("C3", {}).get("shape", "Unknown") for c in pred_cvm_list],
+                "C4": [c.get("shapes", {}).get("C4", {}).get("shape", "Unknown") for c in pred_cvm_list],
+            },
+        }
+        gt_morphometrics = {
+            "concavities": {
+                "C2": [c.get("percentages", {}).get("C2", 0.0) for c in gt_cvm_list],
+                "C3": [c.get("percentages", {}).get("C3", 0.0) for c in gt_cvm_list],
+                "C4": [c.get("percentages", {}).get("C4", 0.0) for c in gt_cvm_list],
+            },
+            "shape_indices": {
+                "C3": [c.get("shapes", {}).get("C3", {}).get("shape_index", 1.0) for c in gt_cvm_list],
+                "C4": [c.get("shapes", {}).get("C4", {}).get("shape_index", 1.0) for c in gt_cvm_list],
+            },
+            "notches": {
+                "C2": [c.get("notches", {}).get("C2", False) for c in gt_cvm_list],
+                "C3": [c.get("notches", {}).get("C3", False) for c in gt_cvm_list],
+                "C4": [c.get("notches", {}).get("C4", False) for c in gt_cvm_list],
+            },
+            "shapes": {
+                "C3": [c.get("shapes", {}).get("C3", {}).get("shape", "Unknown") for c in gt_cvm_list],
+                "C4": [c.get("shapes", {}).get("C4", {}).get("shape", "Unknown") for c in gt_cvm_list],
+            },
+        }
+
+        unletterboxed_preds_arr = np.array(unletterboxed_preds_list)
+        unletterboxed_gts_arr = np.array(unletterboxed_gts_list)
+        pred_canvas_arr = np.array(pred_canvas_list)
+        gt_canvas_arr = np.array(gt_canvas_list)
+
+        # Compute comprehensive metrics suite
+        comprehensive_metrics = compute_test_comprehensive_metrics(
+            pred_coords=unletterboxed_preds_arr,
+            gt_coords=unletterboxed_gts_arr,
+            sample_ids=sample_ids,
+            orig_dims=orig_dims,
+            img_size=img_size,
+            pred_stages=pred_stages_list,
+            gt_stages=gt_stages_list,
+            pred_morphometrics=pred_morphometrics,
+            gt_morphometrics=gt_morphometrics,
+            n_bootstrap=500,
+        )
+
+        # Compute summary & per-landmark metrics
+        summary_metrics, landmark_metrics, valid_radial_errors = compute_metrics(
+            pred_coords=pred_canvas_arr,
+            gt_coords=gt_canvas_arr,
+            img_size=img_size,
+            threshold_px=threshold_px,
+        )
+
+        # Attach staging metrics to summary_metrics
+        staging_eval = comprehensive_metrics.get("staging", {})
+        if staging_eval and staging_eval.get("valid_samples", 0) > 0:
+            summary_metrics["staging"] = staging_eval
+            if "overall_accuracy" in staging_eval:
+                summary_metrics["staging_accuracy"] = float(staging_eval["overall_accuracy"])
+            if "adjacent_accuracy" in staging_eval:
+                summary_metrics["staging_adjacent_accuracy"] = float(staging_eval["adjacent_accuracy"])
+            if "quadratic_weighted_kappa" in staging_eval:
+                summary_metrics["staging_qwk"] = float(staging_eval["quadratic_weighted_kappa"])
+            if "unweighted_cohen_kappa" in staging_eval:
+                summary_metrics["staging_uwk"] = float(staging_eval["unweighted_cohen_kappa"])
+            if "mean_absolute_stage_error" in staging_eval:
+                summary_metrics["staging_mase"] = float(staging_eval["mean_absolute_stage_error"])
+            if "macro_average" in staging_eval:
+                summary_metrics["staging_macro_f1"] = float(staging_eval["macro_average"].get("f1_score", 0.0))
+
+        # Format summary report text
+        report_text = format_summary_report(
+            comprehensive_metrics,
+            title=f"CVM SWIN-GCN FULL METRICS REPORT — {split_name.upper()} SET",
+        )
+        print("\n" + report_text + "\n")
+
+        # Build full export dictionary matching evaluation/metrics.json 1:1
+        metrics_export = {
+            "split": split_name,
+            "run_name": f"metrics_{split_name}",
+            "timestamp": datetime.now().isoformat(),
+            "total_evaluated_samples": len(sample_ids),
+            "comprehensive": comprehensive_metrics,
+            "summary": summary_metrics,
+            "landmarks": landmark_metrics,
+        }
+
+        # Save JSON metrics file
+        json_file = output_path / f"metrics_{split_name}.json"
+        with open(json_file, "w", encoding="utf-8") as f:
+            json.dump(metrics_export, f, indent=4)
+        print(f"--> Saved {split_name} metrics JSON to '{json_file}'")
+
+        # Save TXT summary report
+        txt_file = output_path / f"summary_report_{split_name}.txt"
+        with open(txt_file, "w", encoding="utf-8") as f:
+            f.write(report_text + "\n")
+        print(f"--> Saved {split_name} summary report to '{txt_file}'")
+
+        # Save CSV rows
+        if save_landmarks_csv and csv_rows:
+            csv_file = output_path / f"predictions_landmarks_{split_name}.csv"
+            csv_headers = [
+                "image_id", "split", "true_stage", "predicted_stage",
+                "orig_w", "orig_h", "pad_x", "pad_y", "scale_x", "scale_y",
+                "landmark_name", "gt_x", "gt_y", "pred_x", "pred_y", "ref_length",
+                "radial_error_px", "normalized_error_pct",
+                "signed_dx_px", "signed_dy_px", "signed_dx_pct", "signed_dy_pct",
+                "error_along_px", "error_along_pct", "error_perp_px", "error_perp_pct",
+            ]
+            with open(csv_file, "w", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                writer.writerow(csv_headers)
+                writer.writerows(csv_rows)
+            print(f"--> Saved {split_name} landmark CSV ({len(csv_rows)} rows) to '{csv_file}'")
+
+        # Log to active MLflow run if available
+        if log_to_mlflow:
+            try:
+                active_run = mlflow.active_run()
+                if active_run:
+                    mlflow.log_artifact(str(json_file), artifact_path=f"evaluation/{split_name}")
+                    mlflow.log_artifact(str(txt_file), artifact_path=f"evaluation/{split_name}")
+                    if (output_path / f"predictions_landmarks_{split_name}.csv").exists():
+                        mlflow.log_artifact(
+                            str(output_path / f"predictions_landmarks_{split_name}.csv"),
+                            artifact_path=f"evaluation/{split_name}",
+                        )
+                    clean_metrics = {
+                        f"{split_name}_{k}": v for k, v in summary_metrics.items()
+                        if isinstance(v, (int, float))
+                    }
+                    mlflow.log_metrics(clean_metrics)
+                    print(f"--> [MLflow] Successfully logged {len(clean_metrics)} {split_name} metrics and artifacts.")
+            except Exception as ml_err:
+                print(f"⚠️ Warning: Could not log {split_name} metrics to MLflow: {ml_err}")
+
+        all_split_metrics[split_name] = metrics_export
+
+    return all_split_metrics
 
 
 def main():

@@ -102,12 +102,10 @@ class SoftArgmax2D(nn.Module):
         B, N, H, W = x.shape
         device = x.device
 
-        # If input has already been compressed to [0, 1] via sigmoid, convert back to logits
-        # to ensure sufficient dynamic range so background pixels don't pull coordinates to (0.5, 0.5)
+        # If input has already been compressed to [0, 1] (Gaussian heatmaps), convert to log-space
+        # to ensure wide dynamic range and preserve parabolic peak shape: log(exp(-d^2/(2*s^2))) = -d^2/(2*s^2)
         if (x >= 0.0).all() and (x <= 1.0).all() and x.max() <= 1.0 and x.min() >= 0.0:
-            eps = 1e-6
-            x_clamped = x.clamp(min=eps, max=1.0 - eps)
-            x_logits = torch.log(x_clamped / (1.0 - x_clamped))
+            x_logits = torch.log(x.clamp(min=1e-8))
         else:
             x_logits = x
 
@@ -119,10 +117,12 @@ class SoftArgmax2D(nn.Module):
         flat_hm = scaled_hm.view(B, N, -1)
         softmax_hm = F.softmax(flat_hm, dim=-1).view(B, N, H, W)
 
-        # Build coordinate grid in [0, 1] normalized space matching input device and dtype
+        # Build coordinate grid matching standard pixel scale normalization convention:
+        # pixel index i corresponds to normalized coordinate i / W (and i / H).
+        # When multiplied by W (e.g. 640) during evaluation/inference, this recovers pixel index i exactly.
         grid_y, grid_x = torch.meshgrid(
-            torch.linspace(0.0, 1.0, H, device=device, dtype=x.dtype),
-            torch.linspace(0.0, 1.0, W, device=device, dtype=x.dtype),
+            torch.arange(H, device=device, dtype=x.dtype) / float(H),
+            torch.arange(W, device=device, dtype=x.dtype) / float(W),
             indexing="ij",
         )
         grid_x = grid_x.view(1, 1, H, W)
@@ -178,10 +178,12 @@ class CephalometricSwinGCN(nn.Module):
         img_size: int = 640,
         init_temperature: float = 0.1,
         window_radius: int | None = None,  # Kept for backward compatibility
+        use_stem_skip: bool = False,
     ):
         super().__init__()
         self.num_landmarks = num_landmarks
         self.img_size = img_size
+        self.use_stem_skip = use_stem_skip
 
         # Unit = 32 * window_size_7 = 224. Align backbone img_size to the nearest multiple of 224
         # (e.g. 640 -> 672, 672 -> 672) to ensure all 4 Swin stages have dimensions evenly divisible by 7.
@@ -196,18 +198,45 @@ class CephalometricSwinGCN(nn.Module):
             strict_img_size=False,
         )
 
-        # U-Net Pyramid Decoder Blocks
-        # Swin feature stages: Stage 0 (H/4), Stage 1 (H/8), Stage 2 (H/16), Stage 3 (H/32)
-        self.up3 = UNetUpBlock(1024, 512, 512)
-        self.up2 = UNetUpBlock(512, 256, 256)
-        self.up1 = UNetUpBlock(256, 128, 128)
-        self.up0 = UNetUpBlock(128, 0, 64)
-        self.up_final = nn.Sequential(
-            nn.ConvTranspose2d(64, 32, kernel_size=4, stride=2, padding=1),
-            nn.BatchNorm2d(32),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(32, num_landmarks, kernel_size=1),
-        )
+        # Optional high-resolution convolutional stem for thin cortical edges at stride 2 and stride 1
+        if self.use_stem_skip:
+            self.stem_half = nn.Sequential(
+                nn.Conv2d(3, 32, kernel_size=3, stride=2, padding=1),
+                nn.BatchNorm2d(32),
+                nn.ReLU(inplace=True),
+            )
+            self.up0 = UNetUpBlock(128, 32, 64)
+            self.stem_full = nn.Sequential(
+                nn.Conv2d(3, 16, kernel_size=3, stride=1, padding=1),
+                nn.BatchNorm2d(16),
+                nn.ReLU(inplace=True),
+            )
+            self.up_final = nn.Sequential(
+                nn.ConvTranspose2d(64, 32, kernel_size=4, stride=2, padding=1),
+                nn.BatchNorm2d(32),
+                nn.ReLU(inplace=True),
+            )
+            self.head_conv = nn.Sequential(
+                nn.Conv2d(32 + 16, 32, kernel_size=3, padding=1),
+                nn.BatchNorm2d(32),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(32, num_landmarks, kernel_size=1),
+            )
+        if not self.use_stem_skip:
+            self.up3 = UNetUpBlock(1024, 512, 512)
+            self.up2 = UNetUpBlock(512, 256, 256)
+            self.up1 = UNetUpBlock(256, 128, 128)
+            self.up0 = UNetUpBlock(128, 0, 64)
+            self.up_final = nn.Sequential(
+                nn.ConvTranspose2d(64, 32, kernel_size=4, stride=2, padding=1),
+                nn.BatchNorm2d(32),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(32, num_landmarks, kernel_size=1),
+            )
+        else:
+            self.up3 = UNetUpBlock(1024, 512, 512)
+            self.up2 = UNetUpBlock(512, 256, 256)
+            self.up1 = UNetUpBlock(256, 128, 128)
 
         # Global Differentiable Soft-Argmax layer with learnable per-landmark temperature
         self.soft_argmax = SoftArgmax2D(
@@ -266,8 +295,15 @@ class CephalometricSwinGCN(nn.Module):
         d3 = self.up3(f3, f2)
         d2 = self.up2(d3, f1)
         d1 = self.up1(d2, f0)
-        d0 = self.up0(d1, None)
-        logits = self.up_final(d0)
+        if self.use_stem_skip:
+            s_half = self.stem_half(x_in)
+            d0 = self.up0(d1, s_half)
+            d_final = self.up_final(d0)
+            s_full = self.stem_full(x_in)
+            logits = self.head_conv(torch.cat([d_final, s_full], dim=1))
+        else:
+            d0 = self.up0(d1, None)
+            logits = self.up_final(d0)
 
         # Slice back to original resolution (H, W) if input was padded
         if pad_h > 0 or pad_w > 0:

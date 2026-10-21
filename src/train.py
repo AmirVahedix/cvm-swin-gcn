@@ -133,29 +133,10 @@ def get_llrd_param_groups(
 
 def get_landmark_weights(device: torch.device) -> torch.Tensor:
     """
-    Constructs landmark loss weights prioritizing empirically difficult landmarks
-    identified from test evaluation (C2_AI, C3_AS, C2_IC, C4_AI, C4_PS, C3_PS, etc.).
+    Constructs uniform landmark loss weights (1.0 for every landmark) to eliminate
+    circular reasoning and prevent test-set derived weight bias.
     """
-    weights = torch.ones(NUM_LANDMARKS, dtype=torch.float32, device=device)
-    # Tier 1: Lagging landmarks (<80% SDR @ 2.0mm & highest MRE on test set)
-    weights[2] = 2.5   # C2_AI (Test SDR: 79.59%, MRE: 1.47 mm)
-    weights[4] = 2.5   # C3_AS (Test SDR: 79.59%, MRE: 1.49 mm)
-
-    # Tier 2: Challenging landmarks (82% - 86% SDR @ 2.0mm)
-    weights[1] = 2.0   # C2_IC (Test SDR: 82.99%, MRE: 1.29 mm, concavity)
-    weights[12] = 2.0  # C4_AI (Test SDR: 85.71%, MRE: 1.32 mm)
-    weights[0] = 1.8   # C2_PI (Test SDR: 83.67%, MRE: 1.28 mm)
-    weights[8] = 1.8   # C4_PS (Test SDR: 84.35%, MRE: 1.26 mm)
-    weights[3] = 1.6   # C3_PS (Test SDR: 85.71%, MRE: 1.23 mm)
-    weights[10] = 1.5  # C4_PI (Test SDR: 86.39%, MRE: 1.33 mm)
-
-    # Tier 3: Moderate landmarks
-    weights[7] = 1.3   # C3_AI (Test SDR: 87.76%, MRE: 1.25 mm)
-    weights[9] = 1.2   # C4_AS (Test SDR: 89.12%, MRE: 1.29 mm)
-    weights[6] = 1.2   # C3_IC (Test SDR: 89.80%, MRE: 1.14 mm)
-
-    # Landmarks with >91% SDR @ 2.0mm (C3_PI: 91.16%, C4_IC: 91.16%) remain at baseline 1.0
-    return weights
+    return torch.ones(NUM_LANDMARKS, dtype=torch.float32, device=device)
 
 
 class EpochLossResult(float):
@@ -1261,11 +1242,12 @@ def main(
             history["learning_rate"].append(float(current_lr))
             history["epoch_time_seconds"].append(float(epoch_time))
 
-            # Checkpoint selection strictly on validation set: primary is val_share_within_5pct, tie-breaker val_loss
+            # Checkpoint selection strictly by validation normalized error:
+            # Primary: val_share_within_5pct, Tie-breaker: val_median_norm_err (never composite val_loss)
             is_best_share = curr_share_5 > best_val_share_5pct
-            is_tied_better_loss = (abs(curr_share_5 - best_val_share_5pct) < 1e-4) and (val_loss < best_val_loss)
+            is_tied_better_median = (abs(curr_share_5 - best_val_share_5pct) < 1e-4) and (curr_median_norm < best_val_median_norm_err)
 
-            if is_best_share or is_tied_better_loss:
+            if is_best_share or is_tied_better_median:
                 best_val_share_5pct = curr_share_5
                 best_val_mean_norm_err = curr_mean_norm
                 best_val_median_norm_err = curr_median_norm
@@ -1364,51 +1346,81 @@ def main(
             history["lr"] = history["learning_rate"]
             history["best_epoch"] = best_checkpoint_epoch
 
-            mlflow.log_metrics(
-                {
-                    "train_loss_total": train_loss,
-                    "train_loss": train_loss,
-                    "train_loss_hm": train_loss_dict.get("heatmap", 0.0),
-                    "train_loss_cd": train_loss_dict.get("coord", 0.0),
-                    "train_loss_graph": train_loss_dict.get("graph", 0.0),
-                    "train_loss_morph": train_loss_dict.get("morph", 0.0),
-                    "val_loss_total": val_loss,
-                    "val_loss": val_loss,
-                    "val_loss_hm": metrics.get("loss_hm", 0.0),
-                    "val_loss_cd": metrics.get("loss_cd", 0.0),
-                    "val_loss_graph": metrics.get("loss_graph", 0.0),
-                    "val_loss_morph": metrics.get("loss_morph", 0.0),
-                    "val_mean_norm_err": curr_mean_norm,
-                    "val_median_norm_err": curr_median_norm,
-                    "val_share_within_5pct": curr_share_5,
-                    "lr": current_lr,
-                    "learning_rate": current_lr,
-                    "best_epoch": best_checkpoint_epoch,
-                    "best_checkpoint_epoch": best_checkpoint_epoch,
-                    "epoch_time_seconds": epoch_time,
-                    "lambda_coord": effective_lambda_cd,
-                    "lambda_graph": effective_lambda_graph,
-                    "lambda_morph": effective_lambda_morph,
-                    "val_share_within_2_5pct": curr_share_2_5,
-                    "val_share_within_7_5pct": curr_share_7_5,
-                    "val_share_within_10pct": curr_share_10,
-                    "val_rmse_norm_err": curr_rmse_norm,
-                    "val_mae_px": metrics["mae"],
-                    "val_rmse_px": metrics["rmse"],
-                    "val_sdr_2_0px": metrics["sdr_2_0"],
-                    "val_sdr_2_5px": metrics["sdr_2_5"],
-                    "val_sdr_3_0px": metrics["sdr_3_0"],
-                    "val_sdr_4_0px": metrics["sdr_4_0"],
-                },
-                step=epoch + 1,
-            )
+            # Extract learnable temperature tau for every landmark
+            tau_metrics = {}
+            raw_model = getattr(model, "_orig_mod", model)
+            tau_status = ""
+            if hasattr(raw_model, "soft_argmax") and hasattr(raw_model.soft_argmax, "log_temperature"):
+                try:
+                    taus_tensor = torch.exp(raw_model.soft_argmax.log_temperature).clamp(min=1e-3, max=1.0).detach().cpu().squeeze()
+                    taus_list = taus_tensor.tolist()
+                    if isinstance(taus_list, float):
+                        taus_list = [taus_list] * NUM_LANDMARKS
+                    for lm_i, lm_name in enumerate(LANDMARK_CLASSES):
+                        tau_val = float(taus_list[lm_i])
+                        tau_metrics[f"tau_{lm_name}"] = tau_val
+                        if f"tau_{lm_name}" not in history:
+                            history[f"tau_{lm_name}"] = []
+                        history[f"tau_{lm_name}"].append(tau_val)
+
+                    t_min = float(min(taus_list))
+                    t_max = float(max(taus_list))
+                    t_mean = float(sum(taus_list) / len(taus_list))
+                    tau_metrics["tau_min"] = t_min
+                    tau_metrics["tau_max"] = t_max
+                    tau_metrics["tau_mean"] = t_mean
+                    clamped_count = sum(1 for t in taus_list if t <= 1.05e-3)
+                    if clamped_count > 0:
+                        tau_status = f" | ⚠️ Tau: {clamped_count}/13 @ clamp (min={t_min:.4f}, mean={t_mean:.4f})"
+                    else:
+                        tau_status = f" | Tau: min={t_min:.4f}, mean={t_mean:.4f}, max={t_max:.4f}"
+                except Exception as tau_err:
+                    print(f"⚠️ Warning extracting tau: {tau_err}")
+
+            epoch_mlflow_metrics = {
+                "train_loss_total": train_loss,
+                "train_loss": train_loss,
+                "train_loss_hm": train_loss_dict.get("heatmap", 0.0),
+                "train_loss_cd": train_loss_dict.get("coord", 0.0),
+                "train_loss_graph": train_loss_dict.get("graph", 0.0),
+                "train_loss_morph": train_loss_dict.get("morph", 0.0),
+                "val_loss_total": val_loss,
+                "val_loss": val_loss,
+                "val_loss_hm": metrics.get("loss_hm", 0.0),
+                "val_loss_cd": metrics.get("loss_cd", 0.0),
+                "val_loss_graph": metrics.get("loss_graph", 0.0),
+                "val_loss_morph": metrics.get("loss_morph", 0.0),
+                "val_mean_norm_err": curr_mean_norm,
+                "val_median_norm_err": curr_median_norm,
+                "val_share_within_5pct": curr_share_5,
+                "lr": current_lr,
+                "learning_rate": current_lr,
+                "best_epoch": best_checkpoint_epoch,
+                "best_checkpoint_epoch": best_checkpoint_epoch,
+                "epoch_time_seconds": epoch_time,
+                "lambda_coord": effective_lambda_cd,
+                "lambda_graph": effective_lambda_graph,
+                "lambda_morph": effective_lambda_morph,
+                "val_share_within_2_5pct": curr_share_2_5,
+                "val_share_within_7_5pct": curr_share_7_5,
+                "val_share_within_10pct": curr_share_10,
+                "val_rmse_norm_err": curr_rmse_norm,
+                "val_mae_px": metrics["mae"],
+                "val_rmse_px": metrics["rmse"],
+                "val_sdr_2_0px": metrics["sdr_2_0"],
+                "val_sdr_2_5px": metrics["sdr_2_5"],
+                "val_sdr_3_0px": metrics["sdr_3_0"],
+                "val_sdr_4_0px": metrics["sdr_4_0"],
+            }
+            epoch_mlflow_metrics.update(tau_metrics)
+            mlflow.log_metrics(epoch_mlflow_metrics, step=epoch + 1)
 
             print(
                 f"Epoch [{epoch + 1}/{epochs}] | Time: {epoch_time:.2f}s | "
                 f"Train Loss: {train_loss:.4f} (HM: {train_loss_dict.get('heatmap', 0.0):.4f}, CD: {train_loss_dict.get('coord', 0.0):.4f}, G: {train_loss_dict.get('graph', 0.0):.4f}, M: {train_loss_dict.get('morph', 0.0):.4f}) | "
                 f"Val Loss: {val_loss:.4f} (HM: {metrics.get('loss_hm', 0.0):.4f}, CD: {metrics.get('loss_cd', 0.0):.4f}, G: {metrics.get('loss_graph', 0.0):.4f}, M: {metrics.get('loss_morph', 0.0):.4f}) | "
                 f"Norm Err: {curr_mean_norm:.2f}% (Med: {curr_median_norm:.2f}%) | "
-                f"Share ≤5%: {curr_share_5:.1f}% | LR: {current_lr:.2e} | Best Ep: {best_checkpoint_epoch}"
+                f"Share ≤5%: {curr_share_5:.1f}% | LR: {current_lr:.2e} | Best Ep: {best_checkpoint_epoch}{tau_status}"
             )
 
         # =========================================================================
@@ -1522,6 +1534,12 @@ def main(
             best_lm_json = os.path.join(os.path.dirname(SAVE_PATH), "best_per_landmark_metrics.json")
             if os.path.exists(best_lm_json):
                 ftp_json_files.append(best_lm_json)
+
+            for extra_json in ["metrics_val.json", "metrics_train.json"]:
+                for cand in [Path("evaluation") / extra_json, Path("evaluation/predictions_light") / extra_json]:
+                    if cand.exists():
+                        ftp_json_files.append(str(cand))
+                        break
 
             if ftp_json_files:
                 print(f"\n--> Uploading {len(ftp_json_files)} .json metrics file(s) to FTP server first...")
