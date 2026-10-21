@@ -269,13 +269,14 @@ def main():
     print(f"✅ Stage 1 model successfully loaded from '{weights_path}'.")
 
     stage2_model = None
-    if args.stage2_weights:
-        if os.path.exists(args.stage2_weights):
-            print(f"🧠 Loading Stage 2 Fine CephalometricSwinGCN from '{args.stage2_weights}'...")
-            stage2_model = load_model(args.stage2_weights, device, img_size=args.stage2_size)
+    stage2_weights_cand = args.stage2_weights or ("artifacts/stage2_best.pth" if os.path.exists("artifacts/stage2_best.pth") else None)
+    if stage2_weights_cand:
+        if os.path.exists(stage2_weights_cand):
+            print(f"🧠 Loading Stage 2 Fine CephalometricSwinGCN from '{stage2_weights_cand}'...")
+            stage2_model = load_model(stage2_weights_cand, device, img_size=args.stage2_size)
             print(f"✅ Stage 2 model successfully loaded ({args.stage2_size}x{args.stage2_size}).")
         else:
-            print(f"⚠️ Warning: Stage 2 weights not found at '{args.stage2_weights}'; falling back to single-stage.")
+            print(f"⚠️ Warning: Stage 2 weights not found at '{stage2_weights_cand}'; falling back to single-stage.")
 
     # Gather images
     if args.image:

@@ -16,6 +16,8 @@ from src.data.preprocessing.generate_labels import generate_labels
 from src.data.preprocessing.split_dataset import split_dataset
 from src.train import main as train_main
 from src.eval import run_evaluation
+from src.eval_two_stage import run_two_stage_evaluation
+from src.train_stage2 import train_stage2_main
 from src.utils.test_mlflow import run_mlflow_test
 from src.utils.ftp_utils import test_ftp_connection
 
@@ -160,6 +162,67 @@ def main():
         "--skip-eval",
         action="store_true",
         help="Skip final model evaluation step after training.",
+    )
+    # Two-Stage Coarse-to-Fine Options (Enabled by default on two-stage branch)
+    parser.add_argument(
+        "--two-stage",
+        dest="two_stage",
+        action="store_true",
+        default=True,
+        help="Enable full Two-Stage Coarse-to-Fine training (default: True).",
+    )
+    parser.add_argument(
+        "--single-stage",
+        "--no-two-stage",
+        dest="two_stage",
+        action="store_false",
+        help="Disable two-stage training and run single-stage baseline.",
+    )
+    parser.add_argument(
+        "--stage2-epochs",
+        type=int,
+        default=60,
+        help="Number of epochs for Stage 2 Fine ROI training (default: 60).",
+    )
+    parser.add_argument(
+        "--stage2-size",
+        type=int,
+        default=448,
+        choices=[448, 672],
+        help="Stage 2 ROI resolution (default: 448).",
+    )
+    parser.add_argument(
+        "--margin-ratio",
+        type=float,
+        default=0.18,
+        help="ROI margin ratio (default: 0.18).",
+    )
+    parser.add_argument(
+        "--refine-2pass",
+        action="store_true",
+        help="Enable 2-pass iterative refinement during evaluation.",
+    )
+    parser.add_argument(
+        "--skip-stage1",
+        action="store_true",
+        help="Skip Stage 1 coarse training and use existing checkpoint.",
+    )
+    parser.add_argument(
+        "--skip-stage2",
+        action="store_true",
+        help="Skip Stage 2 fine training and use existing checkpoint.",
+    )
+    parser.add_argument(
+        "--stage1-weights",
+        type=str,
+        default="artifacts/stage1_best.pth",
+        help="Stage 1 checkpoint path (default: artifacts/stage1_best.pth).",
+    )
+    parser.add_argument(
+        "--stage2-weights",
+        type=str,
+        default="artifacts/stage2_best.pth",
+        help="Stage 2 checkpoint path (default: artifacts/stage2_best.pth).",
     )
     parser.add_argument(
         "--test-mlflow",
@@ -534,80 +597,190 @@ def main():
             print("\n[1-4/6] Skipping steps 1 to 4 (--train-only flag set).")
 
         # Step 5: Model Training
-        print(
-            f"\n[5/6] Executing: train_main() with {args.epochs} epochs, batch_size={args.batch_size}, lr={args.lr}"
-        )
-        train_main(
-            epochs=args.epochs,
-            batch_size=args.batch_size,
-            lr=args.lr,
-            llrd_decay_rate=args.llrd_decay_rate,
-            lambda_hm=args.lambda_hm,
-            lambda_cd=args.lambda_cd,
-            lambda_graph=args.lambda_graph,
-            lambda_morph=args.lambda_morph,
-            img_size=args.target_size,
-            experiment_name=args.mlflow_experiment_name,
-            tracking_uri=args.mlflow_tracking_uri,
-            run_name=args.mlflow_run_name,
-            tracking_username=args.mlflow_username,
-            tracking_password=args.mlflow_password,
-            skip_eval=args.skip_eval,
-            ftp_host=args.ftp_host,
-            ftp_port=args.ftp_port,
-            ftp_user=args.ftp_user,
-            ftp_password=args.ftp_password,
-            ftp_remote_dir=args.ftp_remote_dir,
-            ftp_tls=args.ftp_tls if args.ftp_tls else None,
-            skip_ftp=args.skip_ftp,
-            save_optimizer=args.save_optimizer,
-            use_amp=args.use_amp,
-            compile_model=args.compile_model,
-            warmup_coord_epochs=args.warmup_coord_epochs,
-            use_balanced_sampling=args.use_balanced_sampling,
-            balanced_sampling_power=args.balanced_sampling_power,
-        )
-        print("-" * 20)
+        if args.two_stage:
+            print("\n" + "=" * 50)
+            print("🌟 TWO-STAGE COARSE-TO-FINE PIPELINE SELECTED")
+            print("=" * 50)
 
-        # Step 6: Standalone Model Evaluation
-        # Note: train_main() already runs evaluation and logs all metrics/artifacts to the training MLflow run.
-        # Step 6 will only execute if custom eval-weights were provided.
-        if not args.skip_eval and args.eval_weights != "./artifacts/best.pth":
-            print(f"\n[6/6] Executing standalone evaluation for custom weights: {args.eval_weights}")
-            parsed_eval_tta_scales = (
-                [float(s.strip()) for s in args.tta_scales.split(",") if s.strip()]
-                if args.tta_scales
-                else [0.95, 1.0, 1.05]
+            # Step 5a: Stage 1 Training
+            if not args.skip_stage1 and not os.path.exists(args.stage1_weights):
+                print(f"\n[5a/6] Executing Stage 1 Coarse Model Training ({args.epochs} epochs)...")
+                train_main(
+                    epochs=args.epochs,
+                    batch_size=args.batch_size,
+                    lr=args.lr,
+                    llrd_decay_rate=args.llrd_decay_rate,
+                    lambda_hm=args.lambda_hm,
+                    lambda_cd=args.lambda_cd,
+                    lambda_graph=args.lambda_graph,
+                    lambda_morph=args.lambda_morph,
+                    img_size=args.target_size,
+                    experiment_name=args.mlflow_experiment_name,
+                    tracking_uri=args.mlflow_tracking_uri,
+                    run_name=f"{args.mlflow_run_name}_stage1" if args.mlflow_run_name else "stage1_coarse",
+                    tracking_username=args.mlflow_username,
+                    tracking_password=args.mlflow_password,
+                    skip_eval=True,
+                    skip_ftp=True,
+                    save_optimizer=args.save_optimizer,
+                    use_amp=args.use_amp,
+                    compile_model=args.compile_model,
+                    warmup_coord_epochs=args.warmup_coord_epochs,
+                    use_balanced_sampling=args.use_balanced_sampling,
+                    balanced_sampling_power=args.balanced_sampling_power,
+                )
+                if os.path.exists("artifacts/best.pth"):
+                    import shutil
+                    shutil.copy("artifacts/best.pth", args.stage1_weights)
+                    print(f"--> Copied 'artifacts/best.pth' to '{args.stage1_weights}'")
+            elif os.path.exists(args.stage1_weights):
+                print(f"\n--> Stage 1 Skipped: Found existing checkpoint at '{args.stage1_weights}'")
+            else:
+                print("\n--> Stage 1 Skipped via --skip-stage1")
+
+            # Step 5b: Stage 2 Training
+            if not args.skip_stage2 and not os.path.exists(args.stage2_weights):
+                print(f"\n[5b/6] Executing Stage 2 Fine Model Training ({args.stage2_epochs} epochs, {args.stage2_size}x{args.stage2_size})...")
+                train_stage2_main(
+                    epochs=args.stage2_epochs,
+                    batch_size=args.batch_size,
+                    lr=args.lr,
+                    llrd_decay_rate=args.llrd_decay_rate,
+                    target_size=args.stage2_size,
+                    sigma=args.sigma,
+                    margin_ratio=args.margin_ratio,
+                    stage1_weights=args.stage1_weights if os.path.exists(args.stage1_weights) else "artifacts/best.pth",
+                    warmstart_from_stage1=True,
+                    save_path=args.stage2_weights,
+                    train_img_dir="dataset/train/images",
+                    train_npz_dir="dataset/train/labels",
+                    val_img_dir="dataset/val/images",
+                    val_npz_dir="dataset/val/labels",
+                    native_img_dir="data/raw/images" if os.path.exists("data/raw/images") else None,
+                    export_json_path="data/exports/export.json" if os.path.exists("data/exports/export.json") else None,
+                    experiment_name=args.mlflow_experiment_name,
+                    tracking_uri=args.mlflow_tracking_uri,
+                    run_name=f"{args.mlflow_run_name}_stage2" if args.mlflow_run_name else "stage2_fine",
+                    use_amp=args.use_amp,
+                    use_balanced_sampling=args.use_balanced_sampling,
+                    balanced_sampling_power=args.balanced_sampling_power,
+                )
+            elif os.path.exists(args.stage2_weights):
+                print(f"\n--> Stage 2 Skipped: Found existing checkpoint at '{args.stage2_weights}'")
+            else:
+                print("\n--> Stage 2 Skipped via --skip-stage2")
+
+            # Step 6: Two-Stage Cascaded Clinical Evaluation
+            if not args.skip_eval:
+                print("\n[6/6] Executing Two-Stage Cascaded Clinical Evaluation on Test Split...")
+                s1_w = args.stage1_weights if os.path.exists(args.stage1_weights) else "artifacts/best.pth"
+                s2_w = args.stage2_weights if os.path.exists(args.stage2_weights) else "artifacts/stage2_best.pth"
+                run_two_stage_evaluation(
+                    stage1_weights=s1_w,
+                    stage2_weights=s2_w,
+                    img_dir="dataset/test/images",
+                    npz_dir="dataset/test/labels",
+                    output_dir="evaluation/two_stage",
+                    run_name=args.mlflow_run_name or "test_split_cascade_eval",
+                    stage1_img_size=args.target_size,
+                    stage2_img_size=args.stage2_size,
+                    margin_ratio=args.margin_ratio,
+                    refine_2pass=args.refine_2pass,
+                    num_visualizations=args.eval_samples,
+                    log_to_mlflow=True,
+                    tracking_uri=args.mlflow_tracking_uri,
+                    experiment_name=args.mlflow_experiment_name,
+                )
+
+                if not args.skip_ftp and args.ftp_host and args.ftp_user and args.ftp_password:
+                    from src.utils.ftp_utils import backup_artifacts_to_ftp
+                    backup_files = [f for f in [s1_w, s2_w] if os.path.exists(f)]
+                    if backup_files:
+                        print(f"--> Uploading Two-Stage checkpoints {backup_files} to FTP server...")
+                        backup_artifacts_to_ftp(
+                            host=args.ftp_host,
+                            port=args.ftp_port,
+                            user=args.ftp_user,
+                            password=args.ftp_password,
+                            remote_dir=args.ftp_remote_dir,
+                            files=backup_files,
+                            use_tls=args.ftp_tls if args.ftp_tls else None,
+                        )
+        else:
+            print(
+                f"\n[5/6] Executing: train_main() with {args.epochs} epochs, batch_size={args.batch_size}, lr={args.lr}"
             )
-            parsed_eval_tta_shifts = []
-            if args.tta_shifts:
-                for pair in args.tta_shifts.split(","):
-                    if ":" in pair:
-                        dx, dy = pair.strip().split(":")
-                        parsed_eval_tta_shifts.append((int(dx), int(dy)))
-
-            run_evaluation(
-                weights_path=args.eval_weights,
-                test_img_dir="dataset/test/images",
-                test_npz_dir="dataset/test/labels",
-                output_dir="evaluation",
+            train_main(
+                epochs=args.epochs,
+                batch_size=args.batch_size,
+                lr=args.lr,
+                llrd_decay_rate=args.llrd_decay_rate,
+                lambda_hm=args.lambda_hm,
+                lambda_cd=args.lambda_cd,
+                lambda_graph=args.lambda_graph,
+                lambda_morph=args.lambda_morph,
                 img_size=args.target_size,
-                num_samples=args.eval_samples,
-                threshold_px=args.threshold_px,
-                tracking_uri=args.mlflow_tracking_uri,
                 experiment_name=args.mlflow_experiment_name,
+                tracking_uri=args.mlflow_tracking_uri,
+                run_name=args.mlflow_run_name,
                 tracking_username=args.mlflow_username,
                 tracking_password=args.mlflow_password,
-                use_tta=args.use_tta,
-                tta_scales=parsed_eval_tta_scales,
-                tta_shifts=parsed_eval_tta_shifts if len(parsed_eval_tta_shifts) > 0 else None,
+                skip_eval=args.skip_eval,
+                ftp_host=args.ftp_host,
+                ftp_port=args.ftp_port,
+                ftp_user=args.ftp_user,
+                ftp_password=args.ftp_password,
+                ftp_remote_dir=args.ftp_remote_dir,
+                ftp_tls=args.ftp_tls if args.ftp_tls else None,
+                skip_ftp=args.skip_ftp,
+                save_optimizer=args.save_optimizer,
+                use_amp=args.use_amp,
+                compile_model=args.compile_model,
+                warmup_coord_epochs=args.warmup_coord_epochs,
+                use_balanced_sampling=args.use_balanced_sampling,
+                balanced_sampling_power=args.balanced_sampling_power,
             )
             print("-" * 20)
-        elif not args.skip_eval:
-            print("\n[6/6] Clinical test evaluation completed inside Step 5 (logged directly into the MLflow training run).")
-            print("-" * 20)
-        else:
-            print("\n[6/6] Skipping model evaluation step (--skip-eval set).")
+
+            # Step 6: Standalone Model Evaluation
+            # Note: train_main() already runs evaluation and logs all metrics/artifacts to the training MLflow run.
+            # Step 6 will only execute if custom eval-weights were provided.
+            if not args.skip_eval and args.eval_weights != "./artifacts/best.pth":
+                print(f"\n[6/6] Executing standalone evaluation for custom weights: {args.eval_weights}")
+                parsed_eval_tta_scales = (
+                    [float(s.strip()) for s in args.tta_scales.split(",") if s.strip()]
+                    if args.tta_scales
+                    else [0.95, 1.0, 1.05]
+                )
+                parsed_eval_tta_shifts = []
+                if args.tta_shifts:
+                    for pair in args.tta_shifts.split(","):
+                        if ":" in pair:
+                            dx, dy = pair.strip().split(":")
+                            parsed_eval_tta_shifts.append((int(dx), int(dy)))
+
+                run_evaluation(
+                    weights_path=args.eval_weights,
+                    test_img_dir="dataset/test/images",
+                    test_npz_dir="dataset/test/labels",
+                    output_dir="evaluation",
+                    img_size=args.target_size,
+                    num_samples=args.eval_samples,
+                    threshold_px=args.threshold_px,
+                    tracking_uri=args.mlflow_tracking_uri,
+                    experiment_name=args.mlflow_experiment_name,
+                    tracking_username=args.mlflow_username,
+                    tracking_password=args.mlflow_password,
+                    use_tta=args.use_tta,
+                    tta_scales=parsed_eval_tta_scales,
+                    tta_shifts=parsed_eval_tta_shifts if len(parsed_eval_tta_shifts) > 0 else None,
+                )
+                print("-" * 20)
+            elif not args.skip_eval:
+                print("\n[6/6] Clinical test evaluation completed inside Step 5 (logged directly into the MLflow training run).")
+                print("-" * 20)
+            else:
+                print("\n[6/6] Skipping model evaluation step (--skip-eval set).")
 
         # Step 7: Batch Inference on Whole Dataset & Lightweight Landmark Location Generation
         if args.run_batch_inference_step:

@@ -82,8 +82,8 @@ else
     echo -e "${YELLOW}⚠️ .env file not found. Relying on system env vars...${NC}"
 fi
 # ----------------------
-# Priority: CLI argument (-b/--branch) > GIT_BRANCH / BRANCH env var > default: main
-TARGET_BRANCH="${BRANCH_ARG:-${GIT_BRANCH:-${BRANCH:-main}}}"
+# Priority: CLI argument (-b/--branch) > GIT_BRANCH / BRANCH env var > default: two-stage
+TARGET_BRANCH="${BRANCH_ARG:-${GIT_BRANCH:-${BRANCH:-two-stage}}}"
 echo -e "${BLUE}🌿 Target Git Branch: ${TARGET_BRANCH}${NC}"
 
 # --- Only Pull Mode ---
