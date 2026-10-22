@@ -86,6 +86,8 @@ def validate_stage2_epoch(
     target_size: int = 448,
     canvas_size: int = 640,
     use_amp: bool = True,
+    epoch: int = 1,
+    epochs: int = 60,
 ) -> Tuple[float, Dict[str, Any]]:
     """
     Evaluates Stage 2 model on the validation split:
@@ -106,8 +108,9 @@ def validate_stage2_epoch(
     device_type = "cuda" if device.type == "cuda" else ("mps" if device.type == "mps" else "cpu")
     amp_enabled = use_amp and device_type == "cuda"
 
+    pbar = tqdm(dataloader, desc=f"Epoch [{epoch}/{epochs}] Val (Stage 2 ROI)", leave=False)
     with torch.no_grad():
-        for batch in dataloader:
+        for batch in pbar:
             images = batch["image"].to(device)
             gt_coords_roi = batch["coords"].to(device)
             gt_heatmaps = batch["heatmaps"].to(device)
@@ -522,6 +525,8 @@ def train_stage2_main(
                 device=device,
                 target_size=target_size,
                 use_amp=use_amp,
+                epoch=epoch,
+                epochs=epochs,
             )
 
             scheduler.step()
