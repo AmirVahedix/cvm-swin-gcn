@@ -373,8 +373,8 @@ def main():
     parser.add_argument(
         "--lambda-morph",
         type=float,
-        default=float(os.getenv("LAMBDA_MORPH", 1.0)),
-        help="Weight for Morphometric Shape Loss on Shape Index and Taper Ratio (default: 1.0 or $LAMBDA_MORPH).",
+        default=float(os.getenv("LAMBDA_MORPH", 0.0)),
+        help="Weight for Morphometric Shape Loss on Shape Index and Taper Ratio (default: 0.0 or $LAMBDA_MORPH).",
     )
     parser.add_argument(
         "--test-ids-file",
@@ -664,6 +664,7 @@ def main():
                     use_amp=args.use_amp,
                     use_balanced_sampling=args.use_balanced_sampling,
                     balanced_sampling_power=args.balanced_sampling_power,
+                    lambda_morph=args.lambda_morph,
                 )
             elif os.path.exists(args.stage2_weights):
                 print(f"\n--> Stage 2 Skipped: Found existing checkpoint at '{args.stage2_weights}'")
