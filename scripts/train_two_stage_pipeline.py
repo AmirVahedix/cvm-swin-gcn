@@ -51,6 +51,19 @@ def main():
     parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate for AdamW-LLRD")
     parser.add_argument("--patience", type=int, default=15, help="Early stopping patience")
     parser.add_argument("--no-amp", action="store_true", help="Disable Automatic Mixed Precision")
+    parser.add_argument(
+        "--save-optimizer",
+        dest="save_optimizer",
+        action="store_true",
+        default=True,
+        help="Also save full checkpoint with optimizer/scheduler states locally (default: True)",
+    )
+    parser.add_argument(
+        "--no-save-optimizer",
+        dest="save_optimizer",
+        action="store_false",
+        help="Do not save the large full checkpoint locally (only save clean weights)",
+    )
 
     # Dataset Directories
     parser.add_argument("--train-img-dir", type=str, default="dataset/train/images")
@@ -119,6 +132,7 @@ def main():
             native_img_dir=args.native_img_dir,
             patience=args.patience,
             use_amp=not args.no_amp,
+            save_optimizer=args.save_optimizer,
             run_name=f"stage2_fine_roi_{args.stage2_size}",
         )
     elif os.path.exists(args.stage2_weights):

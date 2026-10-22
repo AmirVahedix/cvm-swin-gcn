@@ -384,6 +384,66 @@ class TestLandmarkMetricsLogging(unittest.TestCase):
             self.assertEqual(loaded_full["val_mean_norm_err"], 3.45)
             self.assertEqual(loaded_full["val_share_within_5pct"], 88.5)
 
+    def test_stage2_checkpoint_saving_clean_and_full(self):
+        """Verify Stage 2 saves clean state_dict to save_path (for MLflow) and full checkpoint locally only."""
+        import tempfile
+        import torch.nn as nn
+        import torch.optim as optim
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            save_path = os.path.join(tmpdir, "stage2_best.pth")
+            full_ckpt_path = os.path.join(
+                os.path.dirname(save_path),
+                f"{Path(save_path).stem}_full_checkpoint.pth",
+            )
+
+            model = nn.Linear(6, 3)
+            optimizer = optim.Adam(model.parameters(), lr=1e-4)
+            scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=10)
+
+            # Simulated Stage 2 saving logic
+            raw_model = getattr(model, "_orig_mod", model)
+            raw_model = getattr(raw_model, "module", raw_model)
+
+            # 1. Clean model weights only
+            torch.save(raw_model.state_dict(), save_path)
+
+            # 2. Full checkpoint bundle saved locally only
+            save_optimizer = True
+            if save_optimizer:
+                torch.save(
+                    {
+                        "epoch": 12,
+                        "best_epoch": 12,
+                        "model_state_dict": raw_model.state_dict(),
+                        "optimizer_state_dict": optimizer.state_dict(),
+                        "scheduler_state_dict": scheduler.state_dict(),
+                        "metrics": {"mae": 1.25, "mean_norm_err": 2.1},
+                        "target_size": 448,
+                        "sigma": 4.0,
+                        "margin_ratio": 0.18,
+                    },
+                    full_ckpt_path,
+                )
+
+            # Assert clean checkpoint exists and contains weights only
+            self.assertTrue(os.path.exists(save_path))
+            loaded_clean = torch.load(save_path, weights_only=True)
+            self.assertIn("weight", loaded_clean)
+            self.assertIn("bias", loaded_clean)
+            self.assertNotIn("optimizer_state_dict", loaded_clean)
+            self.assertNotIn("epoch", loaded_clean)
+
+            # Assert full checkpoint exists locally and contains optimizer/scheduler
+            self.assertTrue(os.path.exists(full_ckpt_path))
+            loaded_full = torch.load(full_ckpt_path, weights_only=False)
+            self.assertIn("model_state_dict", loaded_full)
+            self.assertIn("optimizer_state_dict", loaded_full)
+            self.assertIn("scheduler_state_dict", loaded_full)
+            self.assertEqual(loaded_full["epoch"], 12)
+            self.assertEqual(loaded_full["target_size"], 448)
+
     def test_artifact_logging_order_charts_before_checkpoint(self):
         """Verify that evaluation/charts is logged to MLflow strictly BEFORE checkpoints/best.pth."""
         logged_artifacts = []

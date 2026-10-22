@@ -105,6 +105,95 @@ def validate_stage1_box(
     return True, ""
 
 
+def apply_anatomical_height_prior(
+    coords: Union[np.ndarray, torch.Tensor],
+    img_w: int = 640,
+    img_h: int = 640,
+    min_c4_to_c3_ratio: float = 0.85,
+    disc_space_ratio: float = 0.20,
+) -> Tuple[Union[np.ndarray, torch.Tensor], bool]:
+    """
+    Applies the Anatomical Vertebra Height Prior.
+    In human cervical spine anatomy (C2-C4), vertebra C4 is physiologically equal to
+    or slightly taller than C3 (H_C4 >= 1.0 * H_C3).
+
+    If lower neck radiographic occlusion, shoulder attenuation, or collimator cut-off causes
+    C4 inferior landmarks (C4_PI: 10, C4_IC: 11, C4_AI: 12) to collapse upward into the C4
+    body or into C3, this prior computes the reliable height of C3 and ensures C4 reaches
+    its true physiological lower boundary:
+        h_C3 = max(y[5,6,7]) - min(y[3,4])
+        min_c4_h = min_c4_to_c3_ratio * h_C3
+        c4_floor_y = max(y[8,9]) + min_c4_h + disc_space_ratio * h_C3
+
+    Args:
+        coords: [N, 2] landmarks in normalized [0, 1] or pixel scale.
+        img_w: Canvas width.
+        img_h: Canvas height.
+        min_c4_to_c3_ratio: Minimum ratio of C4 height to C3 height (default 0.85).
+        disc_space_ratio: Estimated intervertebral disc thickness relative to C3 height (default 0.20).
+
+    Returns:
+        (corrected_coords, prior_applied)
+    """
+    if isinstance(coords, torch.Tensor):
+        coords_np = coords.detach().cpu().numpy().copy()
+        is_torch = True
+    else:
+        coords_np = np.asarray(coords).copy()
+        is_torch = False
+
+    if coords_np.ndim != 2 or coords_np.shape[0] != 13 or coords_np.shape[1] != 2:
+        return coords, False
+
+    valid_mask = (coords_np[:, 0] >= 0) & (coords_np[:, 1] >= 0)
+    c3_sup = [3, 4]
+    c3_inf = [5, 6, 7]
+    c4_sup = [8, 9]
+    c4_inf = [10, 11, 12]
+
+    # Require C3 and C4 superior to be valid to establish anatomical reference
+    if not all(valid_mask[k] for k in c3_sup + c3_inf + c4_sup):
+        return coords, False
+
+    is_normalized = bool(coords_np[valid_mask, 0].max() <= 1.05 and coords_np[valid_mask, 1].max() <= 1.05)
+    scale_y = float(img_h) if is_normalized else 1.0
+
+    all_ys = coords_np[:, 1] * scale_y
+    c3_sup_y = min(float(all_ys[k]) for k in c3_sup)
+    c3_inf_y = max(float(all_ys[k]) for k in c3_inf)
+    h_c3 = c3_inf_y - c3_sup_y
+
+    # Plausible vertebra height check (at least 15 pixels)
+    if h_c3 < 15.0:
+        return coords, False
+
+    c4_sup_y = max(float(all_ys[k]) for k in c4_sup)
+    expected_c4_h = min_c4_to_c3_ratio * h_c3
+    c4_floor_y = c4_sup_y + expected_c4_h + (disc_space_ratio * h_c3)
+
+    # Current predicted C4 inferior extent
+    valid_c4_inf = [k for k in c4_inf if valid_mask[k]]
+    current_c4_inf_max_y = max(float(all_ys[k]) for k in valid_c4_inf) if valid_c4_inf else c4_sup_y
+
+    prior_applied = False
+    # If C4 inferior is collapsed above the expected anatomical floor
+    if current_c4_inf_max_y < c4_floor_y:
+        deficit_y = c4_floor_y - current_c4_inf_max_y
+        for k in c4_inf:
+            if valid_mask[k]:
+                coords_np[k, 1] += (deficit_y / scale_y)
+            else:
+                c4_sup_match = 8 if k == 10 else (9 if k == 12 else 8)
+                coords_np[k, 0] = coords_np[c4_sup_match, 0]
+                coords_np[k, 1] = c4_floor_y / scale_y
+        prior_applied = True
+
+    if is_torch:
+        res = torch.from_numpy(coords_np).to(device=coords.device, dtype=coords.dtype)
+        return res, prior_applied
+    return coords_np, prior_applied
+
+
 def compute_roi_bbox(
     coords: Optional[Union[np.ndarray, torch.Tensor]],
     img_w: int,
@@ -115,6 +204,7 @@ def compute_roi_bbox(
     rng: Optional[np.random.RandomState] = None,
     fallback_anchor: Optional[Tuple[float, float, float]] = None,
     check_anatomical_bounds: bool = True,
+    use_anatomical_prior: bool = True,
 ) -> ROIBoundingBox:
     """
     Computes an isotropic, strictly square Region of Interest (ROI) bounding box
@@ -138,9 +228,13 @@ def compute_roi_bbox(
     is_valid = False
     fallback_reason = ""
 
-    if coords is not None:
+    coords_for_box = coords
+    if coords is not None and use_anatomical_prior:
+        coords_for_box, _ = apply_anatomical_height_prior(coords, img_w=img_w, img_h=img_h)
+
+    if coords_for_box is not None:
         is_valid, fallback_reason = validate_stage1_box(
-            coords, img_w, img_h, check_anatomical_bounds=check_anatomical_bounds
+            coords_for_box, img_w, img_h, check_anatomical_bounds=check_anatomical_bounds
         )
 
     if not is_valid:
@@ -174,36 +268,21 @@ def compute_roi_bbox(
             fallback_reason=fallback_reason or "Missing or invalid coordinates",
         )
 
-    # Process valid coordinates
-    if isinstance(coords, torch.Tensor):
-        coords_np = coords.detach().cpu().numpy()
+    # Process valid coordinates (with anatomical prior applied)
+    if isinstance(coords_for_box, torch.Tensor):
+        coords_np = coords_for_box.detach().cpu().numpy()
     else:
-        coords_np = np.asarray(coords)
+        coords_np = np.asarray(coords_for_box)
 
     valid_mask = (coords_np[:, 0] >= 0) & (coords_np[:, 1] >= 0)
     valid_pts = coords_np[valid_mask]
 
-    is_normalized = (valid_pts[:, 0].max() <= 1.05 and valid_pts[:, 1].max() <= 1.05)
+    is_normalized = bool(valid_pts[:, 0].max() <= 1.05 and valid_pts[:, 1].max() <= 1.05)
     xs = valid_pts[:, 0] * (img_w if is_normalized else 1.0)
     ys = valid_pts[:, 1] * (img_h if is_normalized else 1.0)
 
     u_min, u_max = float(xs.min()), float(xs.max())
     v_min, v_max = float(ys.min()), float(ys.max())
-
-    # Anatomical floor prior: ensure C4 inferior cannot be clipped upward if collapsed
-    if coords_np.shape[0] == 13:
-        c3_sup = [3, 4]
-        c3_inf = [5, 6, 7]
-        c4_sup = [8, 9]
-        if all(valid_mask[k] for k in c3_sup + c3_inf + c4_sup):
-            c3_sup_y = min(float(ys[k]) for k in c3_sup)
-            c3_inf_y = max(float(ys[k]) for k in c3_inf)
-            h_c3 = c3_inf_y - c3_sup_y
-            if h_c3 > 10.0:
-                c4_sup_y = max(float(ys[k]) for k in c4_sup)
-                c4_floor_y = c4_sup_y + 1.25 * h_c3
-                if v_max < c4_floor_y:
-                    v_max = c4_floor_y
 
     span_u = u_max - u_min
     span_v = v_max - v_min

@@ -728,6 +728,7 @@ def main():
                     use_balanced_sampling=args.use_balanced_sampling,
                     balanced_sampling_power=args.balanced_sampling_power,
                     lambda_morph=args.lambda_morph,
+                    save_optimizer=args.save_optimizer,
                 )
             elif os.path.exists(args.stage2_weights):
                 print(f"\n--> Stage 2 Skipped: Found existing checkpoint at '{args.stage2_weights}'")

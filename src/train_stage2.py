@@ -351,6 +351,7 @@ def train_stage2_main(
     stage1_weights: str = "artifacts/stage1_best.pth",
     warmstart_from_stage1: bool = True,
     save_path: str = "artifacts/stage2_best.pth",
+    save_optimizer: bool = True,
     train_img_dir: str = "dataset/train/images",
     train_npz_dir: str = "dataset/train/labels",
     val_img_dir: str = "dataset/val/images",
@@ -450,6 +451,10 @@ def train_stage2_main(
 
     actual_run_name = run_name or f"stage2_fine_{target_size}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+    full_ckpt_path = os.path.join(
+        os.path.dirname(save_path),
+        f"{Path(save_path).stem}_full_checkpoint.pth",
+    )
 
     best_val_share_5pct = 0.0
     best_val_loss = float("inf")
@@ -558,18 +563,28 @@ def train_stage2_main(
                 patience_counter = 0
                 marker = "⭐ [BEST]"
 
-                torch.save(
-                    {
-                        "epoch": epoch,
-                        "model_state_dict": model.state_dict(),
-                        "optimizer_state_dict": optimizer.state_dict(),
-                        "metrics": val_metrics,
-                        "target_size": target_size,
-                        "sigma": sigma,
-                        "margin_ratio": margin_ratio,
-                    },
-                    save_path,
-                )
+                raw_model = getattr(model, "_orig_mod", model)
+                raw_model = getattr(raw_model, "module", raw_model)
+
+                # 1. Clean model weights (~420 MB state_dict) for inference and MLflow logging
+                torch.save(raw_model.state_dict(), save_path)
+
+                # 2. Full checkpoint bundle (~1.3 GB) saved locally on instance (NOT sent to MLflow)
+                if save_optimizer:
+                    torch.save(
+                        {
+                            "epoch": epoch,
+                            "best_epoch": best_epoch,
+                            "model_state_dict": raw_model.state_dict(),
+                            "optimizer_state_dict": optimizer.state_dict(),
+                            "scheduler_state_dict": scheduler.state_dict() if scheduler is not None else None,
+                            "metrics": val_metrics,
+                            "target_size": target_size,
+                            "sigma": sigma,
+                            "margin_ratio": margin_ratio,
+                        },
+                        full_ckpt_path,
+                    )
             else:
                 patience_counter += 1
 
@@ -596,7 +611,11 @@ def train_stage2_main(
                 print(f"Early stopping triggered: No validation improvement for {patience} consecutive epochs.")
                 break
 
-        print(f"\n✅ Stage 2 Training Finished! Best checkpoint saved to '{save_path}' at epoch {best_epoch}")
+        saved_size_mb = os.path.getsize(save_path) / (1024 * 1024) if os.path.exists(save_path) else 0.0
+        print(f"\n✅ Stage 2 Training Finished! Clean weights saved to '{save_path}' [{saved_size_mb:.1f} MB] at epoch {best_epoch}")
+        if save_optimizer and os.path.exists(full_ckpt_path):
+            full_size_mb = os.path.getsize(full_ckpt_path) / (1024 * 1024)
+            print(f"   Full checkpoint [{full_size_mb:.1f} MB] saved locally to '{full_ckpt_path}' (local instance only, not sent to MLflow)")
         print(f"   Best Val Share ≤5%: {best_val_share_5pct:.2f}% | Best Mean Norm Err: {best_val_mean_norm:.2f}%")
 
         # Save training history JSON
@@ -612,6 +631,7 @@ def train_stage2_main(
         "best_val_share_5pct": best_val_share_5pct,
         "best_val_mean_norm": best_val_mean_norm,
         "save_path": save_path,
+        "full_checkpoint_path": full_ckpt_path if save_optimizer else None,
     }
 
 
@@ -626,6 +646,19 @@ def main():
     parser.add_argument("--stage1-weights", type=str, default="artifacts/stage1_best.pth", help="Stage 1 weights for warm-start")
     parser.add_argument("--no-warmstart", action="store_true", help="Do not warmstart from Stage 1; use ImageNet pretrained")
     parser.add_argument("--save-path", type=str, default="artifacts/stage2_best.pth", help="Checkpoint save destination")
+    parser.add_argument(
+        "--save-optimizer",
+        dest="save_optimizer",
+        action="store_true",
+        default=True,
+        help="Also save full checkpoint with optimizer/scheduler states locally to {save_path_stem}_full_checkpoint.pth (~1.3GB, local instance only, not sent to MLflow; default: True)",
+    )
+    parser.add_argument(
+        "--no-save-optimizer",
+        dest="save_optimizer",
+        action="store_false",
+        help="Do not save the large full checkpoint locally (only save clean weights in save_path)",
+    )
     parser.add_argument("--patience", type=int, default=15, help="Early stopping patience")
     parser.add_argument("--num-workers", type=int, default=4, help="DataLoader workers")
     parser.add_argument("--tracking-uri", type=str, default=None, help="MLflow tracking URI")
@@ -646,6 +679,7 @@ def main():
         stage1_weights=args.stage1_weights,
         warmstart_from_stage1=not args.no_warmstart,
         save_path=args.save_path,
+        save_optimizer=args.save_optimizer,
         patience=args.patience,
         num_workers=args.num_workers,
         tracking_uri=args.tracking_uri,
