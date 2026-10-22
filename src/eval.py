@@ -16,6 +16,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import csv
 import math
+import time
 import requests
 from typing import Any, Dict, List, Optional, Tuple, Union
 from dotenv import load_dotenv
@@ -1449,12 +1450,20 @@ def run_evaluation(
     all_preds = []
     all_gts = []
     all_filenames = []
+    latencies_ms = []
 
     with torch.no_grad():
         for batch in test_loader:
             images = batch["image"].to(device)
             gt_coords = batch["coords"].cpu().numpy()
             all_filenames.extend(batch["filename"])
+
+            if device.type == "cuda":
+                torch.cuda.synchronize()
+            elif device.type == "mps":
+                torch.mps.synchronize()
+            t0 = time.perf_counter()
+
             _, pred_coords = predict_batch(
                 model=model,
                 images=images,
@@ -1462,6 +1471,14 @@ def run_evaluation(
                 tta_scales=tta_scales,
                 tta_shifts=tta_shifts,
             )
+
+            if device.type == "cuda":
+                torch.cuda.synchronize()
+            elif device.type == "mps":
+                torch.mps.synchronize()
+            t1 = time.perf_counter()
+            batch_sz = images.shape[0]
+            latencies_ms.extend([(t1 - t0) * 1000.0 / batch_sz] * batch_sz)
 
             all_preds.append(pred_coords.cpu().numpy())
             all_gts.append(gt_coords)
@@ -1754,6 +1771,16 @@ def run_evaluation(
         summary_metrics["tta_scales"] = list(tta_scales)
         if tta_shifts:
             summary_metrics["tta_shifts"] = [list(s) for s in tta_shifts]
+
+    # Attach inference latency metrics
+    if latencies_ms:
+        latency_info = {
+            "mean_ms": float(np.mean(latencies_ms)),
+            "median_ms": float(np.median(latencies_ms)),
+            "p90_ms": float(np.percentile(latencies_ms, 90.0)),
+        }
+        summary_metrics["latency_ms_per_image"] = latency_info["mean_ms"]
+        comprehensive_metrics["latency_ms_per_image"] = latency_info
 
     # Generate metric PNG charts
     generate_evaluation_charts(

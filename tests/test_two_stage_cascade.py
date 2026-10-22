@@ -72,6 +72,32 @@ class TestTwoStageCascade(unittest.TestCase):
         self.assertIn("stage2_oracle", metrics)
         self.assertIn("two_stage_cascade", metrics)
         self.assertIn("delta_comparison", metrics)
+        self.assertIn("inference_latency", metrics)
+        self.assertIn("stage1_ms", metrics["inference_latency"])
+        self.assertIn("cascade_ms", metrics["inference_latency"])
+        self.assertIn("statistical_tests", metrics)
+        self.assertIn("paired_wilcoxon", metrics["statistical_tests"])
+        self.assertIn("mcnemar", metrics["statistical_tests"])
+
+        # Verify by_vertebra & by_landmark contain iqr and share_within_10pct
+        s1_metrics = metrics["stage1_alone"]
+        for vert in ("C2", "C3", "C4"):
+            self.assertIn("iqr", s1_metrics["by_vertebra"][vert])
+            self.assertIn("share_within_10pct", s1_metrics["by_vertebra"][vert])
+        for lm in s1_metrics["by_landmark"]:
+            self.assertIn("iqr", lm)
+            self.assertIn("share_within_10pct", lm)
+
+        # Verify staging ICC(2,1)
+        self.assertIn("icc_2_1", s1_metrics["staging"])
+        self.assertIn("icc_2_1_ci_95", s1_metrics["staging"])
+        self.assertIn("s1_icc_2_1", metrics["delta_comparison"])
+        self.assertIn("cascade_icc_2_1", metrics["delta_comparison"])
+
+        # Verify clinical Bland-Altman shape index is properly calculated
+        self.assertIn("bland_altman_shape_index", s1_metrics["clinical"])
+        self.assertIn("C3", s1_metrics["clinical"]["bland_altman_shape_index"])
+        self.assertIn("bias", s1_metrics["clinical"]["bland_altman_shape_index"]["C3"])
 
         run_path = Path(run_folder)
         self.assertTrue((run_path / "summary_report.txt").exists())

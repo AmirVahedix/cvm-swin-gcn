@@ -27,6 +27,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import cv2
 import matplotlib.pyplot as plt
 import numpy as np
+import scipy.stats
 import torch
 from dotenv import load_dotenv
 from tqdm import tqdm
@@ -50,6 +51,9 @@ from src.models.model import CephalometricSwinGCN
 from src.models.two_stage import TwoStageCephalometricSwinGCN
 from src.utils.cvm_calculator import evaluate_landmarks_dict
 from src.utils.metrics import (
+    compute_icc_2_1,
+    compute_mcnemar_test,
+    compute_normalized_errors,
     compute_reference_length,
     compute_test_comprehensive_metrics,
     format_summary_report,
@@ -313,6 +317,8 @@ def run_two_stage_evaluation(
 
     vis_saved = 0
     fallback_count = 0
+    s1_latencies_ms = []
+    casc_latencies_ms = []
 
     print(f"\n--> Running inference on {len(img_files)} evaluation samples...")
 
@@ -346,7 +352,21 @@ def run_two_stage_evaluation(
 
         with torch.no_grad():
             # A. Stage 1 Forward
+            if device.type == "cuda":
+                torch.cuda.synchronize()
+            elif device.type == "mps":
+                torch.mps.synchronize()
+            t0_s1 = time.perf_counter()
+
             _, s1_coords_t = stage1_model(tensor_in)
+
+            if device.type == "cuda":
+                torch.cuda.synchronize()
+            elif device.type == "mps":
+                torch.mps.synchronize()
+            t1_s1 = time.perf_counter()
+            s1_ms = (t1_s1 - t0_s1) * 1000.0
+            s1_latencies_ms.append(s1_ms)
             s1_coords_canvas = s1_coords_t.squeeze(0).cpu().numpy()  # [13, 2]
 
             # B. Stage 2 Oracle Forward (Crop from Ground Truth BBox)
@@ -372,6 +392,12 @@ def run_two_stage_evaluation(
             )
 
             # C. Two-Stage Cascaded Forward (Stage 1 BBox -> Stage 2)
+            if device.type == "cuda":
+                torch.cuda.synchronize()
+            elif device.type == "mps":
+                torch.mps.synchronize()
+            t0_casc = time.perf_counter()
+
             s1_bbox = compute_roi_bbox(
                 coords=s1_coords_canvas,
                 img_w=stage1_img_size,
@@ -425,6 +451,13 @@ def run_two_stage_evaluation(
                 cascaded_coords_canvas, _ = apply_anatomical_height_prior(
                     cascaded_coords_canvas, img_w=stage1_img_size, img_h=stage1_img_size
                 )
+
+            if device.type == "cuda":
+                torch.cuda.synchronize()
+            elif device.type == "mps":
+                torch.mps.synchronize()
+            t1_casc = time.perf_counter()
+            casc_latencies_ms.append(s1_ms + (t1_casc - t0_casc) * 1000.0)
 
         # Unletterbox all coordinates from canvas [0, 1] to native radiograph pixel space
         gt_canvas_px = gt_canvas_norm * float(stage1_img_size)
@@ -526,8 +559,8 @@ def run_two_stage_evaluation(
                 "C4": [c.get("percentages", {}).get("C4", 0.0) for c in cvm_list],
             },
             "shape_indices": {
-                "C3": [c.get("shapes", {}).get("C3", {}).get("ratio", 1.0) for c in cvm_list],
-                "C4": [c.get("shapes", {}).get("C4", {}).get("ratio", 1.0) for c in cvm_list],
+                "C3": [c.get("shapes", {}).get("C3", {}).get("shape_index", c.get("shapes", {}).get("C3", {}).get("ratio", 1.0)) for c in cvm_list],
+                "C4": [c.get("shapes", {}).get("C4", {}).get("shape_index", c.get("shapes", {}).get("C4", {}).get("ratio", 1.0)) for c in cvm_list],
             },
             "notches": {
                 "C2": [c.get("notches", {}).get("C2", False) for c in cvm_list],
@@ -590,7 +623,7 @@ def run_two_stage_evaluation(
         n_bootstrap=500,
     )
 
-    # 4. Compute Improvement Delta Table
+    # 4. Compute Improvement Delta Table & Statistical Significance Tests
     gen_s1 = metrics_s1["general"]
     gen_oracle = metrics_oracle["general"]
     gen_casc = metrics_cascade["general"]
@@ -605,8 +638,56 @@ def run_two_stage_evaluation(
 
     kappa_s1 = metrics_s1.get("staging", {}).get("quadratic_weighted_kappa", 0.0)
     kappa_casc = metrics_cascade.get("staging", {}).get("quadratic_weighted_kappa", 0.0)
+    kappa_oracle = metrics_oracle.get("staging", {}).get("quadratic_weighted_kappa", 0.0)
+
     acc_s1 = metrics_s1.get("staging", {}).get("overall_accuracy", 0.0)
     acc_casc = metrics_cascade.get("staging", {}).get("overall_accuracy", 0.0)
+    acc_oracle = metrics_oracle.get("staging", {}).get("overall_accuracy", 0.0)
+
+    icc_s1 = metrics_s1.get("staging", {}).get("icc_2_1", 0.0)
+    icc_casc = metrics_cascade.get("staging", {}).get("icc_2_1", 0.0)
+    icc_oracle = metrics_oracle.get("staging", {}).get("icc_2_1", 0.0)
+    delta_icc = icc_casc - icc_s1
+
+    # Statistical Significance: Paired Wilcoxon Signed-Rank Test across all landmark errors
+    norm_dict_s1 = compute_normalized_errors(s1_arr, gt_arr, img_size=stage1_img_size)
+    norm_dict_casc = compute_normalized_errors(casc_arr, gt_arr, img_size=stage1_img_size)
+    valid_mask = (gt_arr[:, :, 0] >= 0) & (gt_arr[:, :, 1] >= 0)
+    s1_errors = norm_dict_s1["normalized_error_pct"][valid_mask]
+    casc_errors = norm_dict_casc["normalized_error_pct"][valid_mask]
+
+    diffs = s1_errors - casc_errors
+    if len(diffs) > 0 and not np.all(diffs == 0):
+        try:
+            wilcoxon_res = scipy.stats.wilcoxon(s1_errors, casc_errors, alternative="two-sided")
+            wilcoxon_stat = float(wilcoxon_res.statistic)
+            wilcoxon_p = float(wilcoxon_res.pvalue)
+        except Exception:
+            wilcoxon_stat = 0.0
+            wilcoxon_p = 1.0
+    else:
+        wilcoxon_stat = 0.0
+        wilcoxon_p = 1.0
+
+    # Statistical Significance: McNemar's Test for Paired Stage Predictions
+    mcnemar_res = compute_mcnemar_test(
+        y_true=gt_stages,
+        y_pred1=s1_stages,
+        y_pred2=cascaded_stages,
+    )
+
+    # Latency summary (ms per image)
+    latency_summary = {
+        "stage1_ms": float(np.mean(s1_latencies_ms)) if s1_latencies_ms else 0.0,
+        "stage1_ms_median": float(np.median(s1_latencies_ms)) if s1_latencies_ms else 0.0,
+        "stage1_ms_iqr": float(np.percentile(s1_latencies_ms, 75.0) - np.percentile(s1_latencies_ms, 25.0)) if s1_latencies_ms else 0.0,
+        "stage1_ms_p90": float(np.percentile(s1_latencies_ms, 90.0)) if s1_latencies_ms else 0.0,
+        "cascade_ms": float(np.mean(casc_latencies_ms)) if casc_latencies_ms else 0.0,
+        "cascade_ms_median": float(np.median(casc_latencies_ms)) if casc_latencies_ms else 0.0,
+        "cascade_ms_iqr": float(np.percentile(casc_latencies_ms, 75.0) - np.percentile(casc_latencies_ms, 25.0)) if casc_latencies_ms else 0.0,
+        "cascade_ms_p90": float(np.percentile(casc_latencies_ms, 90.0)) if casc_latencies_ms else 0.0,
+        "total_images": len(s1_latencies_ms),
+    }
 
     delta_summary = {
         "s1_mean_norm_err": gen_s1["mean"],
@@ -623,9 +704,24 @@ def run_two_stage_evaluation(
         "delta_share_within_10pct": delta_sdr_10,
         "s1_quadratic_kappa": kappa_s1,
         "cascade_quadratic_kappa": kappa_casc,
+        "oracle_quadratic_kappa": kappa_oracle,
         "delta_quadratic_kappa": kappa_casc - kappa_s1,
+        "s1_icc_2_1": icc_s1,
+        "cascade_icc_2_1": icc_casc,
+        "oracle_icc_2_1": icc_oracle,
+        "delta_icc_2_1": delta_icc,
         "s1_staging_acc": acc_s1,
         "cascade_staging_acc": acc_casc,
+        "oracle_staging_acc": acc_oracle,
+        "delta_staging_acc": acc_casc - acc_s1,
+        "stage1_ms": latency_summary["stage1_ms"],
+        "cascade_ms": latency_summary["cascade_ms"],
+        "delta_ms": latency_summary["cascade_ms"] - latency_summary["stage1_ms"],
+        "wilcoxon_signed_rank_stat": wilcoxon_stat,
+        "wilcoxon_signed_rank_p": wilcoxon_p,
+        "mcnemar_b": mcnemar_res["b"],
+        "mcnemar_c": mcnemar_res["c"],
+        "mcnemar_p_value": mcnemar_res["p_value"],
         "fallback_count": fallback_count,
         "fallback_rate_pct": (fallback_count / len(all_filenames)) * 100.0 if all_filenames else 0.0,
     }
@@ -641,6 +737,9 @@ def run_two_stage_evaluation(
         + "=" * 88 + "\n"
         + f" Total Samples Evaluated    : {len(all_filenames)}\n"
         + f" BBox Sanity Fallback Count : {fallback_count} ({delta_summary['fallback_rate_pct']:.2f}%)\n"
+        + f" Inference Latency          : Stage 1 = {latency_summary['stage1_ms']:.1f} ms | Cascade = {latency_summary['cascade_ms']:.1f} ms\n"
+        + f" Paired Wilcoxon Test (N={len(s1_errors)}) : W = {wilcoxon_stat:.1f}, P = {wilcoxon_p:.4e}\n"
+        + f" McNemar's Test (N={len(gt_stages)})    : discordant (b={mcnemar_res['b']}, c={mcnemar_res['c']}), P = {mcnemar_res['p_value']:.4f}\n"
         "----------------------------------------------------------------------------------------\n"
         " Metric                     | Stage 1 Coarse | Stage 2 Oracle | Two-Stage Cascade | Delta (Cascade - S1) \n"
         "----------------------------------------------------------------------------------------\n"
@@ -650,8 +749,10 @@ def run_two_stage_evaluation(
         f" Share ≤ 5.0% L_ref         | {gen_s1['share_within_5pct']:6.2f}%        | {gen_oracle['share_within_5pct']:6.2f}%        | {gen_casc['share_within_5pct']:6.2f}%            | {delta_sdr_5:+6.2f}%\n"
         f" Share ≤ 10.0% L_ref        | {gen_s1['share_within_10pct']:6.2f}%        | {gen_oracle['share_within_10pct']:6.2f}%        | {gen_casc['share_within_10pct']:6.2f}%            | {delta_sdr_10:+6.2f}%\n"
         f" 90th Percentile (P90)      | {gen_s1['p90']:6.2f}%        | {gen_oracle['p90']:6.2f}%        | {gen_casc['p90']:6.2f}%            | {gen_casc['p90'] - gen_s1['p90']:+6.2f}%\n"
-        f" CVM Staging Accuracy       | {acc_s1:6.2f}%        | {metrics_oracle.get('staging', {}).get('overall_accuracy', 0.0):6.2f}%        | {acc_casc:6.2f}%            | {acc_casc - acc_s1:+6.2f}%\n"
-        f" Quadratic Weighted Kappa   | {kappa_s1:6.3f}         | {metrics_oracle.get('staging', {}).get('quadratic_weighted_kappa', 0.0):6.3f}         | {kappa_casc:6.3f}             | {kappa_casc - kappa_s1:+6.3f}\n"
+        f" CVM Staging Accuracy       | {acc_s1:6.2f}%        | {acc_oracle:6.2f}%        | {acc_casc:6.2f}%            | {acc_casc - acc_s1:+6.2f}%\n"
+        f" Quadratic Weighted Kappa   | {kappa_s1:6.3f}         | {kappa_oracle:6.3f}         | {kappa_casc:6.3f}             | {kappa_casc - kappa_s1:+6.3f}\n"
+        f" ICC(2,1) Agreement         | {icc_s1:6.3f}         | {icc_oracle:6.3f}         | {icc_casc:6.3f}             | {delta_icc:+6.3f}\n"
+        f" Inference Latency (ms)     | {latency_summary['stage1_ms']:6.1f} ms      |    N/A         | {latency_summary['cascade_ms']:6.1f} ms         | {latency_summary['cascade_ms'] - latency_summary['stage1_ms']:+6.1f} ms\n"
         "========================================================================================\n"
     )
 
@@ -673,6 +774,15 @@ def run_two_stage_evaluation(
         "stage2_img_size": stage2_img_size,
         "margin_ratio": margin_ratio,
         "delta_comparison": delta_summary,
+        "inference_latency": latency_summary,
+        "statistical_tests": {
+            "paired_wilcoxon": {
+                "n_landmarks": len(s1_errors),
+                "statistic": wilcoxon_stat,
+                "p_value": wilcoxon_p,
+            },
+            "mcnemar": mcnemar_res,
+        },
         "stage1_alone": metrics_s1,
         "stage2_oracle": metrics_oracle,
         "two_stage_cascade": metrics_cascade,
@@ -757,12 +867,26 @@ def run_two_stage_evaluation(
                     "s1_share_within_2_5pct": gen_s1["share_within_2_5pct"],
                     "cascade_share_within_2_5pct": gen_casc["share_within_2_5pct"],
                     "oracle_share_within_2_5pct": gen_oracle["share_within_2_5pct"],
+                    "s1_share_within_10pct": gen_s1["share_within_10pct"],
+                    "cascade_share_within_10pct": gen_casc["share_within_10pct"],
+                    "oracle_share_within_10pct": gen_oracle["share_within_10pct"],
                     "s1_staging_acc": acc_s1,
                     "cascade_staging_acc": acc_casc,
-                    "oracle_staging_acc": metrics_oracle.get("staging", {}).get("overall_accuracy", 0.0),
+                    "oracle_staging_acc": acc_oracle,
                     "s1_quadratic_kappa": kappa_s1,
                     "cascade_quadratic_kappa": kappa_casc,
-                    "oracle_quadratic_kappa": metrics_oracle.get("staging", {}).get("quadratic_weighted_kappa", 0.0),
+                    "oracle_quadratic_kappa": kappa_oracle,
+                    "s1_icc_2_1": icc_s1,
+                    "cascade_icc_2_1": icc_casc,
+                    "oracle_icc_2_1": icc_oracle,
+                    "delta_icc_2_1": delta_icc,
+                    "stage1_latency_ms": latency_summary["stage1_ms"],
+                    "cascade_latency_ms": latency_summary["cascade_ms"],
+                    "wilcoxon_signed_rank_p": wilcoxon_p,
+                    "wilcoxon_signed_rank_stat": wilcoxon_stat,
+                    "mcnemar_p_value": mcnemar_res["p_value"],
+                    "mcnemar_b": mcnemar_res["b"],
+                    "mcnemar_c": mcnemar_res["c"],
                     "fallback_rate_pct": delta_summary["fallback_rate_pct"],
                 })
                 mlflow.log_artifact(str(report_file))

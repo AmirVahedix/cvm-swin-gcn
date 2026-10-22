@@ -19,6 +19,7 @@ import warnings
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 import numpy as np
+import scipy.stats
 import torch
 from sklearn.metrics import (
     cohen_kappa_score,
@@ -352,8 +353,8 @@ def compute_vertebra_breakdown(
     """
     Computes per-vertebra (C2, C3, C4) metrics:
     - mean ± sd
-    - median
-    - share within 5%
+    - median, iqr
+    - share within 2.5%, 5%, 7.5%, 10%
     """
     results = {}
     for vert, idxs in VERTEBRA_GROUPS.items():
@@ -363,14 +364,24 @@ def compute_vertebra_breakdown(
             m = float(np.mean(v_errors))
             sd = float(np.std(v_errors, ddof=1)) if len(v_errors) > 1 else 0.0
             med = float(np.median(v_errors))
+            q25 = float(np.percentile(v_errors, 25.0))
+            q75 = float(np.percentile(v_errors, 75.0))
+            iqr = float(q75 - q25)
+            s2_5 = float(np.mean(v_errors <= 2.5) * 100.0)
             s5 = float(np.mean(v_errors <= 5.0) * 100.0)
+            s7_5 = float(np.mean(v_errors <= 7.5) * 100.0)
+            s10 = float(np.mean(v_errors <= 10.0) * 100.0)
         else:
-            m, sd, med, s5 = 0.0, 0.0, 0.0, 0.0
+            m, sd, med, iqr, s2_5, s5, s7_5, s10 = 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
         results[vert] = {
             "mean": m,
             "sd": sd,
             "median": med,
+            "iqr": iqr,
+            "share_within_2_5pct": s2_5,
             "share_within_5pct": s5,
+            "share_within_7_5pct": s7_5,
+            "share_within_10pct": s10,
             "count": len(v_errors),
         }
     return results
@@ -386,7 +397,7 @@ def compute_landmark_breakdown(
 ) -> List[Dict[str, Any]]:
     """
     Computes per-landmark performance for all 13 landmarks:
-    - mean ± sd, median, share within 5%
+    - mean ± sd, median, iqr, share within 2.5%, 5%, 7.5%, 10%
     - for IC, AI, PI: mean error along and perpendicular to the inferior border
     """
     results = []
@@ -396,15 +407,33 @@ def compute_landmark_breakdown(
         mask_idx = valid_mask[:, idx]
         errs = norm_errors[:, idx][mask_idx]
 
+        if len(errs) > 0:
+            m = float(np.mean(errs))
+            sd = float(np.std(errs, ddof=1)) if len(errs) > 1 else 0.0
+            med = float(np.median(errs))
+            q25 = float(np.percentile(errs, 25.0))
+            q75 = float(np.percentile(errs, 75.0))
+            iqr = float(q75 - q25)
+            s2_5 = float(np.mean(errs <= 2.5) * 100.0)
+            s5 = float(np.mean(errs <= 5.0) * 100.0)
+            s7_5 = float(np.mean(errs <= 7.5) * 100.0)
+            s10 = float(np.mean(errs <= 10.0) * 100.0)
+        else:
+            m, sd, med, iqr, s2_5, s5, s7_5, s10 = 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+
         entry = {
             "index": idx,
             "name": name,
             "vertebra": vert,
             "type": lm_type,
-            "mean": float(np.mean(errs)) if len(errs) > 0 else 0.0,
-            "sd": float(np.std(errs, ddof=1)) if len(errs) > 1 else 0.0,
-            "median": float(np.median(errs)) if len(errs) > 0 else 0.0,
-            "share_within_5pct": float(np.mean(errs <= 5.0) * 100.0) if len(errs) > 0 else 0.0,
+            "mean": m,
+            "sd": sd,
+            "median": med,
+            "iqr": iqr,
+            "share_within_2_5pct": s2_5,
+            "share_within_5pct": s5,
+            "share_within_7_5pct": s7_5,
+            "share_within_10pct": s10,
             "count": int(np.sum(mask_idx)),
         }
 
@@ -445,6 +474,88 @@ def compute_bland_altman(pred: np.ndarray, gt: np.ndarray) -> Dict[str, float]:
         "loa_lower": loa_lower,
         "loa_upper": loa_upper,
         "mae": mae,
+    }
+
+
+def compute_icc_2_1(
+    y1: Union[np.ndarray, List[float], List[int]],
+    y2: Union[np.ndarray, List[float], List[int]],
+) -> float:
+    """
+    Computes ICC(2,1): Two-way random effects, single rater, absolute agreement.
+    Formula (Shrout & Fleiss 1979; McGraw & Wong 1996):
+        ICC(2,1) = (MS_R - MS_E) / [MS_R + (k - 1)*MS_E + (k/n)*(MS_C - MS_E)]
+    where k = 2 raters, n = number of subjects.
+    """
+    y = np.column_stack([np.asarray(y1, dtype=float), np.asarray(y2, dtype=float)])
+    n, k = y.shape
+    if n <= 1:
+        return 0.0
+    mean_total = np.mean(y)
+    mean_row = np.mean(y, axis=1)
+    mean_col = np.mean(y, axis=0)
+
+    ss_total = np.sum((y - mean_total) ** 2)
+    ss_row = k * np.sum((mean_row - mean_total) ** 2)
+    ss_col = n * np.sum((mean_col - mean_total) ** 2)
+    ss_error = max(ss_total - ss_row - ss_col, 0.0)
+
+    df_row = n - 1
+    df_col = k - 1
+    df_error = (n - 1) * (k - 1)
+
+    ms_row = ss_row / df_row
+    ms_col = ss_col / df_col
+    ms_error = ss_error / df_error if df_error > 0 else 0.0
+
+    denom = ms_row + (k - 1) * ms_error + (k / n) * (ms_col - ms_error)
+    if denom <= 0:
+        return 1.0 if (ms_row == ms_error and ss_total > 0) else 0.0
+    icc = (ms_row - ms_error) / denom
+    return float(np.clip(icc, -1.0, 1.0))
+
+
+def compute_mcnemar_test(
+    y_true: Union[np.ndarray, List[Any]],
+    y_pred1: Union[np.ndarray, List[Any]],
+    y_pred2: Union[np.ndarray, List[Any]],
+) -> Dict[str, Any]:
+    """
+    Computes McNemar's test for paired classification predictions (e.g. Stage 1 vs Cascade).
+    b: y_pred1 incorrect, y_pred2 correct (Cascade improved over S1)
+    c: y_pred1 correct, y_pred2 incorrect (Cascade degraded compared to S1)
+    """
+    c1 = (np.asarray(y_pred1) == np.asarray(y_true))
+    c2 = (np.asarray(y_pred2) == np.asarray(y_true))
+    b = int(np.sum((~c1) & c2))
+    c = int(np.sum(c1 & (~c2)))
+    n00 = int(np.sum((~c1) & (~c2)))
+    n11 = int(np.sum(c1 & c2))
+    total_discordant = b + c
+    if total_discordant == 0:
+        return {
+            "b": b,
+            "c": c,
+            "n00": n00,
+            "n11": n11,
+            "statistic": 0.0,
+            "p_value": 1.0,
+            "p_value_exact": 1.0,
+            "p_value_chi2": 1.0,
+        }
+    p_exact = float(scipy.stats.binomtest(b, total_discordant, 0.5, alternative="two-sided").pvalue)
+    # Chi-square with Edwards continuity correction
+    stat = float((abs(b - c) - 1.0) ** 2 / total_discordant) if abs(b - c) > 1.0 else 0.0
+    p_chi2 = float(scipy.stats.chi2.sf(stat, df=1))
+    return {
+        "b": b,
+        "c": c,
+        "n00": n00,
+        "n11": n11,
+        "statistic": stat,
+        "p_value": p_exact,
+        "p_value_exact": p_exact,
+        "p_value_chi2": p_chi2,
     }
 
 
@@ -640,6 +751,8 @@ def compute_staging_metrics(
             "quadratic_weighted_kappa_ci_95": {"lower": 0.0, "upper": 0.0},
             "unweighted_cohen_kappa": 0.0,
             "unweighted_cohen_kappa_ci_95": {"lower": 0.0, "upper": 0.0},
+            "icc_2_1": 0.0,
+            "icc_2_1_ci_95": {"lower": 0.0, "upper": 0.0},
             "mean_absolute_stage_error": 0.0,
             "confusion_matrix": [[0] * 6 for _ in range(6)],
             "confusion_matrix_normalized": [[0.0] * 6 for _ in range(6)],
@@ -662,7 +775,7 @@ def compute_staging_metrics(
     adjacent_acc = float(round(adjacent_count / n * 100.0, 2))
     wilson_adj_ci = compute_wilson_confidence_interval(adjacent_count, n)
 
-    # 2. Kappa Statistics (Quadratic Weighted & Unweighted Cohen)
+    # 2. Kappa Statistics & ICC(2,1)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         try:
@@ -677,12 +790,19 @@ def compute_staging_metrics(
         except Exception:
             uwk = 0.0
 
-    # 3. Bootstrap 95% Confidence Intervals (Accuracy, Adjacent, QWK, UWK)
+        try:
+            icc_val = compute_icc_2_1(g, p)
+            icc = float(round(icc_val, 4)) if not np.isnan(icc_val) else 0.0
+        except Exception:
+            icc = 0.0
+
+    # 3. Bootstrap 95% Confidence Intervals (Accuracy, Adjacent, QWK, UWK, ICC)
     rng = np.random.RandomState(seed)
     boot_accs = []
     boot_adjs = []
     boot_qwks = []
     boot_uwks = []
+    boot_iccs = []
 
     for _ in range(n_bootstrap):
         idx = rng.randint(0, n, size=n)
@@ -704,6 +824,12 @@ def compute_staging_metrics(
                     boot_uwks.append(u_val)
             except Exception:
                 pass
+            try:
+                i_val = compute_icc_2_1(b_g, b_p)
+                if not np.isnan(i_val):
+                    boot_iccs.append(i_val)
+            except Exception:
+                pass
 
     boot_acc_ci = {
         "lower": float(round(np.percentile(boot_accs, 2.5), 2)),
@@ -720,6 +846,10 @@ def compute_staging_metrics(
     uwk_ci = {
         "lower": float(round(np.percentile(boot_uwks, 2.5), 3)) if boot_uwks else round(uwk, 3),
         "upper": float(round(np.percentile(boot_uwks, 97.5), 3)) if boot_uwks else round(uwk, 3),
+    }
+    icc_ci = {
+        "lower": float(round(np.percentile(boot_iccs, 2.5), 3)) if boot_iccs else round(icc, 3),
+        "upper": float(round(np.percentile(boot_iccs, 97.5), 3)) if boot_iccs else round(icc, 3),
     }
 
     # 4. 6×6 Confusion Matrix
@@ -810,6 +940,8 @@ def compute_staging_metrics(
         "quadratic_weighted_kappa_ci_95": qwk_ci,
         "unweighted_cohen_kappa": uwk,
         "unweighted_cohen_kappa_ci_95": uwk_ci,
+        "icc_2_1": icc,
+        "icc_2_1_ci_95": icc_ci,
         "mean_absolute_stage_error": mase,
         "confusion_matrix": cm.tolist(),
         "confusion_matrix_normalized": [[round(x, 2) for x in row] for row in cm_norm.tolist()],
@@ -1153,27 +1285,29 @@ def format_summary_report(metrics_dict: Dict[str, Any], title: str = "CVM SWIN-G
     # Section B.2: Vertebra Breakdown
     lines.append("\n" + "SECTION B.2: PER-VERTEBRA BREAKDOWN (MAIN TEXT)".center(88))
     lines.append("-" * 88)
-    lines.append(f"{'Vertebra':<12} | {'Mean ± SD (%)':<20} | {'Median (%)':<14} | {'Share <= 5%':<16} | {'Count':<8}")
+    lines.append(f"{'Vertebra':<10} | {'Mean ± SD (%)':<16} | {'Med (IQR) (%)':<16} | {'Share <= 5%':<14} | {'Share <= 10%':<14} | {'Count':<6}")
     lines.append("-" * 88)
     for vert, v_stats in metrics_dict.get("by_vertebra", {}).items():
         m_sd = f"{v_stats.get('mean', 0.0):.2f} ± {v_stats.get('sd', 0.0):.2f}"
+        med_iqr = f"{v_stats.get('median', 0.0):.2f} ({v_stats.get('iqr', 0.0):.2f})"
         lines.append(
-            f"{vert:<12} | {m_sd:<20} | {v_stats.get('median', 0.0):<14.2f} | {v_stats.get('share_within_5pct', 0.0):<15.2f}% | {v_stats.get('count', 0):<8}"
+            f"{vert:<10} | {m_sd:<16} | {med_iqr:<16} | {v_stats.get('share_within_5pct', 0.0):<13.2f}% | {v_stats.get('share_within_10pct', 0.0):<13.2f}% | {v_stats.get('count', 0):<6}"
         )
 
     # Section B.3: Per-Landmark Breakdown (Supplementary)
     lines.append("\n" + "SECTION B.3: PER-LANDMARK PERFORMANCE & INFERIOR PROJECTIONS (SUPPLEMENTARY)".center(88))
     lines.append("-" * 88)
-    lines.append(f"{'Idx':<4} {'Landmark':<8} | {'Mean ± SD (%)':<16} | {'Med (%)':<8} | {'<=5%':<7} | {'Along(px)':<10} | {'Along(%)':<9} | {'Perp(px)':<9} | {'Perp(%)':<9}")
+    lines.append(f"{'Idx':<4} {'Landmark':<8} | {'Mean ± SD (%)':<15} | {'Med (IQR) (%)':<15} | {'<=5%':<6} | {'<=10%':<6} | {'Along(px)':<9} | {'Along(%)':<9} | {'Perp(px)':<9} | {'Perp(%)':<9}")
     lines.append("-" * 88)
     for lm in metrics_dict.get("by_landmark", []):
         m_sd = f"{lm.get('mean', 0.0):.1f}±{lm.get('sd', 0.0):.1f}"
+        med_iqr = f"{lm.get('median', 0.0):.1f}({lm.get('iqr', 0.0):.1f})"
         along_px_str = f"{lm.get('mean_along_px', 0.0):+.2f}" if "mean_along_px" in lm else "-"
         along_pct_str = f"{lm.get('mean_along_pct', 0.0):+.2f}%" if "mean_along_pct" in lm else "-"
         perp_px_str = f"{lm.get('mean_perp_px', 0.0):+.2f}" if "mean_perp_px" in lm else "-"
         perp_pct_str = f"{lm.get('mean_perp_pct', 0.0):+.2f}%" if "mean_perp_pct" in lm else "-"
         lines.append(
-            f"{lm.get('index', 0):02d}  {lm.get('name', ''):<8} | {m_sd:<16} | {lm.get('median', 0.0):<8.1f} | {lm.get('share_within_5pct', 0.0):<6.1f}% | {along_px_str:<10} | {along_pct_str:<9} | {perp_px_str:<9} | {perp_pct_str:<9}"
+            f"{lm.get('index', 0):02d}  {lm.get('name', ''):<8} | {m_sd:<15} | {med_iqr:<15} | {lm.get('share_within_5pct', 0.0):<5.1f}% | {lm.get('share_within_10pct', 0.0):<5.1f}% | {along_px_str:<9} | {along_pct_str:<9} | {perp_px_str:<9} | {perp_pct_str:<9}"
         )
 
     # Section C: Clinical Morphometric Validation
@@ -1248,9 +1382,11 @@ def format_summary_report(metrics_dict: Dict[str, Any], title: str = "CVM SWIN-G
 
         qwk_ci = stg.get("quadratic_weighted_kappa_ci_95", {})
         uwk_ci = stg.get("unweighted_cohen_kappa_ci_95", {})
+        icc_ci = stg.get("icc_2_1_ci_95", {})
         lines.append("\n" + "Inter-Rater Reliability Agreement:")
         lines.append(f" • Quadratic Weighted Kappa (κw) : {stg.get('quadratic_weighted_kappa', 0.0):.3f} (95% CI: [{qwk_ci.get('lower', 0.0):.3f}, {qwk_ci.get('upper', 0.0):.3f}])")
         lines.append(f" • Unweighted Cohen's Kappa (κ)  : {stg.get('unweighted_cohen_kappa', 0.0):.3f} (95% CI: [{uwk_ci.get('lower', 0.0):.3f}, {uwk_ci.get('upper', 0.0):.3f}])")
+        lines.append(f" • ICC(2,1) Absolute Agreement   : {stg.get('icc_2_1', 0.0):.3f} (95% CI: [{icc_ci.get('lower', 0.0):.3f}, {icc_ci.get('upper', 0.0):.3f}])")
 
         # 6×6 Confusion Matrix
         cm = stg.get("confusion_matrix", [])
