@@ -105,6 +105,21 @@ def main():
         help="Skip downloading raw export and images.",
     )
     parser.add_argument(
+        "--skip-resize",
+        action="store_true",
+        help="Skip image resizing step.",
+    )
+    parser.add_argument(
+        "--skip-labels",
+        action="store_true",
+        help="Skip landmark and heatmap label generation step.",
+    )
+    parser.add_argument(
+        "--skip-split",
+        action="store_true",
+        help="Skip dataset split step.",
+    )
+    parser.add_argument(
         "--train-only",
         action="store_true",
         help="Skip preprocessing steps 1-4 and run model training directly.",
