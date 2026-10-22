@@ -2,7 +2,7 @@
 """
 Download Checkpoint from MLflow / MinIO Storage.
 Streams artifacts directly from the remote MLflow tracking server (backed by MinIO)
-without needing local laptop downloads or manual SCP transfer.
+with real-time MB-by-MB progress, transfer speed, and ETA.
 """
 
 import argparse
@@ -16,16 +16,17 @@ from dotenv import load_dotenv
 
 
 def download_checkpoint_from_mlflow(
-    run_id: str,
+    run_id: str = "2d4d452398b14c688f51ac4431d40698",
     artifact_path: str = "checkpoints/best.pth",
     dest_path: str = "artifacts/stage1_best.pth",
     tracking_uri: Optional[str] = None,
     username: Optional[str] = None,
     password: Optional[str] = None,
 ) -> str:
-    """Downloads checkpoint artifact from MLflow into local destination file."""
+    """Downloads checkpoint artifact from MLflow into local destination file with live progress."""
     load_dotenv()
-    import mlflow
+    import requests
+    from tqdm import tqdm
     from mlflow.tracking import MlflowClient
 
     user = username or os.getenv("MLFLOW_TRACKING_USERNAME")
@@ -36,8 +37,8 @@ def download_checkpoint_from_mlflow(
         os.environ["MLFLOW_TRACKING_PASSWORD"] = pwd
 
     uri = tracking_uri or os.getenv("MLFLOW_TRACKING_URI", "https://mlflow.amirlogedixyz.ir")
-    if uri:
-        mlflow.set_tracking_uri(uri)
+    dest = Path(dest_path)
+    dest.parent.mkdir(parents=True, exist_ok=True)
 
     print("=" * 80)
     print(f"📥 FETCHING CHECKPOINT FROM MLFLOW / MINIO")
@@ -49,36 +50,77 @@ def download_checkpoint_from_mlflow(
 
     client = MlflowClient(tracking_uri=uri)
 
-    # Validate run exists and check artifact path
-    dest = Path(dest_path)
-    dest.parent.mkdir(parents=True, exist_ok=True)
-
-    # Search for artifact if exact path not found
-    actual_artifact = artifact_path
+    # 1. Resolve experiment ID and artifact metadata
     try:
-        root_artifacts = [a.path for a in client.list_artifacts(run_id)]
-        if "checkpoints" in root_artifacts:
-            ckpt_artifacts = [a.path for a in client.list_artifacts(run_id, path="checkpoints")]
-            if artifact_path not in ckpt_artifacts and "checkpoints/best.pth" in ckpt_artifacts:
-                actual_artifact = "checkpoints/best.pth"
-        elif "best.pth" in root_artifacts:
-            actual_artifact = "best.pth"
+        run = client.get_run(run_id)
+        exp_id = run.info.experiment_id
     except Exception as e:
-        print(f"⚠️ Warning: Could not list artifacts ahead of download: {e}")
+        print(f"⚠️ Could not query run metadata: {e}")
+        exp_id = "1"
 
-    print(f"--> Downloading '{actual_artifact}' via MLflow HTTP artifact streaming...")
-    downloaded_path = client.download_artifacts(
-        run_id=run_id,
-        path=actual_artifact,
-        dst_path=str(dest.parent),
-    )
+    # Search for actual artifact name and size
+    actual_artifact = artifact_path
+    file_size = None
+    try:
+        if "/" in artifact_path:
+            parent_dir = artifact_path.split("/")[0]
+            artifacts = client.list_artifacts(run_id, path=parent_dir)
+        else:
+            artifacts = client.list_artifacts(run_id)
 
-    if Path(downloaded_path).resolve() != dest.resolve():
-        shutil.copy2(downloaded_path, dest)
+        for a in artifacts:
+            if a.path == artifact_path or a.path.endswith("best.pth"):
+                actual_artifact = a.path
+                file_size = a.file_size
+                break
+    except Exception as e:
+        print(f"⚠️ Could not list artifacts ahead of download: {e}")
 
-    size_mb = os.path.getsize(dest) / (1024 * 1024)
-    print(f"✅ Download complete! File saved to: {dest} ({size_mb:.2f} MB)")
-    return str(dest)
+    # 2. Stream download via direct HTTP endpoint with live byte-level progress bar
+    direct_url = f"{uri.rstrip('/')}/api/2.0/mlflow-artifacts/artifacts/{exp_id}/{run_id}/artifacts/{actual_artifact}"
+    auth = (user, pwd) if (user and pwd) else None
+    temp_file = dest.with_suffix(".tmp")
+
+    print(f"--> Streaming '{actual_artifact}' from {direct_url}...")
+    try:
+        with requests.get(direct_url, auth=auth, stream=True, timeout=30) as response:
+            response.raise_for_status()
+            total_bytes = file_size or int(response.headers.get("content-length", 0)) or None
+
+            with open(temp_file, "wb") as f, tqdm(
+                total=total_bytes,
+                unit="B",
+                unit_scale=True,
+                unit_divisor=1024,
+                desc=f"Downloading {dest.name}",
+                ncols=90,
+            ) as pbar:
+                for chunk in response.iter_content(chunk_size=1024 * 1024):  # 1 MB chunk
+                    if chunk:
+                        f.write(chunk)
+                        pbar.update(len(chunk))
+
+        if temp_file.exists():
+            shutil.move(str(temp_file), str(dest))
+            size_mb = os.path.getsize(dest) / (1024 * 1024)
+            print(f"✅ Download complete! Successfully saved to: {dest} ({size_mb:.2f} MB)")
+            return str(dest)
+
+    except Exception as stream_err:
+        print(f"⚠️ Direct HTTP stream failed ({stream_err}), falling back to client.download_artifacts...")
+        if temp_file.exists():
+            temp_file.unlink()
+
+        downloaded_path = client.download_artifacts(
+            run_id=run_id,
+            path=actual_artifact,
+            dst_path=str(dest.parent),
+        )
+        if Path(downloaded_path).resolve() != dest.resolve():
+            shutil.copy2(downloaded_path, dest)
+        size_mb = os.path.getsize(dest) / (1024 * 1024)
+        print(f"✅ Download complete! Saved to: {dest} ({size_mb:.2f} MB)")
+        return str(dest)
 
 
 def main():
