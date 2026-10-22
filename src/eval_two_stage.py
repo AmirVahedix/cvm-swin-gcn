@@ -81,6 +81,15 @@ LANDMARK_COLORS_BGR = [
     (0, 255, 255),    # 12: C4_AI - Mint
 ]
 
+IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+
+
+def to_normalized_tensor(img_rgb: np.ndarray, device: torch.device) -> torch.Tensor:
+    """Normalizes an RGB uint8 image [H, W, 3] using ImageNet statistics into a float tensor [1, 3, H, W]."""
+    norm = ((img_rgb.astype(np.float32) / 255.0) - IMAGENET_MEAN) / IMAGENET_STD
+    return torch.from_numpy(norm.transpose(2, 0, 1)).float().unsqueeze(0).to(device)
+
 
 def load_model_checkpoint(
     weights_path: str,
@@ -118,15 +127,30 @@ def render_roi_panel_with_contours(
     title: str = "PREDICTION",
     title_color: Tuple[int, int, int] = (33, 150, 243),
 ) -> np.ndarray:
-    """Renders a single high-resolution ROI panel with vertebra landmark dots and badges."""
+    """Renders a single high-resolution ROI panel with vertebra landmark dots, contours, and badges."""
     panel = cv2.resize(roi_rgb, (panel_size, panel_size), interpolation=cv2.INTER_CUBIC)
 
+    # 1. Collect valid landmark points
+    pts = {}
     for i, pt in enumerate(coords_norm_roi):
         if pt[0] < 0 or pt[1] < 0 or np.isnan(pt[0]) or np.isnan(pt[1]):
             continue
-        px = int(round(pt[0] * panel_size))
-        py = int(round(pt[1] * panel_size))
+        px = int(np.clip(round(pt[0] * panel_size), 0, panel_size - 1))
+        py = int(np.clip(round(pt[1] * panel_size), 0, panel_size - 1))
+        pts[i] = (px, py)
 
+    # 2. Draw anatomical contour lines for vertebrae C2, C3, C4
+    c2_conns = [(0, 1), (1, 2)]
+    c3_conns = [(3, 4), (4, 7), (7, 6), (6, 5), (5, 3)]
+    c4_conns = [(8, 9), (9, 12), (12, 11), (11, 10), (10, 8)]
+
+    for u, v in c2_conns + c3_conns + c4_conns:
+        if u in pts and v in pts:
+            cv2.line(panel, pts[u], pts[v], (180, 180, 180), 1, lineType=cv2.LINE_AA)
+
+    # 3. Draw landmark dots with contrast border
+    for i in sorted(pts.keys()):
+        px, py = pts[i]
         color_bgr = LANDMARK_COLORS_BGR[i % len(LANDMARK_COLORS_BGR)]
         color_rgb = (color_bgr[2], color_bgr[1], color_bgr[0])
 
@@ -134,6 +158,7 @@ def render_roi_panel_with_contours(
         cv2.circle(panel, (px, py), 5, color_rgb, -1, lineType=cv2.LINE_AA)
         cv2.circle(panel, (px, py), 1, (255, 255, 255), -1, lineType=cv2.LINE_AA)
 
+    # 4. Panel title banner at top
     banner_h = 36
     banner = np.zeros((banner_h, panel_size, 3), dtype=np.uint8)
     banner[:] = (25, 28, 32)
@@ -315,7 +340,7 @@ def run_two_stage_evaluation(
 
         # Prepare 640x640 canvas tensor
         canvas_img = cv2.resize(raw_rgb, (stage1_img_size, stage1_img_size))
-        tensor_in = torch.from_numpy(canvas_img.transpose(2, 0, 1)).float().unsqueeze(0).to(device)
+        tensor_in = to_normalized_tensor(canvas_img, device)
 
         with torch.no_grad():
             # A. Stage 1 Forward
@@ -334,7 +359,7 @@ def run_two_stage_evaluation(
                 bbox=gt_bbox,
                 target_size=stage2_img_size,
             )
-            oracle_in = torch.from_numpy(oracle_patch.transpose(2, 0, 1)).float().unsqueeze(0).to(device)
+            oracle_in = to_normalized_tensor(oracle_patch, device)
             _, oracle_coords_roi_t = stage2_model(oracle_in)
             oracle_coords_roi = oracle_coords_roi_t.squeeze(0).cpu().numpy()
             oracle_coords_canvas = inverse_transform_coords(
@@ -360,7 +385,7 @@ def run_two_stage_evaluation(
                     bbox=s1_bbox,
                     target_size=stage2_img_size,
                 )
-                casc_in = torch.from_numpy(casc_patch.transpose(2, 0, 1)).float().unsqueeze(0).to(device)
+                casc_in = to_normalized_tensor(casc_patch, device)
                 _, casc_coords_roi_t = stage2_model(casc_in)
                 casc_coords_roi = casc_coords_roi_t.squeeze(0).cpu().numpy()
                 cascaded_coords_canvas = inverse_transform_coords(
@@ -384,7 +409,7 @@ def run_two_stage_evaluation(
                             bbox=s2_bbox,
                             target_size=stage2_img_size,
                         )
-                        casc_in_2 = torch.from_numpy(casc_patch_2.transpose(2, 0, 1)).float().unsqueeze(0).to(device)
+                        casc_in_2 = to_normalized_tensor(casc_patch_2, device)
                         _, casc_coords_roi_2_t = stage2_model(casc_in_2)
                         casc_coords_roi_2 = casc_coords_roi_2_t.squeeze(0).cpu().numpy()
                         cascaded_coords_canvas = inverse_transform_coords(
@@ -719,10 +744,19 @@ def run_two_stage_evaluation(
                     "oracle_mean_norm_err": gen_oracle["mean"],
                     "delta_mean_norm_err": delta_mean_norm,
                     "relative_reduction_pct": pct_reduction,
+                    "s1_share_within_5pct": gen_s1["share_within_5pct"],
                     "cascade_share_within_5pct": gen_casc["share_within_5pct"],
+                    "oracle_share_within_5pct": gen_oracle["share_within_5pct"],
+                    "s1_share_within_2_5pct": gen_s1["share_within_2_5pct"],
                     "cascade_share_within_2_5pct": gen_casc["share_within_2_5pct"],
+                    "oracle_share_within_2_5pct": gen_oracle["share_within_2_5pct"],
+                    "s1_staging_acc": acc_s1,
                     "cascade_staging_acc": acc_casc,
+                    "oracle_staging_acc": metrics_oracle.get("staging", {}).get("overall_accuracy", 0.0),
+                    "s1_quadratic_kappa": kappa_s1,
                     "cascade_quadratic_kappa": kappa_casc,
+                    "oracle_quadratic_kappa": metrics_oracle.get("staging", {}).get("quadratic_weighted_kappa", 0.0),
+                    "fallback_rate_pct": delta_summary["fallback_rate_pct"],
                 })
                 mlflow.log_artifact(str(report_file))
                 mlflow.log_artifact(str(metrics_json_file))

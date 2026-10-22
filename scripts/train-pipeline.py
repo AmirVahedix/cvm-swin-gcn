@@ -110,6 +110,11 @@ def main():
         help="Skip preprocessing steps 1-4 and run model training directly.",
     )
     parser.add_argument(
+        "--eval-only",
+        action="store_true",
+        help="Skip all downloading, preprocessing, and training steps, executing only Step 6 (Evaluation) and Step 7 (Batch Inference).",
+    )
+    parser.add_argument(
         "--target-size",
         type=int,
         default=640,
@@ -229,6 +234,12 @@ def main():
         type=str,
         default="artifacts/stage2_best.pth",
         help="Stage 2 checkpoint path (default: artifacts/stage2_best.pth).",
+    )
+    parser.add_argument(
+        "--stage2-run-id",
+        type=str,
+        default=None,
+        help="MLflow Run ID to automatically download Stage 2 checkpoint if not present locally.",
     )
     parser.add_argument(
         "--test-mlflow",
@@ -482,6 +493,14 @@ def main():
     if args.legacy_label_studio:
         args.data_source = "label-studio"
 
+    if args.eval_only:
+        args.skip_download = True
+        args.skip_resize = True
+        args.skip_labels = True
+        args.skip_split = True
+        args.skip_stage1 = True
+        args.skip_stage2 = True
+
     verify_env(data_source=args.data_source)
 
     print("Initializing pipeline execution...\n" + "=" * 40)
@@ -692,14 +711,36 @@ def main():
             else:
                 print("\n--> Stage 2 Skipped via --skip-stage2")
 
+            # Check if Stage 2 checkpoint is needed and fetch from MLflow if missing
+            run_id_for_stage2 = getattr(args, "stage2_run_id", None) or os.getenv("STAGE2_RUN_ID")
+            if not os.path.exists(args.stage2_weights) and not os.path.exists("artifacts/stage2_best.pth") and run_id_for_stage2:
+                print(f"\n--> Stage 2 weights not found locally. Automatically downloading from MLflow run '{run_id_for_stage2}'...")
+                from scripts.download_checkpoint import download_checkpoint_from_mlflow
+                download_checkpoint_from_mlflow(
+                    run_id=run_id_for_stage2,
+                    artifact_path="stage2_best.pth",
+                    dest_path=args.stage2_weights,
+                    tracking_uri=args.mlflow_tracking_uri,
+                    username=args.mlflow_username,
+                    password=args.mlflow_password,
+                )
+
             # Step 6: Two-Stage Cascaded Clinical Evaluation
             if not args.skip_eval:
                 print("\n[6/6] Executing Two-Stage Cascaded Clinical Evaluation on Test Split...")
-                s1_w = args.stage1_weights if os.path.exists(args.stage1_weights) else "artifacts/best.pth"
-                s2_w = args.stage2_weights if os.path.exists(args.stage2_weights) else "artifacts/stage2_best.pth"
+                s1_w = (
+                    args.stage1_weights
+                    if (args.stage1_weights and os.path.exists(args.stage1_weights))
+                    else ("artifacts/stage1_best.pth" if os.path.exists("artifacts/stage1_best.pth") else "artifacts/best.pth")
+                )
+                s2_w = (
+                    args.stage2_weights
+                    if (args.stage2_weights and os.path.exists(args.stage2_weights))
+                    else ("artifacts/stage2_best.pth" if os.path.exists("artifacts/stage2_best.pth") else None)
+                )
                 run_two_stage_evaluation(
                     stage1_weights=s1_w,
-                    stage2_weights=s2_w,
+                    stage2_weights=s2_w or "artifacts/stage2_best.pth",
                     img_dir="dataset/test/images",
                     npz_dir="dataset/test/labels",
                     output_dir="evaluation/two_stage",
@@ -811,12 +852,21 @@ def main():
             print(
                 f"\n[7/7] Executing: Batch Inference on Whole Data & Generating Lightweight Landmark Location Files..."
             )
-            best_weights_path = (
-                args.eval_weights
-                if (args.eval_weights and os.path.exists(args.eval_weights))
-                else "artifacts/best.pth"
-            )
-            if not os.path.exists(best_weights_path):
+            s1_w = None
+            for cand in [args.stage1_weights, "artifacts/stage1_best.pth", "artifacts/best.pth", args.eval_weights]:
+                if cand and os.path.exists(cand):
+                    s1_w = cand
+                    break
+
+            s2_w = None
+            for cand in [args.stage2_weights, "artifacts/stage2_best.pth"]:
+                if cand and os.path.exists(cand):
+                    s2_w = cand
+                    break
+
+            best_weights_path = s2_w or s1_w or (args.eval_weights if (args.eval_weights and os.path.exists(args.eval_weights)) else "artifacts/best.pth")
+
+            if not os.path.exists(best_weights_path) and not (s1_w and os.path.exists(s1_w)):
                 print(
                     f"⚠️ Warning: Checkpoint weights '{best_weights_path}' not found. Skipping Step 7."
                 )
@@ -830,7 +880,11 @@ def main():
                 run_batch_inference(
                     images_dir=args.whole_data_images_dir,
                     output_json=Path(args.light_predictions_dir) / "predictions_full.json",
-                    weights=best_weights_path,
+                    weights=s1_w or best_weights_path,
+                    stage1_weights=s1_w,
+                    stage2_weights=s2_w if args.two_stage else None,
+                    stage2_size=args.stage2_size,
+                    margin_ratio=args.margin_ratio,
                     device="auto",
                     batch_size=args.inference_batch_size,
                     img_size=args.target_size,

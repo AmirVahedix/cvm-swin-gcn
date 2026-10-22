@@ -57,6 +57,11 @@ if str(ROOT_DIR) not in sys.path:
 
 from src.data.constants import LANDMARK_CLASSES, NUM_LANDMARKS
 from src.models.model import CephalometricSwinGCN
+from src.utils.roi_utils import (
+    compute_roi_bbox,
+    crop_roi_with_padding,
+    inverse_transform_coords,
+)
 from src.data.preprocessing.split_dataset import (
     load_fixed_id_set,
     load_label_studio_mapping,
@@ -113,7 +118,7 @@ def load_model(weights_path: str, device: torch.device, img_size: int = 640) -> 
 def preprocess_image(
     image_path: Path,
     target_size: int = 640,
-) -> Tuple[torch.Tensor, Tuple[int, int], float, int, int]:
+) -> Tuple[torch.Tensor, Tuple[int, int], float, int, int, np.ndarray]:
     """
     Reads image, applies letterbox padding to preserve aspect ratio,
     and applies standard ImageNet normalization.
@@ -124,6 +129,7 @@ def preprocess_image(
         scale: Scale factor applied
         pad_x: Left padding on canvas
         pad_y: Top padding on canvas
+        canvas: [target_size, target_size, 3] uint8 canvas
     """
     img = cv2.imread(str(image_path))
     if img is None:
@@ -151,7 +157,7 @@ def preprocess_image(
     norm = (arr - mean) / std
 
     tensor = torch.from_numpy(norm).permute(2, 0, 1).float()
-    return tensor, (orig_w, orig_h), scale, pad_x, pad_y
+    return tensor, (orig_w, orig_h), scale, pad_x, pad_y, canvas
 
 
 def build_split_mapping(
@@ -518,6 +524,30 @@ def parse_args():
         default=True,
         help="Disable logging metrics to MLflow",
     )
+    parser.add_argument(
+        "--stage1-weights",
+        type=str,
+        default=None,
+        help="Stage 1 coarse weights path (overrides --weights if given)",
+    )
+    parser.add_argument(
+        "--stage2-weights",
+        type=str,
+        default=None,
+        help="Stage 2 fine ROI weights path for Two-Stage cascaded batch inference",
+    )
+    parser.add_argument(
+        "--stage2-size",
+        type=int,
+        default=448,
+        help="Stage 2 ROI input resolution (default: 448)",
+    )
+    parser.add_argument(
+        "--margin-ratio",
+        type=float,
+        default=0.18,
+        help="Vertebra ROI margin ratio (default: 0.18)",
+    )
     return parser.parse_args()
 
 
@@ -525,6 +555,10 @@ def run_batch_inference(
     images_dir: str | Path,
     output_json: Optional[str | Path] = "predictions.json",
     weights: str | Path = "artifacts/best.pth",
+    stage1_weights: Optional[Union[str, Path]] = None,
+    stage2_weights: Optional[Union[str, Path]] = None,
+    stage2_size: int = 448,
+    margin_ratio: float = 0.18,
     device: str = "auto",
     batch_size: int = 8,
     img_size: int = 640,
@@ -606,9 +640,17 @@ def run_batch_inference(
         print(f"✨ Lightweight Files: {light_output_dir}")
     print("-" * 80)
 
-    # 5. Load Model
+    # 5. Load Model(s)
     start_load = time.time()
-    model = load_model(str(weights), device=dev, img_size=img_size)
+    s1_weights_path = stage1_weights or weights
+    model_s1 = load_model(str(s1_weights_path), device=dev, img_size=img_size)
+
+    model_s2 = None
+    if stage2_weights and os.path.exists(str(stage2_weights)):
+        print(f"🔬 Loading Stage 2 Fine ROI model from: {stage2_weights}")
+        model_s2 = load_model(str(stage2_weights), device=dev, img_size=stage2_size)
+        print(f"--> Two-Stage Cascaded batch inference active ({stage2_size}x{stage2_size} ROI).")
+
     print(f"Model ready in {time.time() - start_load:.2f}s.\n")
 
     # 6. Process in batches
@@ -623,14 +665,16 @@ def run_batch_inference(
         for start_idx in tqdm(range(0, total_images, bs), desc="Inferring Batches", unit="batch"):
             batch_slice = image_paths[start_idx : start_idx + bs]
             batch_tensors = []
+            batch_canvases = []
             batch_meta = []
 
             for img_p in batch_slice:
                 try:
-                    tensor, (orig_w, orig_h), scale, pad_x, pad_y = preprocess_image(
+                    tensor, (orig_w, orig_h), scale, pad_x, pad_y, canvas = preprocess_image(
                         img_p, target_size=img_size
                     )
                     batch_tensors.append(tensor)
+                    batch_canvases.append(canvas)
                     batch_meta.append((img_p, orig_w, orig_h, scale, pad_x, pad_y))
                 except Exception as err:
                     print(f"\n⚠️ Skipping corrupted image '{img_p.name}': {err}", file=sys.stderr)
@@ -643,8 +687,47 @@ def run_batch_inference(
 
             # Model forward pass: outputs (heatmaps, normalized_coords)
             # coords shape: [B, 13, 2] in normalized canvas coordinates [0.0, 1.0]
-            _, pred_coords = model(input_batch)
-            pred_coords = pred_coords.cpu().numpy()
+            _, pred_coords_s1 = model_s1(input_batch)
+            pred_coords_s1_np = pred_coords_s1.cpu().numpy()
+
+            if model_s2 is not None:
+                final_coords_np = np.zeros_like(pred_coords_s1_np)
+                for b_i in range(len(batch_meta)):
+                    s1_coords = pred_coords_s1_np[b_i]
+                    bbox = compute_roi_bbox(
+                        coords=s1_coords,
+                        img_w=img_size,
+                        img_h=img_size,
+                        margin_ratio=margin_ratio,
+                    )
+                    if bbox.is_fallback:
+                        final_coords_np[b_i] = s1_coords
+                    else:
+                        canvas = batch_canvases[b_i]
+                        roi_patch, _ = crop_roi_with_padding(
+                            image=canvas,
+                            bbox=bbox,
+                            target_size=stage2_size,
+                            interpolation=cv2.INTER_LINEAR,
+                        )
+                        arr = roi_patch.astype(np.float32) / 255.0
+                        mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+                        std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+                        norm_roi = (arr - mean) / std
+                        roi_in = torch.from_numpy(norm_roi).permute(2, 0, 1).unsqueeze(0).float().to(dev)
+
+                        _, pred_roi = model_s2(roi_in)
+                        pred_roi_np = pred_roi.squeeze(0).cpu().numpy()
+                        reprojected = inverse_transform_coords(
+                            roi_coords=pred_roi_np,
+                            bbox=bbox,
+                            target_size=stage2_size,
+                            output_normalized=True,
+                        )
+                        final_coords_np[b_i] = reprojected
+                pred_coords = final_coords_np
+            else:
+                pred_coords = pred_coords_s1_np
 
             for b_i, (img_p, orig_w, orig_h, scale, pad_x, pad_y) in enumerate(batch_meta):
                 img_id = img_p.stem
