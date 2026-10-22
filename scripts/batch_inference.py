@@ -58,6 +58,7 @@ if str(ROOT_DIR) not in sys.path:
 from src.data.constants import LANDMARK_CLASSES, NUM_LANDMARKS
 from src.models.model import CephalometricSwinGCN
 from src.utils.roi_utils import (
+    apply_anatomical_height_prior,
     compute_roi_bbox,
     crop_roi_with_padding,
     inverse_transform_coords,
@@ -548,6 +549,13 @@ def parse_args():
         default=0.18,
         help="Vertebra ROI margin ratio (default: 0.18)",
     )
+    parser.add_argument(
+        "--no-anatomical-prior",
+        dest="use_anatomical_prior",
+        action="store_false",
+        default=True,
+        help="Disable Anatomical Vertebra Height Prior safeguard",
+    )
     return parser.parse_args()
 
 
@@ -559,6 +567,7 @@ def run_batch_inference(
     stage2_weights: Optional[Union[str, Path]] = None,
     stage2_size: int = 448,
     margin_ratio: float = 0.18,
+    use_anatomical_prior: bool = True,
     device: str = "auto",
     batch_size: int = 8,
     img_size: int = 640,
@@ -728,6 +737,13 @@ def run_batch_inference(
                 pred_coords = final_coords_np
             else:
                 pred_coords = pred_coords_s1_np
+
+            # Apply Anatomical Vertebra Height Prior safeguard
+            if use_anatomical_prior:
+                for b_i in range(len(pred_coords)):
+                    pred_coords[b_i], _ = apply_anatomical_height_prior(
+                        pred_coords[b_i], img_w=img_size, img_h=img_size
+                    )
 
             for b_i, (img_p, orig_w, orig_h, scale, pad_x, pad_y) in enumerate(batch_meta):
                 img_id = img_p.stem

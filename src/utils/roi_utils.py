@@ -109,28 +109,26 @@ def apply_anatomical_height_prior(
     coords: Union[np.ndarray, torch.Tensor],
     img_w: int = 640,
     img_h: int = 640,
-    min_c4_to_c3_ratio: float = 0.85,
-    disc_space_ratio: float = 0.20,
+    min_c4_to_c3_ratio: float = 0.75,
 ) -> Tuple[Union[np.ndarray, torch.Tensor], bool]:
     """
     Applies the Anatomical Vertebra Height Prior.
-    In human cervical spine anatomy (C2-C4), vertebra C4 is physiologically equal to
-    or slightly taller than C3 (H_C4 >= 1.0 * H_C3).
+    In human cervical spine anatomy (C2-C4), vertebra C4 is physiologically of comparable
+    height to C3 (H_C4 >= 0.85 * H_C3).
 
     If lower neck radiographic occlusion, shoulder attenuation, or collimator cut-off causes
     C4 inferior landmarks (C4_PI: 10, C4_IC: 11, C4_AI: 12) to collapse upward into the C4
-    body or into C3, this prior computes the reliable height of C3 and ensures C4 reaches
-    its true physiological lower boundary:
+    body or into C3 (H_C4 < 0.75 * H_C3), this prior computes the reliable height of C3
+    and ensures C4 inferior reaches its true physiological lower boundary:
         h_C3 = max(y[5,6,7]) - min(y[3,4])
         min_c4_h = min_c4_to_c3_ratio * h_C3
-        c4_floor_y = max(y[8,9]) + min_c4_h + disc_space_ratio * h_C3
+        c4_floor_y = max(y[8,9]) + min_c4_h
 
     Args:
         coords: [N, 2] landmarks in normalized [0, 1] or pixel scale.
         img_w: Canvas width.
         img_h: Canvas height.
-        min_c4_to_c3_ratio: Minimum ratio of C4 height to C3 height (default 0.85).
-        disc_space_ratio: Estimated intervertebral disc thickness relative to C3 height (default 0.20).
+        min_c4_to_c3_ratio: Minimum physiological threshold ratio of C4 height to C3 height (default 0.75).
 
     Returns:
         (corrected_coords, prior_applied)
@@ -169,7 +167,7 @@ def apply_anatomical_height_prior(
 
     c4_sup_y = max(float(all_ys[k]) for k in c4_sup)
     expected_c4_h = min_c4_to_c3_ratio * h_c3
-    c4_floor_y = c4_sup_y + expected_c4_h + (disc_space_ratio * h_c3)
+    c4_floor_y = c4_sup_y + expected_c4_h
 
     # Current predicted C4 inferior extent
     valid_c4_inf = [k for k in c4_inf if valid_mask[k]]

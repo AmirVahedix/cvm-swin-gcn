@@ -144,8 +144,10 @@ def predict_landmarks_two_stage(
     stage1_img_size: int = 640,
     stage2_img_size: int = 448,
     margin_ratio: float = 0.18,
+    use_anatomical_prior: bool = True,
 ) -> Tuple[List[Tuple[float, float]], List[Tuple[float, float]]]:
     from src.utils.roi_utils import (
+        apply_anatomical_height_prior,
         compute_roi_bbox,
         crop_roi_with_padding,
         inverse_transform_coords,
@@ -209,6 +211,12 @@ def predict_landmarks_two_stage(
             output_normalized=True,
         )
 
+    # Apply Anatomical Vertebra Height Prior safeguard
+    if use_anatomical_prior:
+        final_canvas_norm, _ = apply_anatomical_height_prior(
+            final_canvas_norm, img_w=stage1_img_size, img_h=stage1_img_size
+        )
+
     # 6. Un-letterbox to native pixel space
     pixel_coords = []
     norm_coords = []
@@ -236,6 +244,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--stage2-size", type=int, default=448, help="Stage 2 ROI resolution (default: 448)")
     parser.add_argument("--margin-ratio", type=float, default=0.18, help="ROI margin ratio (default: 0.18)")
+    parser.add_argument(
+        "--no-anatomical-prior",
+        dest="use_anatomical_prior",
+        action="store_false",
+        default=True,
+        help="Disable Anatomical Vertebra Height Prior safeguard",
+    )
     parser.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda", "mps"])
     parser.add_argument("--compute-cvm", action="store_true", default=True, help="Compute clinical CVM stage (CS1-6)")
     parser.add_argument("--limit", type=int, default=None, help="Limit number of images processed")
@@ -317,6 +332,7 @@ def main():
                 stage1_img_size=640,
                 stage2_img_size=args.stage2_size,
                 margin_ratio=args.margin_ratio,
+                use_anatomical_prior=args.use_anatomical_prior,
             )
         else:
             px_coords, norm_coords = predict_landmarks_single(model, pil_img, device)

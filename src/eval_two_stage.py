@@ -56,6 +56,7 @@ from src.utils.metrics import (
 )
 from src.utils.roi_utils import (
     ROIBoundingBox,
+    apply_anatomical_height_prior,
     canvas_to_native_coords,
     compute_roi_bbox,
     crop_roi_with_padding,
@@ -232,6 +233,7 @@ def run_two_stage_evaluation(
     stage2_img_size: int = 448,
     margin_ratio: float = 0.18,
     refine_2pass: bool = False,
+    use_anatomical_prior: bool = True,
     num_visualizations: int = 10,
     device_str: Optional[str] = None,
     log_to_mlflow: bool = True,
@@ -417,6 +419,12 @@ def run_two_stage_evaluation(
                         target_size=stage2_img_size,
                         output_normalized=True,
                     )
+
+            # Apply Anatomical Vertebra Height Prior post-processing safeguard
+            if use_anatomical_prior:
+                cascaded_coords_canvas, _ = apply_anatomical_height_prior(
+                    cascaded_coords_canvas, img_w=stage1_img_size, img_h=stage1_img_size
+                )
 
         # Unletterbox all coordinates from canvas [0, 1] to native radiograph pixel space
         gt_canvas_px = gt_canvas_norm * float(stage1_img_size)
@@ -778,6 +786,13 @@ def main():
     parser.add_argument("--stage2-size", type=int, default=448, help="Stage 2 input resolution")
     parser.add_argument("--margin-ratio", type=float, default=0.18, help="ROI margin ratio")
     parser.add_argument("--refine-2pass", action="store_true", help="Enable 2-pass iterative refinement")
+    parser.add_argument(
+        "--no-anatomical-prior",
+        dest="use_anatomical_prior",
+        action="store_false",
+        default=True,
+        help="Disable Anatomical Vertebra Height Prior safeguard",
+    )
     parser.add_argument("--visualize", type=int, default=10, help="Number of visualization panels to save")
     parser.add_argument("--device", type=str, default=None, help="Device (cuda/mps/cpu)")
     parser.add_argument("--skip-mlflow", action="store_true", help="Skip MLflow logging")
@@ -794,6 +809,7 @@ def main():
         stage2_img_size=args.stage2_size,
         margin_ratio=args.margin_ratio,
         refine_2pass=args.refine_2pass,
+        use_anatomical_prior=args.use_anatomical_prior,
         num_visualizations=args.visualize,
         device_str=args.device,
         log_to_mlflow=not args.skip_mlflow,

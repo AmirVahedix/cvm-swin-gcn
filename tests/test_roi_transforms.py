@@ -5,6 +5,7 @@ import cv2
 
 from src.utils.roi_utils import (
     ROIBoundingBox,
+    apply_anatomical_height_prior,
     compute_roi_bbox,
     crop_roi_with_padding,
     transform_coords_to_roi,
@@ -219,6 +220,35 @@ class TestROITransforms(unittest.TestCase):
         max_err = np.max(np.abs(native_pts[valid_mask] - reconstructed_native[valid_mask]))
         self.assertLess(max_err, 0.5, f"Native roundtrip error {max_err:.3f} px exceeds 0.5 px tolerance")
         self.assertEqual(reconstructed_native[3, 0], -1.0)
+
+    def test_anatomical_height_prior_healthy(self):
+        """Verify that physiologically healthy coordinates are NOT altered by the prior."""
+        clean_coords, applied = apply_anatomical_height_prior(
+            self.norm_coords, img_w=self.img_size, img_h=self.img_size
+        )
+        self.assertFalse(applied)
+        np.testing.assert_allclose(clean_coords, self.norm_coords, atol=1e-6)
+
+    def test_anatomical_height_prior_collapsed_c4(self):
+        """Verify that upward-collapsed C4 inferior landmarks are corrected downward."""
+        collapsed = self.norm_coords.copy()
+        # Collapse C4 inferior (10, 11, 12) upward right next to C4 superior (y ~ 395)
+        collapsed[10:13, 1] = collapsed[8:10, 1].mean() + 0.005
+
+        corrected, applied = apply_anatomical_height_prior(
+            collapsed, img_w=self.img_size, img_h=self.img_size
+        )
+        self.assertTrue(applied)
+
+        # C4 inferior must now sit below C4 superior by at least ~ 40 px
+        c4_sup_y = corrected[8:10, 1].max() * self.img_size
+        c4_inf_y = corrected[10:13, 1].min() * self.img_size
+        self.assertGreater(c4_inf_y - c4_sup_y, 35.0)
+
+        # compute_roi_bbox with prior must cover the lower floor
+        bbox = compute_roi_bbox(collapsed, img_w=self.img_size, img_h=self.img_size, use_anatomical_prior=True)
+        self.assertFalse(bbox.is_fallback)
+        self.assertGreater(bbox.v2, c4_inf_y)
 
 
 if __name__ == "__main__":
