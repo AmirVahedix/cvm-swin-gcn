@@ -599,7 +599,8 @@ def train_stage2_main(
         with open(history_path, "w", encoding="utf-8") as f:
             json.dump(history, f, indent=2)
         mlflow.log_artifact(str(history_path))
-        mlflow.log_artifact(save_path)
+        if os.path.exists(save_path):
+            mlflow.log_artifact(save_path)
 
     return {
         "best_epoch": best_epoch,
