@@ -133,21 +133,10 @@ def get_llrd_param_groups(
 
 def get_landmark_weights(device: torch.device) -> torch.Tensor:
     """
-    Constructs landmark loss weights prioritizing empirically difficult landmarks
-    identified from evaluation (C2_AI, C3_AS, C2_IC, C4_AI, C4_PS, C3_PS, etc.), matching fbeeaf0.
+    Constructs uniform landmark loss weights (1.0 for every landmark),
+    ensuring an unbiased multi-task objective without empirical landmark reweighting.
     """
-    weights = torch.ones(NUM_LANDMARKS, dtype=torch.float32, device=device)
-    # Tier 1: Lagging landmarks
-    weights[2] = 2.5   # C2_AI
-    weights[4] = 2.5   # C3_AS
-
-    # Tier 2: Challenging landmarks
-    weights[1] = 2.0   # C2_IC
-    weights[12] = 2.0  # C4_AI
-    weights[0] = 1.8   # C2_PI
-    weights[8] = 1.8   # C4_PS
-    weights[3] = 1.6   # C3_PS
-    return weights
+    return torch.ones(NUM_LANDMARKS, dtype=torch.float32, device=device)
 
 
 class EpochLossResult(float):
