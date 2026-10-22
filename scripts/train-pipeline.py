@@ -494,12 +494,26 @@ def main():
         args.data_source = "label-studio"
 
     if args.eval_only:
-        args.skip_download = True
-        args.skip_resize = True
-        args.skip_labels = True
-        args.skip_split = True
-        args.skip_stage1 = True
-        args.skip_stage2 = True
+        test_ready = (
+            os.path.isdir("dataset/test/images")
+            and len(os.listdir("dataset/test/images")) > 0
+            and os.path.isdir("dataset/test/labels")
+            and len(os.listdir("dataset/test/labels")) > 0
+        )
+        if not test_ready:
+            print("⚠️ Test dataset ('dataset/test') not found locally. Executing data download & prep (Steps 1-4) first...")
+            args.skip_download = False
+            args.skip_resize = False
+            args.skip_labels = False
+            args.skip_split = False
+            args.skip_stage1 = True
+            args.skip_stage2 = True
+            args.train_only = False
+        else:
+            print("✅ Test dataset ('dataset/test') found locally. Skipping Steps 1-5 and proceeding directly to Evaluation & Batch Inference.")
+            args.train_only = True
+            args.skip_stage1 = True
+            args.skip_stage2 = True
 
     verify_env(data_source=args.data_source)
 
@@ -566,58 +580,67 @@ def main():
                 print("\n[1/6] Skipping download as requested.")
 
             # Step 2: Resize Images & Adjust Coordinates
-            print("\n[2/6] Executing: resize_images()")
-            raw_exports_dir = Path("data/raw/exports")
-            raw_json_files = sorted(
-                raw_exports_dir.glob("*.json"),
-                key=lambda p: p.stat().st_mtime,
-                reverse=True,
-            )
-            raw_json_path = (
-                str(raw_json_files[0])
-                if raw_json_files
-                else "data/raw/exports/export.json"
-            )
+            if not args.skip_resize:
+                print("\n[2/6] Executing: resize_images()")
+                raw_exports_dir = Path("data/raw/exports")
+                raw_json_files = sorted(
+                    raw_exports_dir.glob("*.json"),
+                    key=lambda p: p.stat().st_mtime,
+                    reverse=True,
+                )
+                raw_json_path = (
+                    str(raw_json_files[0])
+                    if raw_json_files
+                    else "data/raw/exports/export.json"
+                )
 
-            resize_images(
-                img_dir="data/raw/images",
-                json_path=raw_json_path,
-                out_img_dir="data/images",
-                out_json_path="data/exports/export.json",
-                target_size=args.target_size,
-            )
-            print("-" * 20)
+                resize_images(
+                    img_dir="data/raw/images",
+                    json_path=raw_json_path,
+                    out_img_dir="data/images",
+                    out_json_path="data/exports/export.json",
+                    target_size=args.target_size,
+                )
+                print("-" * 20)
+            else:
+                print("\n[2/6] Skipping image resize (--skip-resize set).")
 
             # Step 3: Generate Heatmaps & GCN Landmark Labels
-            print("\n[3/6] Executing: generate_labels()")
-            generate_labels(
-                json_path="data/exports/export.json",
-                images_dir="data/images",
-                output_dir="data/labels",
-                sigma=args.sigma,
-            )
-            print("-" * 20)
+            if not args.skip_labels:
+                print("\n[3/6] Executing: generate_labels()")
+                generate_labels(
+                    json_path="data/exports/export.json",
+                    images_dir="data/images",
+                    output_dir="data/labels",
+                    sigma=args.sigma,
+                )
+                print("-" * 20)
+            else:
+                print("\n[3/6] Skipping label generation (--skip-labels set).")
 
             # Step 4: Generate Data Splits
-            print("\n[4/6] Executing: split_dataset()")
-            split_info = split_dataset(
-                images_dir="data/images",
-                labels_dir="data/labels",
-                output_dir="./dataset",
-                train_ratio=0.70,
-                val_ratio=0.15,
-                test_ratio=0.15,
-                seed=42,
-                fixed_test_ids_path=args.test_ids_file,
-                fixed_val_ids_path=args.val_ids_file,
-                use_test_cohort=args.use_test_cohort,
-                use_fixed_cohorts=args.use_fixed_cohorts,
-            )
-            train_cnt = split_info.get("train", 0)
-            val_cnt = len(split_info.get("val_ids", []))
-            test_cnt = len(split_info.get("test_ids", []))
-            print(f"--> Split artifacts ready: 'train' ({train_cnt} IDs), 'val_image_ids.json' ({val_cnt} IDs), 'test_image_ids.json' ({test_cnt} IDs)")
-            print("-" * 20)
+            if not args.skip_split:
+                print("\n[4/6] Executing: split_dataset()")
+                split_info = split_dataset(
+                    images_dir="data/images",
+                    labels_dir="data/labels",
+                    output_dir="./dataset",
+                    train_ratio=0.70,
+                    val_ratio=0.15,
+                    test_ratio=0.15,
+                    seed=42,
+                    fixed_test_ids_path=args.test_ids_file,
+                    fixed_val_ids_path=args.val_ids_file,
+                    use_test_cohort=args.use_test_cohort,
+                    use_fixed_cohorts=args.use_fixed_cohorts,
+                )
+                train_cnt = split_info.get("train", 0)
+                val_cnt = len(split_info.get("val_ids", []))
+                test_cnt = len(split_info.get("test_ids", []))
+                print(f"--> Split artifacts ready: 'train' ({train_cnt} IDs), 'val_image_ids.json' ({val_cnt} IDs), 'test_image_ids.json' ({test_cnt} IDs)")
+                print("-" * 20)
+            else:
+                print("\n[4/6] Skipping dataset splitting (--skip-split set).")
         else:
             print("\n[1-4/6] Skipping steps 1 to 4 (--train-only flag set).")
 
