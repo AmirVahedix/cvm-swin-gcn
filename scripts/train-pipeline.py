@@ -219,6 +219,12 @@ def main():
         help="Stage 1 checkpoint path (default: artifacts/stage1_best.pth).",
     )
     parser.add_argument(
+        "--stage1-run-id",
+        type=str,
+        default=None,
+        help="MLflow Run ID to automatically download Stage 1 checkpoint if not present locally.",
+    )
+    parser.add_argument(
         "--stage2-weights",
         type=str,
         default="artifacts/stage2_best.pth",
@@ -638,6 +644,19 @@ def main():
             else:
                 print("\n--> Stage 1 Skipped via --skip-stage1")
 
+            # Check if Stage 1 checkpoint is needed for Stage 2 warmstart and fetch from MLflow if missing
+            run_id_for_stage1 = getattr(args, "stage1_run_id", None) or os.getenv("STAGE1_RUN_ID")
+            if not os.path.exists(args.stage1_weights) and not os.path.exists("artifacts/best.pth") and run_id_for_stage1:
+                print(f"\n--> Stage 1 weights not found locally. Automatically downloading from MLflow run '{run_id_for_stage1}'...")
+                from scripts.download_checkpoint import download_checkpoint_from_mlflow
+                download_checkpoint_from_mlflow(
+                    run_id=run_id_for_stage1,
+                    dest_path=args.stage1_weights,
+                    tracking_uri=args.mlflow_tracking_uri,
+                    username=args.mlflow_username,
+                    password=args.mlflow_password,
+                )
+
             # Step 5b: Stage 2 Training
             if not args.skip_stage2 and not os.path.exists(args.stage2_weights):
                 print(f"\n[5b/6] Executing Stage 2 Fine Model Training ({args.stage2_epochs} epochs, {args.stage2_size}x{args.stage2_size})...")
@@ -658,8 +677,10 @@ def main():
                     val_npz_dir="dataset/val/labels",
                     native_img_dir="data/raw/images" if os.path.exists("data/raw/images") else None,
                     export_json_path="data/exports/export.json" if os.path.exists("data/exports/export.json") else None,
-                    experiment_name=args.mlflow_experiment_name,
+                    experiment_name=args.mlflow_experiment_name or os.getenv("MLFLOW_EXPERIMENT_NAME", "cvm-swin-gcn"),
                     tracking_uri=args.mlflow_tracking_uri,
+                    tracking_username=args.mlflow_username,
+                    tracking_password=args.mlflow_password,
                     run_name=f"{args.mlflow_run_name}_stage2" if args.mlflow_run_name else "stage2_fine",
                     use_amp=args.use_amp,
                     use_balanced_sampling=args.use_balanced_sampling,
@@ -690,7 +711,9 @@ def main():
                     num_visualizations=args.eval_samples,
                     log_to_mlflow=True,
                     tracking_uri=args.mlflow_tracking_uri,
-                    experiment_name=args.mlflow_experiment_name,
+                    tracking_username=args.mlflow_username,
+                    tracking_password=args.mlflow_password,
+                    experiment_name=args.mlflow_experiment_name or os.getenv("MLFLOW_EXPERIMENT_NAME", "cvm-swin-gcn"),
                 )
 
                 if not args.skip_ftp and args.ftp_host and args.ftp_user and args.ftp_password:

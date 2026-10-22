@@ -354,8 +354,10 @@ def train_stage2_main(
     val_npz_dir: str = "dataset/val/labels",
     native_img_dir: Optional[str] = "data/raw/images",
     export_json_path: Optional[str] = "data/exports/export.json",
-    experiment_name: str = "cvm-stage2-fine-roi",
+    experiment_name: Optional[str] = "cvm-stage2-fine-roi",
     tracking_uri: Optional[str] = None,
+    tracking_username: Optional[str] = None,
+    tracking_password: Optional[str] = None,
     run_name: Optional[str] = None,
     use_amp: bool = True,
     use_balanced_sampling: bool = True,
@@ -430,10 +432,18 @@ def train_stage2_main(
     landmark_weights = get_landmark_weights(device)  # Uniform 1.0 weights
 
     # 4. MLflow Tracking Setup
-    uri = tracking_uri or os.getenv("MLFLOW_TRACKING_URI", "http://127.0.0.1:5000")
+    user = tracking_username or os.getenv("MLFLOW_TRACKING_USERNAME")
+    pwd = tracking_password or os.getenv("MLFLOW_TRACKING_PASSWORD")
+    if user:
+        os.environ["MLFLOW_TRACKING_USERNAME"] = user
+    if pwd:
+        os.environ["MLFLOW_TRACKING_PASSWORD"] = pwd
+
+    uri = tracking_uri or os.getenv("MLFLOW_TRACKING_URI")
     if uri:
         mlflow.set_tracking_uri(uri)
-    mlflow.set_experiment(experiment_name)
+    exp_name = experiment_name or os.getenv("MLFLOW_EXPERIMENT_NAME") or "cvm-stage2-fine-roi"
+    mlflow.set_experiment(exp_name)
 
     actual_run_name = run_name or f"stage2_fine_{target_size}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     Path(save_path).parent.mkdir(parents=True, exist_ok=True)
@@ -612,6 +622,11 @@ def main():
     parser.add_argument("--save-path", type=str, default="artifacts/stage2_best.pth", help="Checkpoint save destination")
     parser.add_argument("--patience", type=int, default=15, help="Early stopping patience")
     parser.add_argument("--num-workers", type=int, default=4, help="DataLoader workers")
+    parser.add_argument("--tracking-uri", type=str, default=None, help="MLflow tracking URI")
+    parser.add_argument("--experiment-name", type=str, default=None, help="MLflow experiment name")
+    parser.add_argument("--run-name", type=str, default=None, help="MLflow run name")
+    parser.add_argument("--mlflow-username", type=str, default=None, help="MLflow username")
+    parser.add_argument("--mlflow-password", type=str, default=None, help="MLflow password")
 
     args = parser.parse_args()
 
@@ -627,6 +642,11 @@ def main():
         save_path=args.save_path,
         patience=args.patience,
         num_workers=args.num_workers,
+        tracking_uri=args.tracking_uri,
+        experiment_name=args.experiment_name,
+        run_name=args.run_name,
+        tracking_username=args.mlflow_username,
+        tracking_password=args.mlflow_password,
     )
 
 

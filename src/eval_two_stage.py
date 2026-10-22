@@ -211,7 +211,9 @@ def run_two_stage_evaluation(
     device_str: Optional[str] = None,
     log_to_mlflow: bool = True,
     tracking_uri: Optional[str] = None,
-    experiment_name: str = "cvm-two-stage-cascade-eval",
+    tracking_username: Optional[str] = None,
+    tracking_password: Optional[str] = None,
+    experiment_name: Optional[str] = "cvm-two-stage-cascade-eval",
 ) -> Tuple[Dict[str, Any], str]:
     """
     Main programmatic routine evaluating Stage 1 alone, Stage 2 Oracle, and Two-Stage Cascade.
@@ -689,11 +691,20 @@ def run_two_stage_evaluation(
     print(f"    • Visualizations: {vis_saved} panels in '{vis_dir.name}'")
 
     if log_to_mlflow:
-        uri = tracking_uri or os.getenv("MLFLOW_TRACKING_URI", "http://127.0.0.1:5000")
-        if uri:
-            mlflow.set_tracking_uri(uri)
-        mlflow.set_experiment(experiment_name)
         try:
+            user = tracking_username or os.getenv("MLFLOW_TRACKING_USERNAME")
+            pwd = tracking_password or os.getenv("MLFLOW_TRACKING_PASSWORD")
+            if user:
+                os.environ["MLFLOW_TRACKING_USERNAME"] = user
+            if pwd:
+                os.environ["MLFLOW_TRACKING_PASSWORD"] = pwd
+
+            uri = tracking_uri or os.getenv("MLFLOW_TRACKING_URI")
+            if uri:
+                mlflow.set_tracking_uri(uri)
+            exp_name = experiment_name or os.getenv("MLFLOW_EXPERIMENT_NAME") or "cvm-two-stage-cascade-eval"
+            mlflow.set_experiment(exp_name)
+
             with mlflow.start_run(run_name=f"eval_{actual_run_name}"):
                 mlflow.log_params({
                     "stage1_weights": stage1_weights,
