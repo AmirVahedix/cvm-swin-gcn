@@ -190,6 +190,21 @@ def compute_roi_bbox(
     u_min, u_max = float(xs.min()), float(xs.max())
     v_min, v_max = float(ys.min()), float(ys.max())
 
+    # Anatomical floor prior: ensure C4 inferior cannot be clipped upward if collapsed
+    if coords_np.shape[0] == 13:
+        c3_sup = [3, 4]
+        c3_inf = [5, 6, 7]
+        c4_sup = [8, 9]
+        if all(valid_mask[k] for k in c3_sup + c3_inf + c4_sup):
+            c3_sup_y = min(float(ys[k]) for k in c3_sup)
+            c3_inf_y = max(float(ys[k]) for k in c3_inf)
+            h_c3 = c3_inf_y - c3_sup_y
+            if h_c3 > 10.0:
+                c4_sup_y = max(float(ys[k]) for k in c4_sup)
+                c4_floor_y = c4_sup_y + 1.25 * h_c3
+                if v_max < c4_floor_y:
+                    v_max = c4_floor_y
+
     span_u = u_max - u_min
     span_v = v_max - v_min
     span = max(span_u, span_v)

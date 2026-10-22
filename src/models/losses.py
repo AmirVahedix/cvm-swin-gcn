@@ -99,7 +99,7 @@ class AnatomicalGraphLoss(nn.Module):
     Supports relative deformation scaling (|pred - gt| / (gt + eps)) to prevent the loss
     from vanishing into insignificance (~0.004) compared to coordinate loss.
     """
-    def __init__(self, adj_matrix: torch.Tensor, relative: bool = True):
+    def __init__(self, adj_matrix: torch.Tensor, relative: bool = False):
         super().__init__()
         self.register_buffer("adj_matrix", adj_matrix)
         self.relative = relative

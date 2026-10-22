@@ -378,46 +378,45 @@ def run_two_stage_evaluation(
             )
             if s1_bbox.is_fallback:
                 fallback_count += 1
-                cascaded_coords_canvas = s1_coords_canvas.copy()
-            else:
-                casc_patch, _ = crop_roi_with_padding(
-                    image=canvas_img,
-                    bbox=s1_bbox,
-                    target_size=stage2_img_size,
-                )
-                casc_in = to_normalized_tensor(casc_patch, device)
-                _, casc_coords_roi_t = stage2_model(casc_in)
-                casc_coords_roi = casc_coords_roi_t.squeeze(0).cpu().numpy()
-                cascaded_coords_canvas = inverse_transform_coords(
-                    roi_coords=casc_coords_roi,
-                    bbox=s1_bbox,
-                    target_size=stage2_img_size,
-                    output_normalized=True,
-                )
 
-                # Optional Pass 2: Iterative re-centering refinement
-                if refine_2pass and not s1_bbox.is_fallback:
-                    s2_bbox = compute_roi_bbox(
-                        coords=cascaded_coords_canvas,
-                        img_w=stage1_img_size,
-                        img_h=stage1_img_size,
-                        margin_ratio=margin_ratio,
+            casc_patch, _ = crop_roi_with_padding(
+                image=canvas_img,
+                bbox=s1_bbox,
+                target_size=stage2_img_size,
+            )
+            casc_in = to_normalized_tensor(casc_patch, device)
+            _, casc_coords_roi_t = stage2_model(casc_in)
+            casc_coords_roi = casc_coords_roi_t.squeeze(0).cpu().numpy()
+            cascaded_coords_canvas = inverse_transform_coords(
+                roi_coords=casc_coords_roi,
+                bbox=s1_bbox,
+                target_size=stage2_img_size,
+                output_normalized=True,
+            )
+
+            # Optional Pass 2: Iterative re-centering refinement
+            if refine_2pass and not s1_bbox.is_fallback:
+                s2_bbox = compute_roi_bbox(
+                    coords=cascaded_coords_canvas,
+                    img_w=stage1_img_size,
+                    img_h=stage1_img_size,
+                    margin_ratio=margin_ratio,
+                )
+                if not s2_bbox.is_fallback:
+                    casc_patch_2, _ = crop_roi_with_padding(
+                        image=canvas_img,
+                        bbox=s2_bbox,
+                        target_size=stage2_img_size,
                     )
-                    if not s2_bbox.is_fallback:
-                        casc_patch_2, _ = crop_roi_with_padding(
-                            image=canvas_img,
-                            bbox=s2_bbox,
-                            target_size=stage2_img_size,
-                        )
-                        casc_in_2 = to_normalized_tensor(casc_patch_2, device)
-                        _, casc_coords_roi_2_t = stage2_model(casc_in_2)
-                        casc_coords_roi_2 = casc_coords_roi_2_t.squeeze(0).cpu().numpy()
-                        cascaded_coords_canvas = inverse_transform_coords(
-                            roi_coords=casc_coords_roi_2,
-                            bbox=s2_bbox,
-                            target_size=stage2_img_size,
-                            output_normalized=True,
-                        )
+                    casc_in_2 = to_normalized_tensor(casc_patch_2, device)
+                    _, casc_coords_roi_2_t = stage2_model(casc_in_2)
+                    casc_coords_roi_2 = casc_coords_roi_2_t.squeeze(0).cpu().numpy()
+                    cascaded_coords_canvas = inverse_transform_coords(
+                        roi_coords=casc_coords_roi_2,
+                        bbox=s2_bbox,
+                        target_size=stage2_img_size,
+                        output_normalized=True,
+                    )
 
         # Unletterbox all coordinates from canvas [0, 1] to native radiograph pixel space
         gt_canvas_px = gt_canvas_norm * float(stage1_img_size)
