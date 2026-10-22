@@ -80,7 +80,7 @@ def validate_stage2_epoch(
     landmark_weights: Optional[torch.Tensor] = None,
     lambda_hm: float = 50.0,
     lambda_cd: float = 2.0,
-    lambda_graph: float = 1.0,
+    lambda_graph: float = 0.0,
     lambda_morph: float = 1.0,
     device: Optional[torch.device] = None,
     target_size: int = 448,
