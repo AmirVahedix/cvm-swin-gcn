@@ -219,8 +219,8 @@ def main():
     parser.add_argument(
         "--stage2-epochs",
         type=int,
-        default=60,
-        help="Number of epochs for Stage 2 Fine ROI training (default: 60).",
+        default=None,
+        help="Number of epochs for Stage 2 Fine ROI training (defaults to --epochs if not set).",
     )
     parser.add_argument(
         "--stage2-size",
@@ -694,7 +694,7 @@ def main():
             args.native_img_dir if (args.native_img_dir and os.path.exists(args.native_img_dir)) else None
         )
 
-        effective_epochs = args.stage2_epochs if args.stage2_epochs else args.epochs
+        effective_epochs = args.stage2_epochs if args.stage2_epochs is not None else args.epochs
 
         # Ensure Stage 1 checkpoint is present locally for Stage 2 warmstart
         stage1_weights = args.stage1_weights or "artifacts/stage1_best.pth"
