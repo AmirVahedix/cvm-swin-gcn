@@ -139,7 +139,24 @@ def main():
         "--sigma",
         type=float,
         default=4.0,
-        help="Gaussian heatmap sigma parameter (default: 4.0).",
+        help="Gaussian heatmap sigma parameter for Stage 1 (default: 4.0).",
+    )
+    parser.add_argument(
+        "--stage2-sigma",
+        type=float,
+        default=2.5,
+        help="Gaussian heatmap sigma parameter for Stage 2 ROI fine refiner (default: 2.5).",
+    )
+    parser.add_argument(
+        "--native-img-dir",
+        type=str,
+        default="data/raw/images",
+        help="Directory containing original native-resolution radiographs for Stage 2 ROI cropping (default: data/raw/images).",
+    )
+    parser.add_argument(
+        "--no-native-crops",
+        action="store_true",
+        help="Disable native-resolution crops, enforcing Stage 2 training & evaluation strictly on 640x640 canvas.",
     )
     parser.add_argument(
         "--eval-weights",
@@ -714,16 +731,21 @@ def main():
                     password=args.mlflow_password,
                 )
 
+            # Determine consistent native image directory for Stage 2 training & evaluation
+            native_dir = None if args.no_native_crops else (
+                args.native_img_dir if (args.native_img_dir and os.path.exists(args.native_img_dir)) else None
+            )
+
             # Step 5b: Stage 2 Training
             if not args.skip_stage2 and not os.path.exists(args.stage2_weights):
-                print(f"\n[5b/6] Executing Stage 2 Fine Model Training ({args.stage2_epochs} epochs, {args.stage2_size}x{args.stage2_size})...")
+                print(f"\n[5b/6] Executing Stage 2 Fine Model Training ({args.stage2_epochs} epochs, {args.stage2_size}x{args.stage2_size}, sigma={args.stage2_sigma})...")
                 train_stage2_main(
                     epochs=args.stage2_epochs,
                     batch_size=args.batch_size,
                     lr=args.lr,
                     llrd_decay_rate=args.llrd_decay_rate,
                     target_size=args.stage2_size,
-                    sigma=args.sigma,
+                    sigma=args.stage2_sigma,
                     margin_ratio=args.margin_ratio,
                     stage1_weights=args.stage1_weights if os.path.exists(args.stage1_weights) else "artifacts/best.pth",
                     warmstart_from_stage1=True,
@@ -732,7 +754,7 @@ def main():
                     train_npz_dir="dataset/train/labels",
                     val_img_dir="dataset/val/images",
                     val_npz_dir="dataset/val/labels",
-                    native_img_dir="data/raw/images" if os.path.exists("data/raw/images") else None,
+                    native_img_dir=native_dir,
                     export_json_path="data/exports/export.json" if os.path.exists("data/exports/export.json") else None,
                     experiment_name=args.mlflow_experiment_name or os.getenv("MLFLOW_EXPERIMENT_NAME", "cvm-swin-gcn"),
                     tracking_uri=args.mlflow_tracking_uri,
@@ -789,6 +811,7 @@ def main():
                     margin_ratio=args.margin_ratio,
                     refine_2pass=args.refine_2pass,
                     num_visualizations=args.eval_samples,
+                    native_img_dir=native_dir,
                     log_to_mlflow=True,
                     tracking_uri=args.mlflow_tracking_uri,
                     tracking_username=args.mlflow_username,

@@ -61,7 +61,9 @@ from src.utils.roi_utils import (
     apply_anatomical_height_prior,
     compute_roi_bbox,
     crop_roi_with_padding,
+    extract_subpixel_peaks,
     inverse_transform_coords,
+    map_bbox_to_native,
 )
 from src.data.preprocessing.split_dataset import (
     load_fixed_id_set,
@@ -567,6 +569,8 @@ def run_batch_inference(
     stage2_weights: Optional[Union[str, Path]] = None,
     stage2_size: int = 448,
     margin_ratio: float = 0.18,
+    bottom_margin_ratio: Optional[float] = 0.28,
+    use_peaks: bool = True,
     use_anatomical_prior: bool = True,
     device: str = "auto",
     batch_size: int = 8,
@@ -696,7 +700,9 @@ def run_batch_inference(
 
             # Model forward pass: outputs (heatmaps, normalized_coords)
             # coords shape: [B, 13, 2] in normalized canvas coordinates [0.0, 1.0]
-            _, pred_coords_s1 = model_s1(input_batch)
+            pred_hm_s1, pred_coords_s1 = model_s1(input_batch)
+            if use_peaks:
+                pred_coords_s1 = extract_subpixel_peaks(pred_hm_s1)
             pred_coords_s1_np = pred_coords_s1.cpu().numpy()
 
             if model_s2 is not None:
@@ -708,24 +714,49 @@ def run_batch_inference(
                         img_w=img_size,
                         img_h=img_size,
                         margin_ratio=margin_ratio,
+                        bottom_margin_ratio=bottom_margin_ratio,
                     )
                     if bbox.is_fallback:
                         final_coords_np[b_i] = s1_coords
                     else:
-                        canvas = batch_canvases[b_i]
-                        roi_patch, _ = crop_roi_with_padding(
-                            image=canvas,
-                            bbox=bbox,
-                            target_size=stage2_size,
-                            interpolation=cv2.INTER_LINEAR,
-                        )
+                        img_p_cur, orig_w_cur, orig_h_cur, _, _, _ = batch_meta[b_i]
+                        # Use high-res native crop if available and higher resolution than canvas
+                        if max(orig_w_cur, orig_h_cur) > img_size:
+                            raw_bgr = cv2.imread(str(img_p_cur))
+                            if raw_bgr is not None:
+                                raw_rgb = cv2.cvtColor(raw_bgr, cv2.COLOR_BGR2RGB)
+                                native_bbox = map_bbox_to_native(bbox, orig_w=orig_w_cur, orig_h=orig_h_cur, canvas_size=img_size)
+                                roi_patch, _ = crop_roi_with_padding(
+                                    image=raw_rgb,
+                                    bbox=native_bbox,
+                                    target_size=stage2_size,
+                                    interpolation=cv2.INTER_LINEAR,
+                                )
+                            else:
+                                canvas = batch_canvases[b_i]
+                                roi_patch, _ = crop_roi_with_padding(
+                                    image=canvas,
+                                    bbox=bbox,
+                                    target_size=stage2_size,
+                                    interpolation=cv2.INTER_LINEAR,
+                                )
+                        else:
+                            canvas = batch_canvases[b_i]
+                            roi_patch, _ = crop_roi_with_padding(
+                                image=canvas,
+                                bbox=bbox,
+                                target_size=stage2_size,
+                                interpolation=cv2.INTER_LINEAR,
+                            )
                         arr = roi_patch.astype(np.float32) / 255.0
                         mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
                         std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
                         norm_roi = (arr - mean) / std
                         roi_in = torch.from_numpy(norm_roi).permute(2, 0, 1).unsqueeze(0).float().to(dev)
 
-                        _, pred_roi = model_s2(roi_in)
+                        pred_hm_roi, pred_roi = model_s2(roi_in)
+                        if use_peaks:
+                            pred_roi = extract_subpixel_peaks(pred_hm_roi)
                         pred_roi_np = pred_roi.squeeze(0).cpu().numpy()
                         reprojected = inverse_transform_coords(
                             roi_coords=pred_roi_np,

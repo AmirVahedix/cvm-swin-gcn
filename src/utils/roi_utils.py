@@ -197,6 +197,8 @@ def compute_roi_bbox(
     img_w: int,
     img_h: int,
     margin_ratio: float = 0.18,
+    bottom_margin_ratio: Optional[float] = None,
+    extra_bottom_margin: float = 0.0,
     min_size: int = 180,
     jitter: Optional[Dict[str, Any]] = None,
     rng: Optional[np.random.RandomState] = None,
@@ -212,13 +214,16 @@ def compute_roi_bbox(
         coords: Landmark coordinates [N, 2] in normalized scale [0, 1] or pixel scale.
         img_w: Width of the image canvas.
         img_h: Height of the image canvas.
-        margin_ratio: Padding ratio added to all sides (D = S * (1 + 2 * margin_ratio)).
+        margin_ratio: Padding ratio added to top/left/right sides (default 0.18).
+        bottom_margin_ratio: Optional padding ratio for bottom (inferior) border (e.g. 0.28).
+        extra_bottom_margin: Extra relative margin added to bottom if bottom_margin_ratio is None.
         min_size: Minimum square dimension D in pixels.
         jitter: Optional dict with {"trans": float, "scale": float} for training jitter.
                 e.g. {"trans": 0.06, "scale": 0.08}
         rng: Optional np.random.RandomState for deterministic jittering.
         fallback_anchor: Optional tuple (cx_norm, cy_norm, span_norm) for anchor fallback.
         check_anatomical_bounds: Whether to verify anatomical quadrant placement.
+        use_anatomical_prior: Whether to apply anatomical height prior to prevent C4 collapse.
 
     Returns:
         ROIBoundingBox containing (u1, v1, u2, v2, D, center_u, center_v, ...).
@@ -235,6 +240,8 @@ def compute_roi_bbox(
             coords_for_box, img_w, img_h, check_anatomical_bounds=check_anatomical_bounds
         )
 
+    b_margin = bottom_margin_ratio if bottom_margin_ratio is not None else (margin_ratio + extra_bottom_margin)
+
     if not is_valid:
         # Fallback to anatomical default anchor box
         if fallback_anchor is not None:
@@ -247,7 +254,10 @@ def compute_roi_bbox(
             c_v = img_h * 0.52
             span = 170.0
 
-        D = int(round(max(span * (1.0 + 2.0 * margin_ratio), float(min_size))))
+        total_v_margin = margin_ratio + b_margin
+        D = int(round(max(span * (1.0 + total_v_margin), float(min_size))))
+        # Shift vertical center slightly downward if bottom margin is larger
+        c_v += ((b_margin - margin_ratio) / 2.0) * span
         r = D / 2.0
         u1 = int(round(c_u - r))
         v1 = int(round(c_v - r))
@@ -289,8 +299,14 @@ def compute_roi_bbox(
     c_u = (u_min + u_max) / 2.0
     c_v = (v_min + v_max) / 2.0
 
-    # Base square dimension D
-    base_D = max(span * (1.0 + 2.0 * margin_ratio), float(min_size))
+    # If bottom margin is larger, shift the vertical center downward to allocate extra room to C4
+    if b_margin != margin_ratio:
+        c_v += ((b_margin - margin_ratio) / 2.0) * span
+
+    # Base square dimension D accounting for both horizontal and vertical margins
+    span_needed_v = span_v + (margin_ratio + b_margin) * span
+    span_needed_u = span_u + 2.0 * margin_ratio * span
+    base_D = max(span_needed_v, span_needed_u, span * (1.0 + 2.0 * margin_ratio), float(min_size))
 
     # Apply optional training BBox jitter
     if jitter is not None:
@@ -617,3 +633,94 @@ def canvas_to_native_coords(
     native_coords[valid_mask, 1] = np.clip((canvas_coords[valid_mask, 1] - pad_y) / scale_y, 0.0, float(orig_h))
 
     return native_coords
+
+
+def map_bbox_to_native(
+    bbox: ROIBoundingBox,
+    orig_w: int,
+    orig_h: int,
+    canvas_size: int = 640,
+) -> ROIBoundingBox:
+    """
+    Maps an ROI bounding box defined on the square letterboxed canvas back to
+    native radiograph pixel coordinates.
+    """
+    scale = float(canvas_size) / max(orig_w, orig_h)
+    new_w = int(round(orig_w * scale))
+    new_h = int(round(orig_h * scale))
+    pad_x = (canvas_size - new_w) // 2
+    pad_y = (canvas_size - new_h) // 2
+
+    native_u1 = int(round((bbox.u1 - pad_x) / scale))
+    native_v1 = int(round((bbox.v1 - pad_y) / scale))
+    native_D = int(round(bbox.D / scale))
+
+    return ROIBoundingBox(
+        u1=native_u1,
+        v1=native_v1,
+        u2=native_u1 + native_D,
+        v2=native_v1 + native_D,
+        D=native_D,
+        center_u=native_u1 + native_D / 2.0,
+        center_v=native_v1 + native_D / 2.0,
+        span=bbox.span / scale,
+        img_w=orig_w,
+        img_h=orig_h,
+    )
+
+
+def extract_subpixel_peaks(heatmaps: torch.Tensor) -> torch.Tensor:
+    """
+    Extracts continuous sub-pixel landmark coordinates from predicted heatmaps [B, N, H, W]
+    using global peak finding (argmax) followed by 2D parabolic quadratic interpolation.
+
+    Eliminates spatial expectation drift (center-pull bias) caused by global SoftArgmax2D.
+
+    Args:
+        heatmaps: Tensor of shape [B, N, H, W] containing sigmoid heatmaps in [0, 1].
+    Returns:
+        coords: Tensor of shape [B, N, 2] in normalized scale [0, 1].
+    """
+    B, N, H, W = heatmaps.shape
+    device = heatmaps.device
+    flat = heatmaps.view(B, N, -1)
+    max_idx = torch.argmax(flat, dim=-1)
+    y_int = (max_idx // W).long()
+    x_int = (max_idx % W).long()
+
+    # Sub-pixel parabolic interpolation
+    x_int_c = x_int.clamp(1, W - 2)
+    y_int_c = y_int.clamp(1, H - 2)
+
+    batch_idx = torch.arange(B, device=device).unsqueeze(1).unsqueeze(2)
+    chan_idx = torch.arange(N, device=device).unsqueeze(0).unsqueeze(2)
+
+    # Gather neighbor values for parabolic fitting
+    # x direction: f(x-1, y), f(x, y), f(x+1, y)
+    f_c = heatmaps[batch_idx, chan_idx, y_int_c.unsqueeze(2), x_int_c.unsqueeze(2)].squeeze(-1)
+    f_xm = heatmaps[batch_idx, chan_idx, y_int_c.unsqueeze(2), (x_int_c - 1).unsqueeze(2)].squeeze(-1)
+    f_xp = heatmaps[batch_idx, chan_idx, y_int_c.unsqueeze(2), (x_int_c + 1).unsqueeze(2)].squeeze(-1)
+
+    denom_x = (2.0 * f_c - f_xm - f_xp).clamp(min=1e-6)
+    dx = (f_xp - f_xm) / (2.0 * denom_x)
+    dx = dx.clamp(-0.5, 0.5)
+
+    # y direction: f(x, y-1), f(x, y), f(x, y+1)
+    f_ym = heatmaps[batch_idx, chan_idx, (y_int_c - 1).unsqueeze(2), x_int_c.unsqueeze(2)].squeeze(-1)
+    f_yp = heatmaps[batch_idx, chan_idx, (y_int_c + 1).unsqueeze(2), x_int_c.unsqueeze(2)].squeeze(-1)
+
+    denom_y = (2.0 * f_c - f_ym - f_yp).clamp(min=1e-6)
+    dy = (f_yp - f_ym) / (2.0 * denom_y)
+    dy = dy.clamp(-0.5, 0.5)
+
+    # If peak is exactly on image border, zero out delta
+    border_x = (x_int == 0) | (x_int == W - 1)
+    border_y = (y_int == 0) | (y_int == H - 1)
+    dx = torch.where(border_x, torch.zeros_like(dx), dx)
+    dy = torch.where(border_y, torch.zeros_like(dy), dy)
+
+    x_sub = (x_int.float() + dx) / float(W - 1)
+    y_sub = (y_int.float() + dy) / float(H - 1)
+
+    return torch.stack([x_sub, y_sub], dim=-1).clamp(0.0, 1.0)
+

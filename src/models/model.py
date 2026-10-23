@@ -80,6 +80,10 @@ class SoftArgmax2D(nn.Module):
     weighted by a temperature-scaled spatial softmax over the full heatmap H x W.
     Guarantees global differentiability so coordinate losses (WingLoss, GraphLoss)
     can pull heatmap peaks across the entire image space.
+
+    Operates directly on unnormalized heatmap logits (or converts sigmoid heatmaps
+    back to logits) to guarantee wide dynamic range, eliminating the background
+    sum centroid bias that occurs when softmax is applied to post-sigmoid [0, 1] values.
     """
     def __init__(self, num_landmarks: int = 13, init_temperature: float = 0.1):
         super().__init__()
@@ -88,32 +92,36 @@ class SoftArgmax2D(nn.Module):
         init_log_temp = torch.full((1, num_landmarks, 1, 1), math.log(init_temperature))
         self.log_temperature = nn.Parameter(init_log_temp)
 
-    def forward(self, heatmaps: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            heatmaps: Tensor of shape [B, N, H, W] containing sigmoid heatmaps [0, 1]
+            x: Tensor of shape [B, N, H, W] containing unnormalized logits or heatmaps
         Returns:
             coords: Tensor of shape [B, N, 2] in normalized scale [0, 1]
         """
-        B, N, H, W = heatmaps.shape
-        device = heatmaps.device
+        B, N, H, W = x.shape
+        device = x.device
+
+        # If input has already been compressed to [0, 1] via sigmoid, convert back to logits
+        # to ensure sufficient dynamic range so background pixels don't pull coordinates to (0.5, 0.5)
+        if (x >= 0.0).all() and (x <= 1.0).all() and x.max() <= 1.0 and x.min() >= 0.0:
+            eps = 1e-6
+            x_clamped = x.clamp(min=eps, max=1.0 - eps)
+            x_logits = torch.log(x_clamped / (1.0 - x_clamped))
+        else:
+            x_logits = x
 
         # Temperature scaling with numerical stability clamp
         temperature = torch.exp(self.log_temperature).clamp(min=1e-3, max=1.0)
-        scaled_hm = heatmaps / temperature
+        scaled_hm = x_logits / temperature
 
         # Spatial softmax across the full (H, W) spatial domain
         flat_hm = scaled_hm.view(B, N, -1)
         softmax_hm = F.softmax(flat_hm, dim=-1).view(B, N, H, W)
 
-        # Build coordinate grid in [0, 1] normalized space matching input device and dtype
-        grid_y, grid_x = torch.meshgrid(
-            torch.linspace(0.0, 1.0, H, device=device, dtype=heatmaps.dtype),
-            torch.linspace(0.0, 1.0, W, device=device, dtype=heatmaps.dtype),
-            indexing="ij",
-        )
-        grid_x = grid_x.view(1, 1, H, W)
-        grid_y = grid_y.view(1, 1, H, W)
+        # Coordinate grid matching dataset normalization convention: coord_norm = pixel_coord / W
+        grid_x = torch.arange(W, device=device, dtype=x.dtype).view(1, 1, 1, W) / float(W)
+        grid_y = torch.arange(H, device=device, dtype=x.dtype).view(1, 1, H, 1) / float(H)
 
         exp_x = torch.sum(softmax_hm * grid_x, dim=(-2, -1))
         exp_y = torch.sum(softmax_hm * grid_y, dim=(-2, -1))
@@ -169,11 +177,16 @@ class CephalometricSwinGCN(nn.Module):
         self.img_size = img_size
         self.use_stem_skip = use_stem_skip
 
+        # Unit = 32 * window_size_7 = 224. Align backbone img_size to the nearest multiple of 224
+        # (e.g. 640 -> 672, 448 -> 448) to ensure all 4 Swin stages have dimensions evenly divisible by 7.
+        self.window_unit = 224
+        self.aligned_size = ((img_size + self.window_unit - 1) // self.window_unit) * self.window_unit
+
         self.backbone = timm.create_model(
             "swin_base_patch4_window7_224",
             pretrained=pretrained,
             features_only=True,
-            img_size=(img_size, img_size),
+            img_size=(self.aligned_size, self.aligned_size),
             strict_img_size=False,
         )
 
@@ -226,7 +239,17 @@ class CephalometricSwinGCN(nn.Module):
         return adj
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        features = self.backbone(x)
+        B, C, H, W = x.shape
+        pad_h = (self.window_unit - H % self.window_unit) % self.window_unit
+        pad_w = (self.window_unit - W % self.window_unit) % self.window_unit
+
+        # Pad input to nearest multiple of 224 using replicate padding to prevent boundary edge artifacts
+        if pad_h > 0 or pad_w > 0:
+            x_in = F.pad(x, (0, pad_w, 0, pad_h), mode="replicate")
+        else:
+            x_in = x
+
+        features = self.backbone(x_in)
         # Permute (B, H, W, C) -> (B, C, H, W) for timm Swin outputs
         f0 = features[0].permute(0, 3, 1, 2).contiguous()
         f1 = features[1].permute(0, 3, 1, 2).contiguous()
@@ -238,17 +261,19 @@ class CephalometricSwinGCN(nn.Module):
         d2 = self.up2(d3, f1)
         d1 = self.up1(d2, f0)
         d0 = self.up0(d1, None)
-        heatmaps = self.up_final(d0)
+        logits = self.up_final(d0)
 
-        # Safety interpolation if any feature pyramid edge padding requires exact match
-        if heatmaps.shape[-2:] != x.shape[-2:]:
-            heatmaps = F.interpolate(heatmaps, size=x.shape[-2:], mode="bilinear", align_corners=False)
+        # Slice back to original resolution (H, W) if input was padded
+        if pad_h > 0 or pad_w > 0:
+            logits = logits[:, :, :H, :W].contiguous()
+        elif logits.shape[-2:] != (H, W):
+            logits = F.interpolate(logits, size=(H, W), mode="bilinear", align_corners=False)
 
         # Heatmap Normalization: strictly bound predictions to [0, 1] matching ground-truth Gaussian targets
-        heatmaps = torch.sigmoid(heatmaps)
+        heatmaps = torch.sigmoid(logits)
 
-        # Global Differentiable Soft-Argmax Coordinates directly from normalized heatmaps
-        coords = self.soft_argmax(heatmaps)  # [B, 13, 2] in [0, 1]
+        # Global Differentiable Soft-Argmax Coordinates directly from unnormalized logits
+        coords = self.soft_argmax(logits)  # [B, 13, 2] in [0, 1]
 
         return heatmaps, coords
 

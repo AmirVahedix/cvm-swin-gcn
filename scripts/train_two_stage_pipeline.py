@@ -161,6 +161,7 @@ def main():
         margin_ratio=args.margin_ratio,
         refine_2pass=args.refine_2pass,
         num_visualizations=args.visualize,
+        native_img_dir=args.native_img_dir,
     )
 
     # -------------------------------------------------------------
@@ -182,6 +183,7 @@ def main():
             margin_ratio=args.margin_ratio,
             refine_2pass=args.refine_2pass,
             num_visualizations=5,
+            native_img_dir=args.native_img_dir,
         )
 
     total_time_min = (time.time() - pipeline_start) / 60.0

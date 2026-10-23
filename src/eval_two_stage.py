@@ -64,7 +64,9 @@ from src.utils.roi_utils import (
     canvas_to_native_coords,
     compute_roi_bbox,
     crop_roi_with_padding,
+    extract_subpixel_peaks,
     inverse_transform_coords,
+    map_bbox_to_native,
     native_to_canvas_coords,
     transform_coords_to_roi,
     validate_stage1_box,
@@ -236,10 +238,13 @@ def run_two_stage_evaluation(
     stage1_img_size: int = 640,
     stage2_img_size: int = 448,
     margin_ratio: float = 0.18,
+    bottom_margin_ratio: Optional[float] = 0.28,
+    use_peaks: bool = True,
     refine_2pass: bool = False,
     use_anatomical_prior: bool = False,
     num_visualizations: int = 10,
     device_str: Optional[str] = None,
+    native_img_dir: Optional[str] = None,
     log_to_mlflow: bool = True,
     tracking_uri: Optional[str] = None,
     tracking_username: Optional[str] = None,
@@ -256,6 +261,8 @@ def run_two_stage_evaluation(
     print(f"STARTING TWO-STAGE CASCADED EVALUATION | Device: {device}")
     print(f"Stage 1 Weights: '{stage1_weights}' ({stage1_img_size}x{stage1_img_size})")
     print(f"Stage 2 Weights: '{stage2_weights}' ({stage2_img_size}x{stage2_img_size})")
+    print(f"ROI Margin Ratio: {margin_ratio:.2f} | Bottom Margin: {bottom_margin_ratio if bottom_margin_ratio is not None else margin_ratio:.2f}")
+    print(f"Landmark Extraction: {'Sub-Pixel Heatmap Peaks (Argmax + Quadratic)' if use_peaks else 'Soft-Argmax Spatial Expectation'}")
     print(f"Image Directory: '{img_dir}' | Labels Directory: '{npz_dir}'")
     print("=" * 85)
 
@@ -346,9 +353,40 @@ def run_two_stage_evaluation(
         orig_w = int(orig_w)
         orig_h = int(orig_h)
 
+        # Resolve high-resolution native image if available
+        native_rgb = None
+        if native_img_dir and os.path.exists(native_img_dir):
+            for ext in [".png", ".jpg", ".jpeg", ".tif", ".bmp"]:
+                cand = Path(native_img_dir) / f"{stem}{ext}"
+                if cand.exists():
+                    nbgr = cv2.imread(str(cand))
+                    if nbgr is not None:
+                        native_rgb = cv2.cvtColor(nbgr, cv2.COLOR_BGR2RGB)
+                    break
+
         # Prepare 640x640 canvas tensor
         canvas_img = cv2.resize(raw_rgb, (stage1_img_size, stage1_img_size))
         tensor_in = to_normalized_tensor(canvas_img, device)
+
+        # Helper to crop either from high-res native radiograph or canvas
+        def _get_roi_crop(box: ROIBoundingBox) -> np.ndarray:
+            if native_rgb is not None and max(orig_w, orig_h) > stage1_img_size:
+                native_b = map_bbox_to_native(box, orig_w=orig_w, orig_h=orig_h, canvas_size=stage1_img_size)
+                patch, _ = crop_roi_with_padding(
+                    image=native_rgb,
+                    bbox=native_b,
+                    target_size=stage2_img_size,
+                    interpolation=cv2.INTER_LINEAR,
+                )
+                return patch
+            else:
+                patch, _ = crop_roi_with_padding(
+                    image=canvas_img,
+                    bbox=box,
+                    target_size=stage2_img_size,
+                    interpolation=cv2.INTER_LINEAR,
+                )
+                return patch
 
         with torch.no_grad():
             # A. Stage 1 Forward
@@ -358,7 +396,9 @@ def run_two_stage_evaluation(
                 torch.mps.synchronize()
             t0_s1 = time.perf_counter()
 
-            _, s1_coords_t = stage1_model(tensor_in)
+            s1_hm, s1_coords_t = stage1_model(tensor_in)
+            if use_peaks:
+                s1_coords_t = extract_subpixel_peaks(s1_hm)
 
             if device.type == "cuda":
                 torch.cuda.synchronize()
@@ -375,14 +415,13 @@ def run_two_stage_evaluation(
                 img_w=stage1_img_size,
                 img_h=stage1_img_size,
                 margin_ratio=margin_ratio,
+                bottom_margin_ratio=bottom_margin_ratio,
             )
-            oracle_patch, _ = crop_roi_with_padding(
-                image=canvas_img,
-                bbox=gt_bbox,
-                target_size=stage2_img_size,
-            )
+            oracle_patch = _get_roi_crop(gt_bbox)
             oracle_in = to_normalized_tensor(oracle_patch, device)
-            _, oracle_coords_roi_t = stage2_model(oracle_in)
+            oracle_hm, oracle_coords_roi_t = stage2_model(oracle_in)
+            if use_peaks:
+                oracle_coords_roi_t = extract_subpixel_peaks(oracle_hm)
             oracle_coords_roi = oracle_coords_roi_t.squeeze(0).cpu().numpy()
             oracle_coords_canvas = inverse_transform_coords(
                 roi_coords=oracle_coords_roi,
@@ -403,17 +442,16 @@ def run_two_stage_evaluation(
                 img_w=stage1_img_size,
                 img_h=stage1_img_size,
                 margin_ratio=margin_ratio,
+                bottom_margin_ratio=bottom_margin_ratio,
             )
             if s1_bbox.is_fallback:
                 fallback_count += 1
 
-            casc_patch, _ = crop_roi_with_padding(
-                image=canvas_img,
-                bbox=s1_bbox,
-                target_size=stage2_img_size,
-            )
+            casc_patch = _get_roi_crop(s1_bbox)
             casc_in = to_normalized_tensor(casc_patch, device)
-            _, casc_coords_roi_t = stage2_model(casc_in)
+            casc_hm, casc_coords_roi_t = stage2_model(casc_in)
+            if use_peaks:
+                casc_coords_roi_t = extract_subpixel_peaks(casc_hm)
             casc_coords_roi = casc_coords_roi_t.squeeze(0).cpu().numpy()
             cascaded_coords_canvas = inverse_transform_coords(
                 roi_coords=casc_coords_roi,
@@ -429,15 +467,14 @@ def run_two_stage_evaluation(
                     img_w=stage1_img_size,
                     img_h=stage1_img_size,
                     margin_ratio=margin_ratio,
+                    bottom_margin_ratio=bottom_margin_ratio,
                 )
                 if not s2_bbox.is_fallback:
-                    casc_patch_2, _ = crop_roi_with_padding(
-                        image=canvas_img,
-                        bbox=s2_bbox,
-                        target_size=stage2_img_size,
-                    )
+                    casc_patch_2 = _get_roi_crop(s2_bbox)
                     casc_in_2 = to_normalized_tensor(casc_patch_2, device)
-                    _, casc_coords_roi_2_t = stage2_model(casc_in_2)
+                    casc_hm_2, casc_coords_roi_2_t = stage2_model(casc_in_2)
+                    if use_peaks:
+                        casc_coords_roi_2_t = extract_subpixel_peaks(casc_hm_2)
                     casc_coords_roi_2 = casc_coords_roi_2_t.squeeze(0).cpu().numpy()
                     cascaded_coords_canvas = inverse_transform_coords(
                         roi_coords=casc_coords_roi_2,
@@ -953,6 +990,20 @@ def main():
     parser.add_argument("--stage1-size", type=int, default=640, help="Stage 1 input resolution")
     parser.add_argument("--stage2-size", type=int, default=448, help="Stage 2 input resolution")
     parser.add_argument("--margin-ratio", type=float, default=0.18, help="ROI margin ratio")
+    parser.add_argument("--bottom-margin-ratio", type=float, default=0.28, help="ROI bottom (inferior) margin ratio")
+    parser.add_argument(
+        "--use-peaks",
+        dest="use_peaks",
+        action="store_true",
+        default=True,
+        help="Extract coordinates using sub-pixel heatmap peak finding (default: True)",
+    )
+    parser.add_argument(
+        "--no-peaks",
+        dest="use_peaks",
+        action="store_false",
+        help="Use default SoftArgmax2D spatial expectation instead of heatmap peaks",
+    )
     parser.add_argument("--refine-2pass", action="store_true", help="Enable 2-pass iterative refinement")
     parser.add_argument(
         "--use-anatomical-prior",
@@ -970,6 +1021,7 @@ def main():
     parser.add_argument("--visualize", type=int, default=10, help="Number of visualization panels to save (-1 for all)")
     parser.add_argument("--run-name", type=str, default="test_split_cascade_eval", help="MLflow and report run name")
     parser.add_argument("--device", type=str, default=None, help="Device (cuda/mps/cpu)")
+    parser.add_argument("--native-img-dir", type=str, default=None, help="Directory of high-resolution native radiographs")
     parser.add_argument("--skip-mlflow", action="store_true", help="Skip MLflow logging")
 
     args = parser.parse_args()
@@ -984,10 +1036,13 @@ def main():
         stage1_img_size=args.stage1_size,
         stage2_img_size=args.stage2_size,
         margin_ratio=args.margin_ratio,
+        bottom_margin_ratio=args.bottom_margin_ratio,
+        use_peaks=args.use_peaks,
         refine_2pass=args.refine_2pass,
         use_anatomical_prior=args.use_anatomical_prior,
         num_visualizations=args.visualize,
         device_str=args.device,
+        native_img_dir=args.native_img_dir,
         log_to_mlflow=not args.skip_mlflow,
     )
 

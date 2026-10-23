@@ -39,6 +39,7 @@ from src.utils.metrics import (
     VERTEBRA_INFERIOR_LANDMARKS,
 )
 from src.utils.cvm_calculator import evaluate_landmarks_dict
+from src.utils.roi_utils import extract_subpixel_peaks
 
 
 LANDMARK_COLORS_BGR = [
@@ -337,6 +338,7 @@ def predict_batch(
     use_tta: bool = False,
     tta_scales: list[float] | tuple[float, ...] = (0.95, 1.0, 1.05),
     tta_shifts: list[tuple[int, int]] | None = None,
+    use_peaks: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Inference helper for a batch of images with optional Test-Time Augmentation (TTA).
@@ -347,13 +349,17 @@ def predict_batch(
         use_tta: Whether to apply multi-scale / shift TTA.
         tta_scales: Scale factors to evaluate (e.g. 0.95, 1.0, 1.05).
         tta_shifts: List of (dx, dy) pixel shift offsets (e.g. [(-4, -4), (4, 4)]).
+        use_peaks: Whether to extract coordinates from sub-pixel heatmap peaks (default: True).
 
     Returns:
         consensus_heatmaps: Heatmaps of shape [B, 13, H, W].
         consensus_coords: Landmark coordinates of shape [B, 13, 2] in normalized [0, 1] range.
     """
     if not use_tta:
-        return model(images)
+        hm, cd = model(images)
+        if use_peaks:
+            cd = extract_subpixel_peaks(hm)
+        return hm, cd
 
     B, C, H, W = images.shape
     all_coords = []
@@ -439,11 +445,15 @@ def predict_batch(
             all_coords.append(orig_cd)
 
     # Consensus ensemble average
-    consensus_coords = torch.mean(torch.stack(all_coords, dim=0), dim=0)
     if len(all_heatmaps) > 0:
         consensus_heatmaps = torch.mean(torch.stack(all_heatmaps, dim=0), dim=0)
     else:
         consensus_heatmaps, _ = model(images)
+
+    if use_peaks:
+        consensus_coords = extract_subpixel_peaks(consensus_heatmaps)
+    else:
+        consensus_coords = torch.mean(torch.stack(all_coords, dim=0), dim=0)
 
     return consensus_heatmaps, consensus_coords
 
@@ -1320,6 +1330,7 @@ def visualize_batch_and_save(
                 use_tta=use_tta,
                 tta_scales=tta_scales,
                 tta_shifts=tta_shifts,
+                use_peaks=use_peaks,
             )
             pred_coords = pred_coords.cpu().numpy()
 
@@ -1381,6 +1392,7 @@ def run_evaluation(
     tta_scales: list[float] | tuple[float, ...] = (0.95, 1.0, 1.05),
     tta_shifts: list[tuple[int, int]] | None = None,
     roi_only: bool = True,
+    use_peaks: bool = True,
     export_json: str | None = None,
     api_url: str | None = None,
     api_token: str | None = None,
@@ -1470,6 +1482,7 @@ def run_evaluation(
                 use_tta=use_tta,
                 tta_scales=tta_scales,
                 tta_shifts=tta_shifts,
+                use_peaks=use_peaks,
             )
 
             if device.type == "cuda":
@@ -2497,6 +2510,19 @@ def main():
         default=None,
         help="CVM Backend API Bearer token (overrides CVM_API_TOKEN).",
     )
+    parser.add_argument(
+        "--use-peaks",
+        dest="use_peaks",
+        action="store_true",
+        default=True,
+        help="Extract coordinates using sub-pixel heatmap peak finding (default: True)",
+    )
+    parser.add_argument(
+        "--no-peaks",
+        dest="use_peaks",
+        action="store_false",
+        help="Use default SoftArgmax2D spatial expectation instead of heatmap peaks",
+    )
 
     args = parser.parse_args()
 
@@ -2534,6 +2560,7 @@ def main():
         tta_scales=parsed_tta_scales,
         tta_shifts=parsed_tta_shifts if len(parsed_tta_shifts) > 0 else None,
         roi_only=not args.full_image,
+        use_peaks=args.use_peaks,
         export_json=args.export_json,
         api_url=args.api_url,
         api_token=args.api_token,

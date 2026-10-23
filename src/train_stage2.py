@@ -381,14 +381,19 @@ def train_stage2_main(
     print("=" * 80)
 
     # 1. Initialize Model
+    will_warmstart = warmstart_from_stage1 and os.path.exists(stage1_weights)
+    if warmstart_from_stage1 and not will_warmstart:
+        print(f"⚠️  WARNING: Warmstart requested from '{stage1_weights}', but file does not exist!")
+        print("--> Falling back to ImageNet pretrained Swin-Base backbone.")
+
     model = CephalometricSwinGCN(
         num_landmarks=NUM_LANDMARKS,
-        pretrained=not warmstart_from_stage1,
+        pretrained=not will_warmstart,
         img_size=target_size,
     )
 
     # Warm-start from Stage 1 if requested and weights exist
-    if warmstart_from_stage1 and os.path.exists(stage1_weights):
+    if will_warmstart:
         print(f"--> Warm-starting Stage 2 from Stage 1 checkpoint: '{stage1_weights}'")
         checkpoint = torch.load(stage1_weights, map_location=device)
         state_dict = checkpoint.get("model_state_dict", checkpoint)
