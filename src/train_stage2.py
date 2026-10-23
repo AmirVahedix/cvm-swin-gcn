@@ -65,6 +65,7 @@ from src.utils.metrics import (
 )
 from src.utils.roi_utils import (
     ROIBoundingBox,
+    extract_subpixel_peaks,
     inverse_transform_coords,
     validate_stage1_box,
 )
@@ -150,7 +151,9 @@ def validate_stage2_epoch(
                 epoch_loss_hm += (lambda_hm * loss_hm).item()
 
             # Reproject coordinates back to canvas space [0, 1] for standardized evaluation
-            pred_coords_roi_np = pred_coords_roi.detach().cpu().numpy()
+            # Use continuous subpixel peak extraction to eliminate SoftArgmax expectation drift
+            pred_coords_roi_peaks = extract_subpixel_peaks(pred_heatmaps)
+            pred_coords_roi_np = pred_coords_roi_peaks.detach().cpu().numpy()
             gt_coords_roi_np = gt_coords_roi.detach().cpu().numpy()
             B = images.shape[0]
 
@@ -341,6 +344,7 @@ def train_stage2_main(
     target_size: int = 448,
     sigma: float = 2.5,
     margin_ratio: float = 0.18,
+    bottom_margin_ratio: Optional[float] = 0.28,
     jitter_trans: float = 0.06,
     jitter_scale: float = 0.08,
     patience: int = 15,
@@ -425,6 +429,7 @@ def train_stage2_main(
         target_size=target_size,
         sigma=sigma,
         margin_ratio=margin_ratio,
+        bottom_margin_ratio=bottom_margin_ratio,
         jitter=jitter_config,
         num_workers=num_workers,
         use_balanced_sampling=use_balanced_sampling,
@@ -632,7 +637,9 @@ def train_stage2_main(
                 f"Epoch [{epoch:02d}/{epochs}] ({epoch_time:.1f}s) | "
                 f"Train: {train_loss:.4f} | Val: {val_loss:.4f} | "
                 f"Norm Mean: {mean_norm:5.2f}% | Med: {med_norm:5.2f}% | "
-                f"≤5%: {share_5:5.1f}% | ≤2.5%: {val_metrics['share_within_2_5pct']:5.1f}% | "
+                f"≤2mm: {val_metrics.get('share_within_11_5pct', 0.0):5.1f}% | "
+                f"≤10%: {val_metrics.get('share_within_10pct', 0.0):5.1f}% | "
+                f"≤5%: {share_5:5.1f}% | "
                 f"MAE: {val_metrics['mae']:.2f} px {marker}"
             )
 
@@ -810,6 +817,7 @@ def main():
     parser.add_argument("--target-size", type=int, default=448, choices=[448, 672], help="ROI crop resolution (448 or 672)")
     parser.add_argument("--sigma", type=float, default=2.5, help="Heatmap Gaussian sigma (default: 2.5 for sub-millimeter precision)")
     parser.add_argument("--margin-ratio", type=float, default=0.18, help="ROI margin ratio")
+    parser.add_argument("--bottom-margin-ratio", type=float, default=0.28, help="Bottom margin ratio for C4 vertebra (default: 0.28)")
     parser.add_argument("--stage1-weights", type=str, default="artifacts/stage1_best.pth", help="Stage 1 weights for warm-start")
     parser.add_argument("--no-warmstart", action="store_true", help="Do not warmstart from Stage 1; use ImageNet pretrained")
     parser.add_argument("--save-path", type=str, default="artifacts/stage2_best.pth", help="Checkpoint save destination")
@@ -849,6 +857,7 @@ def main():
         target_size=args.target_size,
         sigma=args.sigma,
         margin_ratio=args.margin_ratio,
+        bottom_margin_ratio=args.bottom_margin_ratio,
         stage1_weights=args.stage1_weights,
         warmstart_from_stage1=not args.no_warmstart,
         save_path=args.save_path,
