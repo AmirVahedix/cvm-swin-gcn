@@ -237,7 +237,7 @@ def run_two_stage_evaluation(
     stage2_img_size: int = 448,
     margin_ratio: float = 0.18,
     refine_2pass: bool = False,
-    use_anatomical_prior: bool = True,
+    use_anatomical_prior: bool = False,
     num_visualizations: int = 10,
     device_str: Optional[str] = None,
     log_to_mlflow: bool = True,
@@ -955,10 +955,16 @@ def main():
     parser.add_argument("--margin-ratio", type=float, default=0.18, help="ROI margin ratio")
     parser.add_argument("--refine-2pass", action="store_true", help="Enable 2-pass iterative refinement")
     parser.add_argument(
+        "--use-anatomical-prior",
+        dest="use_anatomical_prior",
+        action="store_true",
+        default=False,
+        help="Enable Anatomical Vertebra Height Prior safeguard (default: False)",
+    )
+    parser.add_argument(
         "--no-anatomical-prior",
         dest="use_anatomical_prior",
         action="store_false",
-        default=True,
         help="Disable Anatomical Vertebra Height Prior safeguard",
     )
     parser.add_argument("--visualize", type=int, default=10, help="Number of visualization panels to save (-1 for all)")

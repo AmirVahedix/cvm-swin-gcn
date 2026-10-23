@@ -339,7 +339,7 @@ def train_stage2_main(
     lr: float = 1e-4,
     llrd_decay_rate: float = 0.8,
     target_size: int = 448,
-    sigma: float = 4.0,
+    sigma: float = 2.5,
     margin_ratio: float = 0.18,
     jitter_trans: float = 0.06,
     jitter_scale: float = 0.08,
@@ -803,7 +803,7 @@ def main():
     parser.add_argument("--batch-size", "-b", type=int, default=8, help="Batch size")
     parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
     parser.add_argument("--target-size", type=int, default=448, choices=[448, 672], help="ROI crop resolution (448 or 672)")
-    parser.add_argument("--sigma", type=float, default=4.0, help="Heatmap Gaussian sigma")
+    parser.add_argument("--sigma", type=float, default=2.5, help="Heatmap Gaussian sigma (default: 2.5 for sub-millimeter precision)")
     parser.add_argument("--margin-ratio", type=float, default=0.18, help="ROI margin ratio")
     parser.add_argument("--stage1-weights", type=str, default="artifacts/stage1_best.pth", help="Stage 1 weights for warm-start")
     parser.add_argument("--no-warmstart", action="store_true", help="Do not warmstart from Stage 1; use ImageNet pretrained")

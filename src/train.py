@@ -134,24 +134,26 @@ def get_llrd_param_groups(
 def get_landmark_weights(device: torch.device) -> torch.Tensor:
     """
     Constructs validation-guided error-adaptive landmark loss weights,
-    derived from empirical validation set residuals (evaluation/metrics_val.json).
-    Prioritizes lagging diagnostic landmarks (C4 inferior boundary, C2 concavity,
-    and superior vertebra corners) while maintaining unit weight on well-converged baselines.
+    derived from empirical validation set residuals.
+    Prioritizes critical diagnostic concavities (C2_IC, C3_IC, C4_IC) and
+    challenging vertebra corners (C4 inferior, C3_PS, C4_PS) to drive sub-millimeter precision.
     """
     weights = torch.ones(NUM_LANDMARKS, dtype=torch.float32, device=device)
     
-    # Tier 1: Severe lagging landmarks (C4 inferior boundary >11-13.7% error)
-    weights[10] = 2.4   # C4_PI (13.69% error, 28.3% <=5%)
-    weights[11] = 2.2   # C4_IC (12.78% error, 22.0% <=5%)
-    weights[12] = 2.0   # C4_AI (11.60% error, 25.2% <=5%)
+    # Tier 1: Severe lagging landmarks & vital concavities
+    weights[11] = 2.5   # C4_IC (deep concavity & 12.8% error)
+    weights[10] = 2.4   # C4_PI (13.7% error, inferior corner)
+    weights[12] = 2.2   # C4_AI (11.6% error, inferior corner)
+    weights[6]  = 2.2   # C3_IC (crucial C3 concavity, 10.4% error, decides CS2/CS3/CS4)
+    weights[1]  = 2.2   # C2_IC (crucial C2 concavity, decides CS1/CS2)
     
-    # Tier 2: High-priority diagnostic landmarks (C2 concavity & C4 superior)
-    weights[1]  = 2.0   # C2_IC (7.82% error, only 29.1% <=5%)
-    weights[8]  = 1.8   # C4_PS (9.05% error, only 19.7% <=5%)
-    weights[3]  = 1.5   # C3_PS (7.98% error, only 29.1% <=5%)
-    weights[2]  = 1.5   # C2_AI (6.60% error)
+    # Tier 2: Challenging corners
+    weights[8]  = 1.8   # C4_PS (10.6% error, only ~10% <=5%)
+    weights[3]  = 1.8   # C3_PS (11.2% error, only ~16% <=5%)
+    weights[4]  = 1.6   # C3_AS (8.6% error)
+    weights[2]  = 1.5   # C2_AI (6.6% error)
     
-    # Baseline: C2_PI (0), C3_AS (4), C3_PI (5), C3_IC (6), C3_AI (7), C4_AS (9) stay at 1.0
+    # Baseline: C2_PI (0), C3_PI (5), C3_AI (7), C4_AS (9) stay at 1.0 (well-converged >75-85% <=5%)
     return weights
 
 

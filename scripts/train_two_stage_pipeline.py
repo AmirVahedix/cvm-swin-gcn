@@ -43,7 +43,7 @@ def main():
     parser.add_argument("--stage2-epochs", type=int, default=60, help="Epochs for Stage 2 training")
     parser.add_argument("--stage2-size", type=int, default=448, choices=[448, 672], help="Stage 2 ROI resolution (448 or 672)")
     parser.add_argument("--margin-ratio", type=float, default=0.18, help="ROI margin ratio (default: 0.18)")
-    parser.add_argument("--sigma", type=float, default=4.0, help="Heatmap Gaussian sigma in Stage 2 ROI space")
+    parser.add_argument("--sigma", type=float, default=2.5, help="Heatmap Gaussian sigma in Stage 2 ROI space (default: 2.5 for sub-millimeter precision)")
     parser.add_argument("--no-warmstart", action="store_true", help="Train Stage 2 from ImageNet instead of warmstarting from Stage 1")
 
     # Shared Optimization Parameters
