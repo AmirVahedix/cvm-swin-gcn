@@ -2309,24 +2309,42 @@ def compute_and_log_split_metrics(
                 writer.writerows(csv_rows)
             print(f"--> Saved {split_name} landmark CSV ({len(csv_rows)} rows) to '{csv_file}'")
 
-        # Log to active MLflow run if available
+        # Log to MLflow
         if log_to_mlflow:
             try:
                 active_run = mlflow.active_run()
-                if active_run:
-                    mlflow.log_artifact(str(json_file), artifact_path=f"evaluation/{split_name}")
-                    mlflow.log_artifact(str(txt_file), artifact_path=f"evaluation/{split_name}")
-                    if (output_path / f"predictions_landmarks_{split_name}.csv").exists():
-                        mlflow.log_artifact(
-                            str(output_path / f"predictions_landmarks_{split_name}.csv"),
-                            artifact_path=f"evaluation/{split_name}",
-                        )
-                    clean_metrics = {
-                        f"{split_name}_{k}": v for k, v in summary_metrics.items()
-                        if isinstance(v, (int, float))
-                    }
-                    mlflow.log_metrics(clean_metrics)
-                    print(f"--> [MLflow] Successfully logged {len(clean_metrics)} {split_name} metrics and artifacts.")
+                opened_run = False
+                if active_run is None:
+                    load_dotenv()
+                    user = os.getenv("MLFLOW_TRACKING_USERNAME")
+                    pwd = os.getenv("MLFLOW_TRACKING_PASSWORD")
+                    if user:
+                        os.environ["MLFLOW_TRACKING_USERNAME"] = user
+                    if pwd:
+                        os.environ["MLFLOW_TRACKING_PASSWORD"] = pwd
+                    uri = os.getenv("MLFLOW_TRACKING_URI", "https://mlflow.amirlogedixyz.ir")
+                    mlflow.set_tracking_uri(uri)
+                    exp_name = os.getenv("MLFLOW_EXPERIMENT_NAME", "cvm-swin-gcn")
+                    mlflow.set_experiment(exp_name)
+                    mlflow.start_run(run_name=f"eval_split_{split_name}")
+                    opened_run = True
+
+                mlflow.log_artifact(str(json_file), artifact_path=f"evaluation/{split_name}")
+                mlflow.log_artifact(str(txt_file), artifact_path=f"evaluation/{split_name}")
+                if (output_path / f"predictions_landmarks_{split_name}.csv").exists():
+                    mlflow.log_artifact(
+                        str(output_path / f"predictions_landmarks_{split_name}.csv"),
+                        artifact_path=f"evaluation/{split_name}",
+                    )
+                clean_metrics = {
+                    f"{split_name}_{k}": v for k, v in summary_metrics.items()
+                    if isinstance(v, (int, float))
+                }
+                mlflow.log_metrics(clean_metrics)
+                print(f"--> [MLflow] Successfully logged {len(clean_metrics)} {split_name} metrics and artifacts.")
+
+                if opened_run:
+                    mlflow.end_run()
             except Exception as ml_err:
                 print(f"⚠️ Warning: Could not log {split_name} metrics to MLflow: {ml_err}")
 

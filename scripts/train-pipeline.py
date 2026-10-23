@@ -703,8 +703,8 @@ def main():
 
             # Check if Stage 1 checkpoint is needed for Stage 2 warmstart and fetch from MLflow if missing
             run_id_for_stage1 = getattr(args, "stage1_run_id", None) or os.getenv("STAGE1_RUN_ID")
-            if not os.path.exists(args.stage1_weights) and not os.path.exists("artifacts/best.pth") and run_id_for_stage1:
-                print(f"\n--> Stage 1 weights not found locally. Automatically downloading from MLflow run '{run_id_for_stage1}'...")
+            if not os.path.exists(args.stage1_weights) and run_id_for_stage1:
+                print(f"\n--> Stage 1 weights not found locally at '{args.stage1_weights}'. Automatically downloading from MLflow run '{run_id_for_stage1}'...")
                 from scripts.download_checkpoint import download_checkpoint_from_mlflow
                 download_checkpoint_from_mlflow(
                     run_id=run_id_for_stage1,
@@ -752,8 +752,8 @@ def main():
 
             # Check if Stage 2 checkpoint is needed and fetch from MLflow if missing
             run_id_for_stage2 = getattr(args, "stage2_run_id", None) or os.getenv("STAGE2_RUN_ID")
-            if not os.path.exists(args.stage2_weights) and not os.path.exists("artifacts/stage2_best.pth") and run_id_for_stage2:
-                print(f"\n--> Stage 2 weights not found locally. Automatically downloading from MLflow run '{run_id_for_stage2}'...")
+            if not os.path.exists(args.stage2_weights) and run_id_for_stage2:
+                print(f"\n--> Stage 2 weights not found locally at '{args.stage2_weights}'. Automatically downloading from MLflow run '{run_id_for_stage2}'...")
                 from scripts.download_checkpoint import download_checkpoint_from_mlflow
                 download_checkpoint_from_mlflow(
                     run_id=run_id_for_stage2,
@@ -936,7 +936,7 @@ def main():
                     save_csv=True,
                     compute_metrics=True,
                     labels_dir="data/labels",
-                    metrics_splits=["val", "train"],
+                    metrics_splits=["val", "train", "test"],
                     metrics_output_dir="evaluation",
                     log_to_mlflow=True,
                 )

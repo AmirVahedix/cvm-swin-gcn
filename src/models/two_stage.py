@@ -259,6 +259,10 @@ class TwoStageCephalometricSwinGCN(nn.Module):
                     )
             final_coords = reprojected_coords_2
 
+        # Safeguard against extreme localized crop drift (> 50px from coarse Stage 1)
+        drift = torch.norm(final_coords - stage1_coords, dim=-1) * float(self.stage1_img_size)
+        final_coords = torch.where(drift.unsqueeze(-1) > 50.0, stage1_coords, final_coords)
+
         if return_intermediates:
             return {
                 "stage1_heatmaps": stage1_hms,

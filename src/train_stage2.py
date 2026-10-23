@@ -356,9 +356,14 @@ def train_stage2_main(
     train_npz_dir: str = "dataset/train/labels",
     val_img_dir: str = "dataset/val/images",
     val_npz_dir: str = "dataset/val/labels",
+    test_img_dir: str = "dataset/test/images",
+    test_npz_dir: str = "dataset/test/labels",
+    skip_eval: bool = False,
+    eval_visualizations: int = 10,
     native_img_dir: Optional[str] = "data/raw/images",
+    light_predictions_dir: str = "evaluation/predictions_light",
     export_json_path: Optional[str] = "data/exports/export.json",
-    experiment_name: Optional[str] = "cvm-stage2-fine-roi",
+    experiment_name: Optional[str] = None,
     tracking_uri: Optional[str] = None,
     tracking_username: Optional[str] = None,
     tracking_password: Optional[str] = None,
@@ -433,7 +438,24 @@ def train_stage2_main(
     wing_loss = WingLoss(img_size=float(target_size)).to(device)
     graph_loss = AnatomicalGraphLoss(model.adj_matrix).to(device) if lambda_graph > 0.0 else None
     morph_loss = MorphometricShapeLoss().to(device) if lambda_morph > 0.0 else None
-    landmark_weights = get_landmark_weights(device)  # Uniform 1.0 weights
+    landmark_weights = get_landmark_weights(device)
+
+    # Log Balanced Sampling & Landmark Weights Configuration
+    has_weighted_sampler = isinstance(getattr(train_loader, "sampler", None), torch.utils.data.WeightedRandomSampler)
+    print("\n" + "=" * 80)
+    if has_weighted_sampler:
+        print("🎯 STAGE 2 CLASS-WEIGHTED SAMPLER: [ENABLED & ACTIVE ✅]")
+        print(f"   • Sampler: torch.utils.data.WeightedRandomSampler (replacement=True)")
+        print(f"   • Balancing Power: {balanced_sampling_power} (smoothed inverse frequency)")
+        print(f"   • Samples drawn per epoch: {len(train_loader.sampler)} from {len(train_loader.dataset)} unique images")
+    else:
+        print("⚠️ STAGE 2 CLASS-WEIGHTED SAMPLER: [DISABLED / UNIFORM SHUFFLE ⚠️]")
+    print("-" * 80)
+    print("🎯 STAGE 2 VALIDATION-GUIDED LANDMARK LOSS WEIGHTS:")
+    for idx, (name, w) in enumerate(zip(LANDMARK_CLASSES, landmark_weights)):
+        tier_tag = f"🔥 BOOSTED ({w.item():.1f}x)" if w.item() > 1.0 else f"   baseline ({w.item():.1f}x)"
+        print(f"   • [{idx:2d}] {name:8s} : {tier_tag}")
+    print("=" * 80 + "\n")
 
     # 4. MLflow Tracking Setup
     user = tracking_username or os.getenv("MLFLOW_TRACKING_USERNAME")
@@ -491,6 +513,16 @@ def train_stage2_main(
             "lambda_graph": lambda_graph,
             "lambda_morph": lambda_morph,
             "patience": patience,
+            "device": str(device),
+            "use_amp": use_amp,
+            "save_optimizer": save_optimizer,
+            "optimizer": "AdamW-LLRD",
+            "scheduler": "CosineAnnealingWithWarmup",
+            "num_landmarks": NUM_LANDMARKS,
+            "train_samples": len(train_loader.dataset) if hasattr(train_loader, "dataset") else len(train_loader),
+            "val_samples": len(val_loader.dataset) if hasattr(val_loader, "dataset") else len(val_loader),
+            "use_balanced_sampling": use_balanced_sampling,
+            "balanced_sampling_power": balanced_sampling_power,
         })
 
         for epoch in range(1, epochs + 1):
@@ -596,16 +628,46 @@ def train_stage2_main(
                 f"MAE: {val_metrics['mae']:.2f} px {marker}"
             )
 
-            mlflow.log_metrics({
+            epoch_metrics_to_log = {
                 "stage2_train_loss": train_loss,
+                "stage2_train_loss_hm": train_loss_dict.get("heatmap", 0.0),
+                "stage2_train_loss_cd": train_loss_dict.get("coord", 0.0),
+                "stage2_train_loss_graph": train_loss_dict.get("graph", 0.0),
+                "stage2_train_loss_morph": train_loss_dict.get("morph", 0.0),
                 "stage2_val_loss": val_loss,
+                "stage2_val_loss_hm": val_metrics.get("loss_hm", 0.0),
+                "stage2_val_loss_cd": val_metrics.get("loss_cd", 0.0),
+                "stage2_val_loss_graph": val_metrics.get("loss_graph", 0.0),
+                "stage2_val_loss_morph": val_metrics.get("loss_morph", 0.0),
                 "stage2_val_mean_norm_err": mean_norm,
                 "stage2_val_median_norm_err": med_norm,
+                "stage2_val_rmse_norm_err": val_metrics.get("rmse_norm_err", 0.0),
+                "stage2_val_share_2_5pct": val_metrics.get("share_within_2_5pct", 0.0),
                 "stage2_val_share_5pct": share_5,
-                "stage2_val_share_2_5pct": val_metrics["share_within_2_5pct"],
-                "stage2_val_mae_px": val_metrics["mae"],
+                "stage2_val_share_7_5pct": val_metrics.get("share_within_7_5pct", 0.0),
+                "stage2_val_share_10pct": val_metrics.get("share_within_10pct", 0.0),
+                "stage2_val_mae_px": val_metrics.get("mae", 0.0),
+                "stage2_val_rmse_px": val_metrics.get("rmse", 0.0),
+                "stage2_val_sdr_2_0px": val_metrics.get("sdr_2_0", 0.0),
+                "stage2_val_sdr_2_5px": val_metrics.get("sdr_2_5", 0.0),
+                "stage2_val_sdr_3_0px": val_metrics.get("sdr_3_0", 0.0),
+                "stage2_val_sdr_4_0px": val_metrics.get("sdr_4_0", 0.0),
                 "learning_rate": optimizer.param_groups[0]["lr"],
-            }, step=epoch)
+                "epoch_time_seconds": epoch_time,
+                "best_val_share_5pct": best_val_share_5pct,
+                "best_val_mean_norm": best_val_mean_norm,
+                "best_epoch": best_epoch,
+                "patience_counter": patience_counter,
+            }
+            # Log per-landmark validation normalized errors
+            for lm_name, lm_data in val_metrics.get("per_landmark_metrics", {}).items():
+                if isinstance(lm_data, dict):
+                    if "norm_err_mean" in lm_data:
+                        epoch_metrics_to_log[f"val_err_{lm_name}"] = float(lm_data["norm_err_mean"])
+                    if "share_within_5pct" in lm_data:
+                        epoch_metrics_to_log[f"val_share_5pct_{lm_name}"] = float(lm_data["share_within_5pct"])
+
+            mlflow.log_metrics(epoch_metrics_to_log, step=epoch)
 
             if patience_counter >= patience:
                 print(f"Early stopping triggered: No validation improvement for {patience} consecutive epochs.")
@@ -625,6 +687,90 @@ def train_stage2_main(
         mlflow.log_artifact(str(history_path))
         if os.path.exists(save_path):
             mlflow.log_artifact(save_path)
+
+        # --- Comprehensive Post-Training Evaluation Across All 3 Cohorts (Test, Val, Train) ---
+        if not skip_eval and os.path.exists(save_path):
+            print("\n" + "=" * 80)
+            print("🚀 RUNNING POST-TRAINING EVALUATION FOR ALL 3 COHORTS (TEST, VAL, TRAIN)")
+            print("=" * 80)
+
+            # 1. TEST COHORT EVALUATION (Two-Stage Cascaded)
+            if os.path.exists(test_img_dir) and os.path.exists(test_npz_dir):
+                print(f"\n--> [1/3] Running Cascaded Two-Stage Evaluation on TEST cohort ({test_img_dir})...")
+                try:
+                    from src.eval_two_stage import run_two_stage_evaluation
+                    test_payload, test_dir = run_two_stage_evaluation(
+                        stage1_weights=stage1_weights,
+                        stage2_weights=save_path,
+                        img_dir=test_img_dir,
+                        npz_dir=test_npz_dir,
+                        output_dir="evaluation/two_stage",
+                        run_name="test_split_cascade_eval",
+                        stage1_img_size=640,
+                        stage2_img_size=target_size,
+                        margin_ratio=margin_ratio,
+                        refine_2pass=False,
+                        num_visualizations=eval_visualizations,
+                        device_str=str(device),
+                        log_to_mlflow=False,
+                    )
+                    test_p = Path(test_dir)
+                    if (test_p / "metrics.json").exists():
+                        mlflow.log_artifact(str(test_p / "metrics.json"), artifact_path="evaluation/test")
+                    if (test_p / "summary_report.txt").exists():
+                        mlflow.log_artifact(str(test_p / "summary_report.txt"), artifact_path="evaluation/test")
+                    if (test_p / "predictions_landmarks.csv").exists():
+                        mlflow.log_artifact(str(test_p / "predictions_landmarks.csv"), artifact_path="evaluation/test")
+                    if (test_p / "visualizations").exists():
+                        mlflow.log_artifacts(str(test_p / "visualizations"), artifact_path="evaluation/test/visualizations")
+
+                    gen_c = test_payload.get("two_stage_cascade", {}).get("general", {})
+                    for k, v in gen_c.items():
+                        if isinstance(v, (int, float)):
+                            mlflow.log_metric(f"test_{k}", float(v))
+                    print(f"✅ Test cohort evaluated & logged to MLflow (Mean Norm: {gen_c.get('mean', 0.0):.2f}%, ≤5%: {gen_c.get('share_within_5pct', 0.0):.2f}%)")
+                except Exception as t_err:
+                    print(f"⚠️ Warning: Test cohort evaluation failed: {t_err}")
+
+            # 2. FULL DATASET BATCH INFERENCE & COHORT SPLIT METRICS (VAL & TRAIN)
+            target_batch_img_dir = native_img_dir if (native_img_dir and os.path.exists(native_img_dir)) else "data/raw/images"
+            if os.path.exists(target_batch_img_dir):
+                print(f"\n--> [2/3] Running Whole-Dataset Batch Inference ({target_batch_img_dir}) for TRAIN & VAL cohorts...")
+                try:
+                    from scripts.batch_inference import run_batch_inference
+                    run_batch_inference(
+                        images_dir=target_batch_img_dir,
+                        output_json=Path(light_predictions_dir) / "predictions_full.json",
+                        weights=save_path,
+                        stage1_weights=stage1_weights,
+                        stage2_weights=save_path,
+                        stage2_size=target_size,
+                        margin_ratio=margin_ratio,
+                        device=str(device),
+                        batch_size=batch_size,
+                        img_size=640,
+                        dataset_dir="dataset",
+                        test_ids_file="dataset/test_image_ids.json",
+                        val_ids_file="dataset/val_image_ids.json",
+                        export_json=export_json_path,
+                        light_output_dir=light_predictions_dir,
+                        export_light=True,
+                        save_csv=True,
+                        compute_metrics=True,
+                        labels_dir="data/labels",
+                        metrics_splits=["val", "train"],
+                        metrics_output_dir="evaluation",
+                        log_to_mlflow=True,
+                    )
+                    pred_full_json = Path(light_predictions_dir) / "predictions_full.json"
+                    if pred_full_json.exists():
+                        mlflow.log_artifact(str(pred_full_json), artifact_path="predictions_full")
+                    pred_full_csv = Path(light_predictions_dir) / "predictions_full.csv"
+                    if pred_full_csv.exists():
+                        mlflow.log_artifact(str(pred_full_csv), artifact_path="predictions_full")
+                    print(f"✅ Validation & Training cohorts evaluated and logged to MLflow!")
+                except Exception as b_err:
+                    print(f"⚠️ Warning: Full dataset batch inference failed: {b_err}")
 
     return {
         "best_epoch": best_epoch,
@@ -664,6 +810,12 @@ def main():
     parser.add_argument("--tracking-uri", type=str, default=None, help="MLflow tracking URI")
     parser.add_argument("--experiment-name", type=str, default=None, help="MLflow experiment name")
     parser.add_argument("--run-name", type=str, default=None, help="MLflow run name")
+    parser.add_argument("--test-img-dir", type=str, default="dataset/test/images", help="Test cohort images dir")
+    parser.add_argument("--test-npz-dir", type=str, default="dataset/test/labels", help="Test cohort labels dir")
+    parser.add_argument("--native-img-dir", type=str, default="data/raw/images", help="Native resolution raw images dir")
+    parser.add_argument("--skip-eval", action="store_true", help="Skip post-training evaluation across cohorts")
+    parser.add_argument("--eval-visualizations", type=int, default=10, help="Number of test visualization panels to save")
+    parser.add_argument("--light-predictions-dir", type=str, default="evaluation/predictions_light", help="Output directory for predictions_full")
     parser.add_argument("--mlflow-username", type=str, default=None, help="MLflow username")
     parser.add_argument("--mlflow-password", type=str, default=None, help="MLflow password")
 
@@ -682,6 +834,12 @@ def main():
         save_optimizer=args.save_optimizer,
         patience=args.patience,
         num_workers=args.num_workers,
+        test_img_dir=args.test_img_dir,
+        test_npz_dir=args.test_npz_dir,
+        native_img_dir=args.native_img_dir,
+        skip_eval=args.skip_eval,
+        eval_visualizations=args.eval_visualizations,
+        light_predictions_dir=args.light_predictions_dir,
         tracking_uri=args.tracking_uri,
         experiment_name=args.experiment_name,
         run_name=args.run_name,

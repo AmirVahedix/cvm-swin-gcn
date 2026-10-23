@@ -446,6 +446,14 @@ def run_two_stage_evaluation(
                         output_normalized=True,
                     )
 
+            # Safeguard against extreme localized crop drift: if any landmark drifted > 50px from S1, revert to S1
+            drift_dist_px = np.linalg.norm(cascaded_coords_canvas - s1_coords_canvas, axis=-1) * float(stage1_img_size)
+            cascaded_coords_canvas = np.where(
+                drift_dist_px[:, None] > 50.0,
+                s1_coords_canvas,
+                cascaded_coords_canvas,
+            )
+
             # Apply Anatomical Vertebra Height Prior post-processing safeguard
             if use_anatomical_prior:
                 cascaded_coords_canvas, _ = apply_anatomical_height_prior(
@@ -522,7 +530,12 @@ def run_two_stage_evaluation(
         cascaded_morph_list.append(casc_cvm)
 
         # Save side-by-side ROI visualization panels
-        if vis_saved < num_visualizations:
+        target_visualizations = (
+            len(img_files)
+            if (num_visualizations is None or num_visualizations < 0)
+            else num_visualizations
+        )
+        if vis_saved < target_visualizations:
             # Map predictions into the ground truth ROI panel space for direct visual comparison
             s1_in_gt_roi = transform_coords_to_roi(s1_coords_canvas, gt_bbox, target_size=stage2_img_size, is_normalized_input=True)
             casc_in_gt_roi = transform_coords_to_roi(cascaded_coords_canvas, gt_bbox, target_size=stage2_img_size, is_normalized_input=True)
@@ -546,7 +559,8 @@ def run_two_stage_evaluation(
                 cascade_norm_err=casc_err,
                 panel_size=480,
             )
-            out_vis_path = vis_dir / f"vis_{vis_saved + 1:02d}_{stem}.png"
+            pad_len = max(2, len(str(len(img_files))))
+            out_vis_path = vis_dir / f"vis_{vis_saved + 1:0{pad_len}d}_{stem}.png"
             cv2.imwrite(str(out_vis_path), cv2.cvtColor(vis_panel, cv2.COLOR_RGB2BGR))
             vis_saved += 1
 
@@ -847,7 +861,8 @@ def run_two_stage_evaluation(
             exp_name = experiment_name or os.getenv("MLFLOW_EXPERIMENT_NAME") or "cvm-two-stage-cascade-eval"
             mlflow.set_experiment(exp_name)
 
-            with mlflow.start_run(run_name=f"eval_{actual_run_name}"):
+            run_name_to_use = actual_run_name if actual_run_name.startswith("eval_") else f"eval_{actual_run_name}"
+            with mlflow.start_run(run_name=run_name_to_use):
                 mlflow.log_params({
                     "stage1_weights": stage1_weights,
                     "stage2_weights": stage2_weights,
@@ -893,6 +908,35 @@ def run_two_stage_evaluation(
                 mlflow.log_artifact(str(metrics_json_file))
                 mlflow.log_artifact(str(csv_file))
                 mlflow.log_artifacts(str(vis_dir), artifact_path="visualizations")
+
+                # Also log available dataset split evaluation files (val & train) into splits_eval artifact path
+                eval_base = Path("evaluation")
+                if eval_base.exists():
+                    for split_art in [
+                        "metrics_train.json", "metrics_val.json",
+                        "summary_report_train.txt", "summary_report_val.txt",
+                        "predictions_landmarks_train.csv", "predictions_landmarks_val.csv",
+                    ]:
+                        cand = eval_base / split_art
+                        if cand.exists():
+                            try:
+                                mlflow.log_artifact(str(cand), artifact_path="splits_eval")
+                            except Exception as e:
+                                pass
+
+                    # Log light predictions outputs if present
+                    pred_full_json = eval_base / "predictions_light" / "predictions_full.json"
+                    if pred_full_json.exists():
+                        try:
+                            mlflow.log_artifact(str(pred_full_json), artifact_path="predictions_light")
+                        except Exception as e:
+                            pass
+                    pred_full_csv = eval_base / "predictions_light" / "predictions_full.csv"
+                    if pred_full_csv.exists():
+                        try:
+                            mlflow.log_artifact(str(pred_full_csv), artifact_path="predictions_light")
+                        except Exception as e:
+                            pass
         except Exception as ml_err:
             print(f"⚠️ MLflow logging notice: {ml_err}")
 
@@ -917,7 +961,8 @@ def main():
         default=True,
         help="Disable Anatomical Vertebra Height Prior safeguard",
     )
-    parser.add_argument("--visualize", type=int, default=10, help="Number of visualization panels to save")
+    parser.add_argument("--visualize", type=int, default=10, help="Number of visualization panels to save (-1 for all)")
+    parser.add_argument("--run-name", type=str, default="test_split_cascade_eval", help="MLflow and report run name")
     parser.add_argument("--device", type=str, default=None, help="Device (cuda/mps/cpu)")
     parser.add_argument("--skip-mlflow", action="store_true", help="Skip MLflow logging")
 
@@ -929,6 +974,7 @@ def main():
         img_dir=args.img_dir,
         npz_dir=args.npz_dir,
         output_dir=args.output_dir,
+        run_name=args.run_name,
         stage1_img_size=args.stage1_size,
         stage2_img_size=args.stage2_size,
         margin_ratio=args.margin_ratio,

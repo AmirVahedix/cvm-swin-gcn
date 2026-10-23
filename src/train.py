@@ -133,10 +133,26 @@ def get_llrd_param_groups(
 
 def get_landmark_weights(device: torch.device) -> torch.Tensor:
     """
-    Constructs uniform landmark loss weights (1.0 for every landmark),
-    ensuring an unbiased multi-task objective without empirical landmark reweighting.
+    Constructs validation-guided error-adaptive landmark loss weights,
+    derived from empirical validation set residuals (evaluation/metrics_val.json).
+    Prioritizes lagging diagnostic landmarks (C4 inferior boundary, C2 concavity,
+    and superior vertebra corners) while maintaining unit weight on well-converged baselines.
     """
-    return torch.ones(NUM_LANDMARKS, dtype=torch.float32, device=device)
+    weights = torch.ones(NUM_LANDMARKS, dtype=torch.float32, device=device)
+    
+    # Tier 1: Severe lagging landmarks (C4 inferior boundary >11-13.7% error)
+    weights[10] = 2.4   # C4_PI (13.69% error, 28.3% <=5%)
+    weights[11] = 2.2   # C4_IC (12.78% error, 22.0% <=5%)
+    weights[12] = 2.0   # C4_AI (11.60% error, 25.2% <=5%)
+    
+    # Tier 2: High-priority diagnostic landmarks (C2 concavity & C4 superior)
+    weights[1]  = 2.0   # C2_IC (7.82% error, only 29.1% <=5%)
+    weights[8]  = 1.8   # C4_PS (9.05% error, only 19.7% <=5%)
+    weights[3]  = 1.5   # C3_PS (7.98% error, only 29.1% <=5%)
+    weights[2]  = 1.5   # C2_AI (6.60% error)
+    
+    # Baseline: C2_PI (0), C3_AS (4), C3_PI (5), C3_IC (6), C3_AI (7), C4_AS (9) stay at 1.0
+    return weights
 
 
 class EpochLossResult(float):
@@ -1510,6 +1526,28 @@ def main(
                     mlflow.log_artifact(str(eval_txt), artifact_path="evaluation")
                 except Exception as ml_err:
                     print(f"⚠️ Warning: Could not log summary report to MLflow: {ml_err}")
+            eval_csv = Path(eval_run_folder) / "predictions_landmarks.csv"
+            if eval_csv.exists():
+                try:
+                    mlflow.log_artifact(str(eval_csv), artifact_path="evaluation")
+                    print(f"--> Successfully logged '{eval_csv}' to MLflow artifact path 'evaluation'.")
+                except Exception as ml_err:
+                    print(f"⚠️ Warning: Could not log predictions_landmarks.csv to MLflow: {ml_err}")
+
+        # Also log split metrics and reports (metrics_val.json, metrics_train.json, CSVs) to MLflow
+        for extra_split_file in [
+            "metrics_val.json", "metrics_train.json",
+            "summary_report_val.txt", "summary_report_train.txt",
+            "predictions_landmarks_val.csv", "predictions_landmarks_train.csv",
+        ]:
+            for cand in [Path("evaluation") / extra_split_file, Path("evaluation/predictions_light") / extra_split_file]:
+                if cand.exists():
+                    try:
+                        mlflow.log_artifact(str(cand), artifact_path="evaluation")
+                        print(f"--> Successfully logged '{cand}' to MLflow artifact path 'evaluation'.")
+                    except Exception as ml_err:
+                        print(f"⚠️ Warning: Could not log '{cand}' to MLflow: {ml_err}")
+                    break
 
         # 1b. FTP: Upload .json metrics files FIRST
         if not skip_ftp:

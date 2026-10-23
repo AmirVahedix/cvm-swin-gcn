@@ -509,8 +509,8 @@ def parse_args():
     parser.add_argument(
         "--metrics-splits",
         type=str,
-        default="val,train",
-        help="Comma-separated splits to compute full metrics for (default: 'val,train')",
+        default="val,train,test",
+        help="Comma-separated splits to compute full metrics for (default: 'val,train,test')",
     )
     parser.add_argument(
         "--metrics-output-dir",
@@ -581,7 +581,7 @@ def run_batch_inference(
     export_light: bool = True,
     compute_metrics: bool = True,
     labels_dir: Union[str, Path] = "data/labels",
-    metrics_splits: Union[str, List[str]] = "val,train",
+    metrics_splits: Union[str, List[str]] = "val,train,test",
     metrics_output_dir: Optional[Union[str, Path]] = None,
     log_to_mlflow: bool = True,
     **kwargs,

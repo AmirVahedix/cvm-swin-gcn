@@ -20,3 +20,7 @@ wheels/
 *.txt
 *.zip
 .DS_Store
+
+# Evaluation outputs
+evaluation/predictions_*
+evaluation/two_stage/
