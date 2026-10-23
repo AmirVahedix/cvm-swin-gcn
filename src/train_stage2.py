@@ -451,10 +451,13 @@ def train_stage2_main(
     else:
         print("⚠️ STAGE 2 CLASS-WEIGHTED SAMPLER: [DISABLED / UNIFORM SHUFFLE ⚠️]")
     print("-" * 80)
-    print("🎯 STAGE 2 VALIDATION-GUIDED LANDMARK LOSS WEIGHTS:")
+    print("⚖️  WEIGHTED LANDMARK LOSS IS ACTIVE [ENABLED & APPLIED ✅]")
+    print("   • Applied to: WingLoss (Coordinates) & AdaptiveWingLoss (Heatmaps)")
+    print("   • Multiplier Values per Landmark:")
     for idx, (name, w) in enumerate(zip(LANDMARK_CLASSES, landmark_weights)):
-        tier_tag = f"🔥 BOOSTED ({w.item():.1f}x)" if w.item() > 1.0 else f"   baseline ({w.item():.1f}x)"
-        print(f"   • [{idx:2d}] {name:8s} : {tier_tag}")
+        val = w.item()
+        tier_tag = f"🔥 BOOSTED ({val:.1f}x multiplier)" if val > 1.0 else f"   baseline ({val:.1f}x multiplier)"
+        print(f"     [{idx:2d}] {name:8s} -> {val:4.1f}x | {tier_tag}")
     print("=" * 80 + "\n")
 
     # 4. MLflow Tracking Setup

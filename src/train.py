@@ -1090,6 +1090,16 @@ def main(
     morph_loss = MorphometricShapeLoss().to(device) if lambda_morph > 0.0 else None
     landmark_weights = get_landmark_weights(device)
 
+    print("\n" + "=" * 80)
+    print("⚖️  WEIGHTED LANDMARK LOSS IS ACTIVE [ENABLED & APPLIED ✅]")
+    print("   • Applied to: WingLoss (Coordinates) & AdaptiveWingLoss (Heatmaps)")
+    print("   • Multiplier Values per Landmark:")
+    for idx, (name, w) in enumerate(zip(LANDMARK_CLASSES, landmark_weights)):
+        val = w.item()
+        tier_tag = f"🔥 BOOSTED ({val:.1f}x multiplier)" if val > 1.0 else f"   baseline ({val:.1f}x multiplier)"
+        print(f"     [{idx:2d}] {name:8s} -> {val:4.1f}x | {tier_tag}")
+    print("=" * 80 + "\n")
+
     best_val_loss = float("inf")
     best_val_share_5pct = 0.0
     best_val_mean_norm_err = float("inf")
