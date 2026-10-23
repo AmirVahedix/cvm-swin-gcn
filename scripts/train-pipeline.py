@@ -698,9 +698,10 @@ def main():
 
         # Ensure Stage 1 checkpoint is present locally for Stage 2 warmstart
         stage1_weights = args.stage1_weights or "artifacts/stage1_best.pth"
-        if not os.path.exists(stage1_weights):
-            stage1_run_id = getattr(args, "stage1_run_id", None) or os.getenv("STAGE1_RUN_ID", "2d4d452398b14c688f51ac4431d40698")
-            print(f"\n--> Stage 1 weights not found locally at '{stage1_weights}'. Automatically downloading from MLflow run '{stage1_run_id}'...")
+        explicit_stage1_run = getattr(args, "stage1_run_id", None)
+        if explicit_stage1_run or not os.path.exists(stage1_weights):
+            stage1_run_id = explicit_stage1_run or os.getenv("STAGE1_RUN_ID", "2d4d452398b14c688f51ac4431d40698")
+            print(f"\n--> Fetching Stage 1 weights from MLflow run '{stage1_run_id}' -> '{stage1_weights}'...")
             try:
                 from scripts.download_checkpoint import download_checkpoint_from_mlflow
                 download_checkpoint_from_mlflow(
@@ -712,7 +713,7 @@ def main():
                     password=args.mlflow_password,
                 )
             except Exception as dl_err:
-                print(f"⚠️ Warning: Auto-download of Stage 1 weights from MLflow failed: {dl_err}")
+                print(f"⚠️ Warning: Download of Stage 1 weights from MLflow failed: {dl_err}")
 
         if not args.skip_stage2 and not os.path.exists(args.stage2_weights):
             print(f"\n[5/6] Executing Stage 2 Fine Model Training ({effective_epochs} epochs, {args.stage2_size}x{args.stage2_size}, sigma={args.stage2_sigma}, bottom_margin={args.bottom_margin_ratio})...")

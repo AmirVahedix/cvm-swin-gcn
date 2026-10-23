@@ -1286,6 +1286,8 @@ def cmd_run(args: argparse.Namespace, client: VastAPIClient) -> None:
             pipeline_args.append("--train-only")
         if args.skip_eval:
             pipeline_args.append("--skip-eval")
+        if getattr(args, "stage1_run_id", None):
+            pipeline_args.extend(["--stage1-run-id", str(args.stage1_run_id)])
         if args.extra_args:
             pipeline_args.extend(args.extra_args)
 
@@ -1778,6 +1780,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run_p.add_argument(
         "--epochs", "-e", type=int, default=100, help="Number of training epochs"
+    )
+    run_p.add_argument(
+        "--stage1-run-id",
+        type=str,
+        default=None,
+        help="MLflow Run ID for Stage 1 checkpoint to warmstart Stage 2",
     )
     run_p.add_argument(
         "--batch-size", "-b", type=int, default=8, help="Batch size for training"
