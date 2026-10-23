@@ -240,6 +240,7 @@ def run_two_stage_evaluation(
     margin_ratio: float = 0.18,
     bottom_margin_ratio: Optional[float] = 0.28,
     use_peaks: bool = True,
+    stage1_use_peaks: bool = False,
     refine_2pass: bool = False,
     use_anatomical_prior: bool = False,
     num_visualizations: int = 10,
@@ -262,7 +263,9 @@ def run_two_stage_evaluation(
     print(f"Stage 1 Weights: '{stage1_weights}' ({stage1_img_size}x{stage1_img_size})")
     print(f"Stage 2 Weights: '{stage2_weights}' ({stage2_img_size}x{stage2_img_size})")
     print(f"ROI Margin Ratio: {margin_ratio:.2f} | Bottom Margin: {bottom_margin_ratio if bottom_margin_ratio is not None else margin_ratio:.2f}")
-    print(f"Landmark Extraction: {'Sub-Pixel Heatmap Peaks (Argmax + Quadratic)' if use_peaks else 'Soft-Argmax Spatial Expectation'}")
+    s1_extract_mode = "Sub-Pixel Peaks" if stage1_use_peaks else "SoftArgmax (Native Spatial Expectation)"
+    s2_extract_mode = "Sub-Pixel Peaks (Argmax + Quadratic)" if use_peaks else "SoftArgmax"
+    print(f"Stage 1 Extraction: {s1_extract_mode} | Stage 2 Extraction: {s2_extract_mode}")
     print(f"Image Directory: '{img_dir}' | Labels Directory: '{npz_dir}'")
     print("=" * 85)
 
@@ -397,7 +400,7 @@ def run_two_stage_evaluation(
             t0_s1 = time.perf_counter()
 
             s1_hm, s1_coords_t = stage1_model(tensor_in)
-            if use_peaks:
+            if stage1_use_peaks:
                 s1_coords_t = extract_subpixel_peaks(s1_hm)
 
             if device.type == "cuda":
@@ -998,13 +1001,19 @@ def main():
         dest="use_peaks",
         action="store_true",
         default=True,
-        help="Extract coordinates using sub-pixel heatmap peak finding (default: True)",
+        help="Extract Stage 2 coordinates using sub-pixel heatmap peak finding (default: True)",
     )
     parser.add_argument(
         "--no-peaks",
         dest="use_peaks",
         action="store_false",
-        help="Use default SoftArgmax2D spatial expectation instead of heatmap peaks",
+        help="Use default SoftArgmax2D spatial expectation instead of heatmap peaks for Stage 2",
+    )
+    parser.add_argument(
+        "--stage1-use-peaks",
+        action="store_true",
+        default=False,
+        help="Extract Stage 1 coarse coordinates using heatmap peak finding instead of SoftArgmax (default: False)",
     )
     parser.add_argument("--refine-2pass", action="store_true", help="Enable 2-pass iterative refinement")
     parser.add_argument(
@@ -1040,6 +1049,7 @@ def main():
         margin_ratio=args.margin_ratio,
         bottom_margin_ratio=args.bottom_margin_ratio,
         use_peaks=args.use_peaks,
+        stage1_use_peaks=args.stage1_use_peaks,
         refine_2pass=args.refine_2pass,
         use_anatomical_prior=args.use_anatomical_prior,
         num_visualizations=args.visualize,

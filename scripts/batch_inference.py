@@ -558,6 +558,12 @@ def parse_args():
         default=True,
         help="Disable Anatomical Vertebra Height Prior safeguard",
     )
+    parser.add_argument(
+        "--stage1-use-peaks",
+        action="store_true",
+        default=False,
+        help="Use peak extraction for Stage 1 coarse detector instead of SoftArgmax (default: False)",
+    )
     return parser.parse_args()
 
 
@@ -571,6 +577,7 @@ def run_batch_inference(
     margin_ratio: float = 0.18,
     bottom_margin_ratio: Optional[float] = 0.28,
     use_peaks: bool = True,
+    stage1_use_peaks: bool = False,
     use_anatomical_prior: bool = True,
     device: str = "auto",
     batch_size: int = 8,
@@ -701,7 +708,7 @@ def run_batch_inference(
             # Model forward pass: outputs (heatmaps, normalized_coords)
             # coords shape: [B, 13, 2] in normalized canvas coordinates [0.0, 1.0]
             pred_hm_s1, pred_coords_s1 = model_s1(input_batch)
-            if use_peaks:
+            if stage1_use_peaks or (use_peaks and model_s2 is None):
                 pred_coords_s1 = extract_subpixel_peaks(pred_hm_s1)
             pred_coords_s1_np = pred_coords_s1.cpu().numpy()
 

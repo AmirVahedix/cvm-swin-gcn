@@ -338,7 +338,7 @@ def predict_batch(
     use_tta: bool = False,
     tta_scales: list[float] | tuple[float, ...] = (0.95, 1.0, 1.05),
     tta_shifts: list[tuple[int, int]] | None = None,
-    use_peaks: bool = True,
+    use_peaks: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Inference helper for a batch of images with optional Test-Time Augmentation (TTA).
@@ -349,7 +349,7 @@ def predict_batch(
         use_tta: Whether to apply multi-scale / shift TTA.
         tta_scales: Scale factors to evaluate (e.g. 0.95, 1.0, 1.05).
         tta_shifts: List of (dx, dy) pixel shift offsets (e.g. [(-4, -4), (4, 4)]).
-        use_peaks: Whether to extract coordinates from sub-pixel heatmap peaks (default: True).
+        use_peaks: Whether to extract coordinates from sub-pixel heatmap peaks (default: False).
 
     Returns:
         consensus_heatmaps: Heatmaps of shape [B, 13, H, W].
@@ -1394,7 +1394,7 @@ def run_evaluation(
     tta_scales: list[float] | tuple[float, ...] = (0.95, 1.0, 1.05),
     tta_shifts: list[tuple[int, int]] | None = None,
     roi_only: bool = True,
-    use_peaks: bool = True,
+    use_peaks: bool = False,
     export_json: str | None = None,
     api_url: str | None = None,
     api_token: str | None = None,
@@ -2516,8 +2516,8 @@ def main():
         "--use-peaks",
         dest="use_peaks",
         action="store_true",
-        default=True,
-        help="Extract coordinates using sub-pixel heatmap peak finding (default: True)",
+        default=False,
+        help="Extract coordinates using sub-pixel heatmap peak finding (default: False)",
     )
     parser.add_argument(
         "--no-peaks",
