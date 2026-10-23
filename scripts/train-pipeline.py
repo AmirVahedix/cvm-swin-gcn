@@ -719,17 +719,21 @@ def main():
                 print("\n--> Stage 1 Skipped via --skip-stage1")
 
             # Check if Stage 1 checkpoint is needed for Stage 2 warmstart and fetch from MLflow if missing
-            run_id_for_stage1 = getattr(args, "stage1_run_id", None) or os.getenv("STAGE1_RUN_ID")
-            if not os.path.exists(args.stage1_weights) and run_id_for_stage1:
-                print(f"\n--> Stage 1 weights not found locally at '{args.stage1_weights}'. Automatically downloading from MLflow run '{run_id_for_stage1}'...")
+            explicit_stage1_run = getattr(args, "stage1_run_id", None)
+            if explicit_stage1_run or not os.path.exists(args.stage1_weights):
+                run_id_for_stage1 = explicit_stage1_run or os.getenv("STAGE1_RUN_ID", "2d4d452398b14c688f51ac4431d40698")
+                print(f"\n--> Fetching Stage 1 weights from MLflow run '{run_id_for_stage1}' -> '{args.stage1_weights}'...")
                 from scripts.download_checkpoint import download_checkpoint_from_mlflow
-                download_checkpoint_from_mlflow(
-                    run_id=run_id_for_stage1,
-                    dest_path=args.stage1_weights,
-                    tracking_uri=args.mlflow_tracking_uri,
-                    username=args.mlflow_username,
-                    password=args.mlflow_password,
-                )
+                try:
+                    download_checkpoint_from_mlflow(
+                        run_id=run_id_for_stage1,
+                        dest_path=args.stage1_weights,
+                        tracking_uri=args.mlflow_tracking_uri,
+                        username=args.mlflow_username,
+                        password=args.mlflow_password,
+                    )
+                except Exception as dl_err:
+                    print(f"⚠️ Warning: Download of Stage 1 weights from MLflow failed: {dl_err}")
 
             # Determine consistent native image directory for Stage 2 training & evaluation
             native_dir = None if args.no_native_crops else (
