@@ -43,6 +43,7 @@ def main():
     parser.add_argument("--stage2-epochs", type=int, default=60, help="Epochs for Stage 2 training")
     parser.add_argument("--stage2-size", type=int, default=448, choices=[448, 672], help="Stage 2 ROI resolution (448 or 672)")
     parser.add_argument("--margin-ratio", type=float, default=0.18, help="ROI margin ratio (default: 0.18)")
+    parser.add_argument("--bottom-margin-ratio", type=float, default=0.28, help="Bottom margin ratio for C4 vertebra (default: 0.28)")
     parser.add_argument("--sigma", type=float, default=2.5, help="Heatmap Gaussian sigma in Stage 2 ROI space (default: 2.5 for sub-millimeter precision)")
     parser.add_argument("--no-warmstart", action="store_true", help="Train Stage 2 from ImageNet instead of warmstarting from Stage 1")
 
@@ -122,6 +123,7 @@ def main():
             target_size=args.stage2_size,
             sigma=args.sigma,
             margin_ratio=args.margin_ratio,
+            bottom_margin_ratio=args.bottom_margin_ratio,
             stage1_weights=args.stage1_weights,
             warmstart_from_stage1=not args.no_warmstart,
             save_path=args.stage2_weights,
@@ -159,6 +161,7 @@ def main():
         stage1_img_size=args.stage1_size,
         stage2_img_size=args.stage2_size,
         margin_ratio=args.margin_ratio,
+        bottom_margin_ratio=args.bottom_margin_ratio,
         refine_2pass=args.refine_2pass,
         num_visualizations=args.visualize,
         native_img_dir=args.native_img_dir,
@@ -181,6 +184,7 @@ def main():
             stage1_img_size=args.stage1_size,
             stage2_img_size=args.stage2_size,
             margin_ratio=args.margin_ratio,
+            bottom_margin_ratio=args.bottom_margin_ratio,
             refine_2pass=args.refine_2pass,
             num_visualizations=5,
             native_img_dir=args.native_img_dir,

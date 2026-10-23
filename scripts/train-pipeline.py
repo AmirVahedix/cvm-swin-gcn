@@ -17,6 +17,7 @@ from src.data.preprocessing.split_dataset import split_dataset
 from src.train import main as train_main
 from src.eval import run_evaluation
 from src.eval_two_stage import run_two_stage_evaluation
+from src.eval_stage2_roi import run_stage2_roi_evaluation
 from src.train_stage2 import train_stage2_main
 from src.utils.test_mlflow import run_mlflow_test
 from src.utils.ftp_utils import test_ftp_connection
@@ -233,6 +234,12 @@ def main():
         type=float,
         default=0.18,
         help="ROI margin ratio (default: 0.18).",
+    )
+    parser.add_argument(
+        "--bottom-margin-ratio",
+        type=float,
+        default=0.28,
+        help="Bottom margin ratio for C4 vertebra (default: 0.28).",
     )
     parser.add_argument(
         "--refine-2pass",
@@ -676,163 +683,134 @@ def main():
         else:
             print("\n[1-4/6] Skipping steps 1 to 4 (--train-only flag set).")
 
-        # Step 5: Model Training
-        if args.two_stage:
-            print("\n" + "=" * 50)
-            print("🌟 TWO-STAGE COARSE-TO-FINE PIPELINE SELECTED")
-            print("=" * 50)
+        # Step 5: Stage 2 Fine Model Training on Ground-Truth ROIs (Stage 1 Disabled)
+        print("\n" + "=" * 50)
+        print("🌟 STAGE 2 FINE ROI MODEL TRAINING (GROUND-TRUTH ROIs)")
+        print("   Stage 1 is disabled. Training Swin refiner directly on GT vertebrae ROIs.")
+        print("=" * 50)
 
-            # Step 5a: Stage 1 Training
-            if not args.skip_stage1 and not os.path.exists(args.stage1_weights):
-                print(f"\n[5a/6] Executing Stage 1 Coarse Model Training ({args.epochs} epochs)...")
-                train_main(
-                    epochs=args.epochs,
-                    batch_size=args.batch_size,
-                    lr=args.lr,
-                    llrd_decay_rate=args.llrd_decay_rate,
-                    lambda_hm=args.lambda_hm,
-                    lambda_cd=args.lambda_cd,
-                    lambda_graph=args.lambda_graph,
-                    lambda_morph=args.lambda_morph,
-                    img_size=args.target_size,
-                    experiment_name=args.mlflow_experiment_name,
-                    tracking_uri=args.mlflow_tracking_uri,
-                    run_name=f"{args.mlflow_run_name}_stage1" if args.mlflow_run_name else "stage1_coarse",
-                    tracking_username=args.mlflow_username,
-                    tracking_password=args.mlflow_password,
-                    skip_eval=True,
-                    skip_ftp=True,
-                    save_optimizer=args.save_optimizer,
-                    use_amp=args.use_amp,
-                    compile_model=args.compile_model,
-                    warmup_coord_epochs=args.warmup_coord_epochs,
-                    use_balanced_sampling=args.use_balanced_sampling,
-                    balanced_sampling_power=args.balanced_sampling_power,
-                )
-                if os.path.exists("artifacts/best.pth"):
-                    import shutil
-                    shutil.copy("artifacts/best.pth", args.stage1_weights)
-                    print(f"--> Copied 'artifacts/best.pth' to '{args.stage1_weights}'")
-            elif os.path.exists(args.stage1_weights):
-                print(f"\n--> Stage 1 Skipped: Found existing checkpoint at '{args.stage1_weights}'")
-            else:
-                print("\n--> Stage 1 Skipped via --skip-stage1")
+        # Determine consistent native image directory for Stage 2 training & evaluation
+        native_dir = None if args.no_native_crops else (
+            args.native_img_dir if (args.native_img_dir and os.path.exists(args.native_img_dir)) else None
+        )
 
-            # Check if Stage 1 checkpoint is needed for Stage 2 warmstart and fetch from MLflow if missing
-            run_id_for_stage1 = getattr(args, "stage1_run_id", None) or os.getenv("STAGE1_RUN_ID")
-            if not os.path.exists(args.stage1_weights) and run_id_for_stage1:
-                print(f"\n--> Stage 1 weights not found locally at '{args.stage1_weights}'. Automatically downloading from MLflow run '{run_id_for_stage1}'...")
-                from scripts.download_checkpoint import download_checkpoint_from_mlflow
-                download_checkpoint_from_mlflow(
-                    run_id=run_id_for_stage1,
-                    dest_path=args.stage1_weights,
-                    tracking_uri=args.mlflow_tracking_uri,
-                    username=args.mlflow_username,
-                    password=args.mlflow_password,
-                )
+        effective_epochs = args.stage2_epochs if args.stage2_epochs else args.epochs
 
-            # Determine consistent native image directory for Stage 2 training & evaluation
-            native_dir = None if args.no_native_crops else (
-                args.native_img_dir if (args.native_img_dir and os.path.exists(args.native_img_dir)) else None
+        if not args.skip_stage2 and not os.path.exists(args.stage2_weights):
+            print(f"\n[5/6] Executing Stage 2 Fine Model Training ({effective_epochs} epochs, {args.stage2_size}x{args.stage2_size}, sigma={args.stage2_sigma}, bottom_margin={args.bottom_margin_ratio})...")
+            train_stage2_main(
+                epochs=effective_epochs,
+                batch_size=args.batch_size,
+                lr=args.lr,
+                llrd_decay_rate=args.llrd_decay_rate,
+                target_size=args.stage2_size,
+                sigma=args.stage2_sigma,
+                margin_ratio=args.margin_ratio,
+                bottom_margin_ratio=args.bottom_margin_ratio,
+                warmstart_from_stage1=False,
+                save_path=args.stage2_weights,
+                train_img_dir="dataset/train/images",
+                train_npz_dir="dataset/train/labels",
+                val_img_dir="dataset/val/images",
+                val_npz_dir="dataset/val/labels",
+                test_img_dir="dataset/test/images",
+                test_npz_dir="dataset/test/labels",
+                native_img_dir=native_dir,
+                export_json_path="data/exports/export.json" if os.path.exists("data/exports/export.json") else None,
+                experiment_name=args.mlflow_experiment_name or os.getenv("MLFLOW_EXPERIMENT_NAME", "cvm-swin-gcn"),
+                tracking_uri=args.mlflow_tracking_uri,
+                tracking_username=args.mlflow_username,
+                tracking_password=args.mlflow_password,
+                run_name=f"{args.mlflow_run_name}_stage2" if args.mlflow_run_name else "stage2_roi_gt",
+                use_amp=args.use_amp,
+                use_balanced_sampling=args.use_balanced_sampling,
+                balanced_sampling_power=args.balanced_sampling_power,
+                lambda_morph=args.lambda_morph,
+                save_optimizer=args.save_optimizer,
+                skip_eval=True,
+            )
+        elif os.path.exists(args.stage2_weights):
+            print(f"\n--> Stage 2 Skipped: Found existing checkpoint at '{args.stage2_weights}'")
+        else:
+            print("\n--> Stage 2 Skipped via --skip-stage2")
+
+        # Check if Stage 2 checkpoint is needed and fetch from MLflow if missing
+        run_id_for_stage2 = getattr(args, "stage2_run_id", None) or os.getenv("STAGE2_RUN_ID")
+        if not os.path.exists(args.stage2_weights) and run_id_for_stage2:
+            print(f"\n--> Stage 2 weights not found locally at '{args.stage2_weights}'. Automatically downloading from MLflow run '{run_id_for_stage2}'...")
+            from scripts.download_checkpoint import download_checkpoint_from_mlflow
+            download_checkpoint_from_mlflow(
+                run_id=run_id_for_stage2,
+                artifact_path="stage2_best.pth",
+                dest_path=args.stage2_weights,
+                tracking_uri=args.mlflow_tracking_uri,
+                username=args.mlflow_username,
+                password=args.mlflow_password,
             )
 
-            # Step 5b: Stage 2 Training
-            if not args.skip_stage2 and not os.path.exists(args.stage2_weights):
-                print(f"\n[5b/6] Executing Stage 2 Fine Model Training ({args.stage2_epochs} epochs, {args.stage2_size}x{args.stage2_size}, sigma={args.stage2_sigma})...")
-                train_stage2_main(
-                    epochs=args.stage2_epochs,
-                    batch_size=args.batch_size,
-                    lr=args.lr,
-                    llrd_decay_rate=args.llrd_decay_rate,
-                    target_size=args.stage2_size,
-                    sigma=args.stage2_sigma,
-                    margin_ratio=args.margin_ratio,
-                    stage1_weights=args.stage1_weights if os.path.exists(args.stage1_weights) else "artifacts/best.pth",
-                    warmstart_from_stage1=True,
-                    save_path=args.stage2_weights,
-                    train_img_dir="dataset/train/images",
-                    train_npz_dir="dataset/train/labels",
-                    val_img_dir="dataset/val/images",
-                    val_npz_dir="dataset/val/labels",
-                    native_img_dir=native_dir,
-                    export_json_path="data/exports/export.json" if os.path.exists("data/exports/export.json") else None,
-                    experiment_name=args.mlflow_experiment_name or os.getenv("MLFLOW_EXPERIMENT_NAME", "cvm-swin-gcn"),
-                    tracking_uri=args.mlflow_tracking_uri,
-                    tracking_username=args.mlflow_username,
-                    tracking_password=args.mlflow_password,
-                    run_name=f"{args.mlflow_run_name}_stage2" if args.mlflow_run_name else "stage2_fine",
-                    use_amp=args.use_amp,
-                    use_balanced_sampling=args.use_balanced_sampling,
-                    balanced_sampling_power=args.balanced_sampling_power,
-                    lambda_morph=args.lambda_morph,
-                    save_optimizer=args.save_optimizer,
-                )
-            elif os.path.exists(args.stage2_weights):
-                print(f"\n--> Stage 2 Skipped: Found existing checkpoint at '{args.stage2_weights}'")
-            else:
-                print("\n--> Stage 2 Skipped via --skip-stage2")
+        # Step 6: Stage 2 Ground-Truth ROI Clinical Evaluation on Test & Validation Sets
+        if not args.skip_eval and os.path.exists(args.stage2_weights):
+            print("\n" + "=" * 80)
+            print("🚀 [6/6] EXECUTING STAGE 2 GT-ROI EVALUATION ON TEST & VALIDATION SETS")
+            print("=" * 80)
 
-            # Check if Stage 2 checkpoint is needed and fetch from MLflow if missing
-            run_id_for_stage2 = getattr(args, "stage2_run_id", None) or os.getenv("STAGE2_RUN_ID")
-            if not os.path.exists(args.stage2_weights) and run_id_for_stage2:
-                print(f"\n--> Stage 2 weights not found locally at '{args.stage2_weights}'. Automatically downloading from MLflow run '{run_id_for_stage2}'...")
-                from scripts.download_checkpoint import download_checkpoint_from_mlflow
-                download_checkpoint_from_mlflow(
-                    run_id=run_id_for_stage2,
-                    artifact_path="stage2_best.pth",
-                    dest_path=args.stage2_weights,
-                    tracking_uri=args.mlflow_tracking_uri,
-                    username=args.mlflow_username,
-                    password=args.mlflow_password,
-                )
+            # 6a. Evaluate on Test Split
+            print("\n--> [6a/6] Evaluating Stage 2 on TEST Split (Oracle GT-ROI)...")
+            test_metrics, test_dir = run_stage2_roi_evaluation(
+                stage2_weights=args.stage2_weights,
+                img_dir="dataset/test/images",
+                npz_dir="dataset/test/labels",
+                output_dir="evaluation/stage2_roi",
+                split_name="test",
+                stage2_img_size=args.stage2_size,
+                margin_ratio=args.margin_ratio,
+                bottom_margin_ratio=args.bottom_margin_ratio,
+                native_img_dir=native_dir,
+                num_visualizations=args.eval_samples,
+                log_to_mlflow=True,
+                tracking_uri=args.mlflow_tracking_uri,
+                tracking_username=args.mlflow_username,
+                tracking_password=args.mlflow_password,
+                experiment_name=args.mlflow_experiment_name or os.getenv("MLFLOW_EXPERIMENT_NAME", "cvm-swin-gcn"),
+                run_name=f"{args.mlflow_run_name}_test" if args.mlflow_run_name else "stage2_roi_test",
+            )
 
-            # Step 6: Two-Stage Cascaded Clinical Evaluation
-            if not args.skip_eval:
-                print("\n[6/6] Executing Two-Stage Cascaded Clinical Evaluation on Test Split...")
-                s1_w = (
-                    args.stage1_weights
-                    if (args.stage1_weights and os.path.exists(args.stage1_weights))
-                    else ("artifacts/stage1_best.pth" if os.path.exists("artifacts/stage1_best.pth") else "artifacts/best.pth")
-                )
-                s2_w = (
-                    args.stage2_weights
-                    if (args.stage2_weights and os.path.exists(args.stage2_weights))
-                    else ("artifacts/stage2_best.pth" if os.path.exists("artifacts/stage2_best.pth") else None)
-                )
-                run_two_stage_evaluation(
-                    stage1_weights=s1_w,
-                    stage2_weights=s2_w or "artifacts/stage2_best.pth",
-                    img_dir="dataset/test/images",
-                    npz_dir="dataset/test/labels",
-                    output_dir="evaluation/two_stage",
-                    run_name=args.mlflow_run_name or "test_split_cascade_eval",
-                    stage1_img_size=args.target_size,
+            # 6b. Evaluate on Validation Split
+            if os.path.exists("dataset/val/images") and os.path.exists("dataset/val/labels"):
+                print("\n--> [6b/6] Evaluating Stage 2 on VAL Split (Oracle GT-ROI)...")
+                val_metrics, val_dir = run_stage2_roi_evaluation(
+                    stage2_weights=args.stage2_weights,
+                    img_dir="dataset/val/images",
+                    npz_dir="dataset/val/labels",
+                    output_dir="evaluation/stage2_roi",
+                    split_name="val",
                     stage2_img_size=args.stage2_size,
                     margin_ratio=args.margin_ratio,
-                    refine_2pass=args.refine_2pass,
-                    num_visualizations=args.eval_samples,
+                    bottom_margin_ratio=args.bottom_margin_ratio,
                     native_img_dir=native_dir,
+                    num_visualizations=5,
                     log_to_mlflow=True,
                     tracking_uri=args.mlflow_tracking_uri,
                     tracking_username=args.mlflow_username,
                     tracking_password=args.mlflow_password,
                     experiment_name=args.mlflow_experiment_name or os.getenv("MLFLOW_EXPERIMENT_NAME", "cvm-swin-gcn"),
+                    run_name=f"{args.mlflow_run_name}_val" if args.mlflow_run_name else "stage2_roi_val",
                 )
 
-                if not args.skip_ftp and args.ftp_host and args.ftp_user and args.ftp_password:
-                    from src.utils.ftp_utils import backup_artifacts_to_ftp
-                    backup_files = [f for f in [s1_w, s2_w] if os.path.exists(f)]
-                    if backup_files:
-                        print(f"--> Uploading Two-Stage checkpoints {backup_files} to FTP server...")
-                        backup_artifacts_to_ftp(
-                            host=args.ftp_host,
-                            port=args.ftp_port,
-                            user=args.ftp_user,
-                            password=args.ftp_password,
-                            remote_dir=args.ftp_remote_dir,
-                            files=backup_files,
-                            use_tls=args.ftp_tls if args.ftp_tls else None,
-                        )
+            if not args.skip_ftp and args.ftp_host and args.ftp_user and args.ftp_password:
+                from src.utils.ftp_utils import backup_artifacts_to_ftp
+                backup_files = [f for f in [args.stage2_weights] if os.path.exists(f)]
+                if backup_files:
+                    print(f"--> Uploading Stage 2 checkpoints {backup_files} to FTP server...")
+                    backup_artifacts_to_ftp(
+                        host=args.ftp_host,
+                        port=args.ftp_port,
+                        user=args.ftp_user,
+                        password=args.ftp_password,
+                        remote_dir=args.ftp_remote_dir,
+                        files=backup_files,
+                        use_tls=args.ftp_tls if args.ftp_tls else None,
+                    )
         else:
             print(
                 f"\n[5/6] Executing: train_main() with {args.epochs} epochs, batch_size={args.batch_size}, lr={args.lr}"

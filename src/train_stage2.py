@@ -65,6 +65,7 @@ from src.utils.metrics import (
 )
 from src.utils.roi_utils import (
     ROIBoundingBox,
+    extract_subpixel_peaks,
     inverse_transform_coords,
     validate_stage1_box,
 )
@@ -150,7 +151,9 @@ def validate_stage2_epoch(
                 epoch_loss_hm += (lambda_hm * loss_hm).item()
 
             # Reproject coordinates back to canvas space [0, 1] for standardized evaluation
-            pred_coords_roi_np = pred_coords_roi.detach().cpu().numpy()
+            # Use continuous subpixel peak extraction to eliminate SoftArgmax expectation drift
+            pred_coords_roi_peaks = extract_subpixel_peaks(pred_heatmaps)
+            pred_coords_roi_np = pred_coords_roi_peaks.detach().cpu().numpy()
             gt_coords_roi_np = gt_coords_roi.detach().cpu().numpy()
             B = images.shape[0]
 
@@ -341,6 +344,7 @@ def train_stage2_main(
     target_size: int = 448,
     sigma: float = 2.5,
     margin_ratio: float = 0.18,
+    bottom_margin_ratio: Optional[float] = 0.28,
     jitter_trans: float = 0.06,
     jitter_scale: float = 0.08,
     patience: int = 15,
@@ -349,7 +353,7 @@ def train_stage2_main(
     lambda_graph: float = 1.0,
     lambda_morph: float = 0.0,
     stage1_weights: str = "artifacts/stage1_best.pth",
-    warmstart_from_stage1: bool = True,
+    warmstart_from_stage1: bool = False,
     save_path: str = "artifacts/stage2_best.pth",
     save_optimizer: bool = True,
     train_img_dir: str = "dataset/train/images",
@@ -425,6 +429,7 @@ def train_stage2_main(
         target_size=target_size,
         sigma=sigma,
         margin_ratio=margin_ratio,
+        bottom_margin_ratio=bottom_margin_ratio,
         jitter=jitter_config,
         num_workers=num_workers,
         use_balanced_sampling=use_balanced_sampling,
@@ -709,43 +714,40 @@ def train_stage2_main(
         if os.path.exists(save_path):
             mlflow.log_artifact(save_path)
 
-        # --- Comprehensive Post-Training Evaluation Across All 3 Cohorts (Test, Val, Train) ---
+        # --- Comprehensive Post-Training Evaluation Across Test & Validation Cohorts (GT-ROI Oracle) ---
         if not skip_eval and os.path.exists(save_path):
             print("\n" + "=" * 80)
-            print("🚀 RUNNING POST-TRAINING EVALUATION FOR ALL 3 COHORTS (TEST, VAL, TRAIN)")
+            print("🚀 RUNNING POST-TRAINING GT-ROI EVALUATION (TEST & VAL COHORTS)")
             print("=" * 80)
 
-            # 1. TEST COHORT EVALUATION (Two-Stage Cascaded)
+            from src.eval_stage2_roi import run_stage2_roi_evaluation
+
+            # 1. TEST COHORT EVALUATION (Stage 2 GT-ROI)
             if os.path.exists(test_img_dir) and os.path.exists(test_npz_dir):
-                print(f"\n--> [1/3] Running Cascaded Two-Stage Evaluation on TEST cohort ({test_img_dir})...")
+                print(f"\n--> [1/2] Running Stage 2 GT-ROI Evaluation on TEST cohort ({test_img_dir})...")
                 try:
-                    from src.eval_two_stage import run_two_stage_evaluation
-                    test_payload, test_dir = run_two_stage_evaluation(
-                        stage1_weights=stage1_weights,
+                    test_payload, test_dir = run_stage2_roi_evaluation(
                         stage2_weights=save_path,
                         img_dir=test_img_dir,
                         npz_dir=test_npz_dir,
-                        output_dir="evaluation/two_stage",
-                        run_name="test_split_cascade_eval",
-                        stage1_img_size=640,
+                        output_dir="evaluation/stage2_roi",
+                        split_name="test",
                         stage2_img_size=target_size,
                         margin_ratio=margin_ratio,
-                        refine_2pass=False,
+                        bottom_margin_ratio=bottom_margin_ratio,
+                        native_img_dir=native_img_dir,
                         num_visualizations=eval_visualizations,
                         device_str=str(device),
                         log_to_mlflow=False,
                     )
                     test_p = Path(test_dir)
-                    if (test_p / "metrics.json").exists():
-                        mlflow.log_artifact(str(test_p / "metrics.json"), artifact_path="evaluation/test")
-                    if (test_p / "summary_report.txt").exists():
-                        mlflow.log_artifact(str(test_p / "summary_report.txt"), artifact_path="evaluation/test")
-                    if (test_p / "predictions_landmarks.csv").exists():
-                        mlflow.log_artifact(str(test_p / "predictions_landmarks.csv"), artifact_path="evaluation/test")
+                    for rep_file in ["metrics.json", "summary_report.txt", "predictions_landmarks.csv"]:
+                        if (test_p / rep_file).exists():
+                            mlflow.log_artifact(str(test_p / rep_file), artifact_path="evaluation/test")
                     if (test_p / "visualizations").exists():
                         mlflow.log_artifacts(str(test_p / "visualizations"), artifact_path="evaluation/test/visualizations")
 
-                    gen_c = test_payload.get("two_stage_cascade", {}).get("general", {})
+                    gen_c = test_payload.get("general", {})
                     for k, v in gen_c.items():
                         if isinstance(v, (int, float)):
                             mlflow.log_metric(f"test_{k}", float(v))
@@ -753,45 +755,38 @@ def train_stage2_main(
                 except Exception as t_err:
                     print(f"⚠️ Warning: Test cohort evaluation failed: {t_err}")
 
-            # 2. FULL DATASET BATCH INFERENCE & COHORT SPLIT METRICS (VAL & TRAIN)
-            target_batch_img_dir = native_img_dir if (native_img_dir and os.path.exists(native_img_dir)) else "data/raw/images"
-            if os.path.exists(target_batch_img_dir):
-                print(f"\n--> [2/3] Running Whole-Dataset Batch Inference ({target_batch_img_dir}) for TRAIN & VAL cohorts...")
+            # 2. VALIDATION COHORT EVALUATION (Stage 2 GT-ROI)
+            if os.path.exists(val_img_dir) and os.path.exists(val_npz_dir):
+                print(f"\n--> [2/2] Running Stage 2 GT-ROI Evaluation on VAL cohort ({val_img_dir})...")
                 try:
-                    from scripts.batch_inference import run_batch_inference
-                    run_batch_inference(
-                        images_dir=target_batch_img_dir,
-                        output_json=Path(light_predictions_dir) / "predictions_full.json",
-                        weights=save_path,
-                        stage1_weights=stage1_weights,
+                    val_payload, val_dir = run_stage2_roi_evaluation(
                         stage2_weights=save_path,
-                        stage2_size=target_size,
+                        img_dir=val_img_dir,
+                        npz_dir=val_npz_dir,
+                        output_dir="evaluation/stage2_roi",
+                        split_name="val",
+                        stage2_img_size=target_size,
                         margin_ratio=margin_ratio,
-                        device=str(device),
-                        batch_size=batch_size,
-                        img_size=640,
-                        dataset_dir="dataset",
-                        test_ids_file="dataset/test_image_ids.json",
-                        val_ids_file="dataset/val_image_ids.json",
-                        export_json=export_json_path,
-                        light_output_dir=light_predictions_dir,
-                        export_light=True,
-                        save_csv=True,
-                        compute_metrics=True,
-                        labels_dir="data/labels",
-                        metrics_splits=["val", "train"],
-                        metrics_output_dir="evaluation",
-                        log_to_mlflow=True,
+                        bottom_margin_ratio=bottom_margin_ratio,
+                        native_img_dir=native_img_dir,
+                        num_visualizations=5,
+                        device_str=str(device),
+                        log_to_mlflow=False,
                     )
-                    pred_full_json = Path(light_predictions_dir) / "predictions_full.json"
-                    if pred_full_json.exists():
-                        mlflow.log_artifact(str(pred_full_json), artifact_path="predictions_full")
-                    pred_full_csv = Path(light_predictions_dir) / "predictions_full.csv"
-                    if pred_full_csv.exists():
-                        mlflow.log_artifact(str(pred_full_csv), artifact_path="predictions_full")
-                    print(f"✅ Validation & Training cohorts evaluated and logged to MLflow!")
-                except Exception as b_err:
-                    print(f"⚠️ Warning: Full dataset batch inference failed: {b_err}")
+                    val_p = Path(val_dir)
+                    for rep_file in ["metrics_val.json", "summary_report_val.txt", "predictions_landmarks_val.csv"]:
+                        if (val_p / rep_file).exists():
+                            mlflow.log_artifact(str(val_p / rep_file), artifact_path="evaluation/val")
+                    if (val_p / "visualizations").exists():
+                        mlflow.log_artifacts(str(val_p / "visualizations"), artifact_path="evaluation/val/visualizations")
+
+                    gen_v = val_payload.get("general", {})
+                    for k, v in gen_v.items():
+                        if isinstance(v, (int, float)):
+                            mlflow.log_metric(f"val_{k}", float(v))
+                    print(f"✅ Validation cohort evaluated & logged to MLflow (Mean Norm: {gen_v.get('mean', 0.0):.2f}%, ≤5%: {gen_v.get('share_within_5pct', 0.0):.2f}%)")
+                except Exception as v_err:
+                    print(f"⚠️ Warning: Validation cohort evaluation failed: {v_err}")
 
     return {
         "best_epoch": best_epoch,
@@ -810,8 +805,11 @@ def main():
     parser.add_argument("--target-size", type=int, default=448, choices=[448, 672], help="ROI crop resolution (448 or 672)")
     parser.add_argument("--sigma", type=float, default=2.5, help="Heatmap Gaussian sigma (default: 2.5 for sub-millimeter precision)")
     parser.add_argument("--margin-ratio", type=float, default=0.18, help="ROI margin ratio")
+    parser.add_argument("--bottom-margin-ratio", type=float, default=0.28, help="Bottom margin ratio for C4 vertebra (default: 0.28)")
     parser.add_argument("--stage1-weights", type=str, default="artifacts/stage1_best.pth", help="Stage 1 weights for warm-start")
-    parser.add_argument("--no-warmstart", action="store_true", help="Do not warmstart from Stage 1; use ImageNet pretrained")
+    parser.add_argument("--warmstart", dest="warmstart", action="store_true", help="Warmstart Stage 2 from Stage 1 weights")
+    parser.add_argument("--no-warmstart", dest="warmstart", action="store_false", help="Train Stage 2 directly from ImageNet pretrained backbone")
+    parser.set_defaults(warmstart=False)
     parser.add_argument("--save-path", type=str, default="artifacts/stage2_best.pth", help="Checkpoint save destination")
     parser.add_argument(
         "--save-optimizer",
@@ -849,8 +847,9 @@ def main():
         target_size=args.target_size,
         sigma=args.sigma,
         margin_ratio=args.margin_ratio,
+        bottom_margin_ratio=args.bottom_margin_ratio,
         stage1_weights=args.stage1_weights,
-        warmstart_from_stage1=not args.no_warmstart,
+        warmstart_from_stage1=args.warmstart,
         save_path=args.save_path,
         save_optimizer=args.save_optimizer,
         patience=args.patience,

@@ -34,9 +34,10 @@ class CVMROIDataset(Dataset):
         dimensions_map: Optional[Dict[str, Any]] = None,
         transform: Optional[Callable] = None,
         margin_ratio: float = 0.18,
+        bottom_margin_ratio: Optional[float] = 0.28,
         min_size: int = 180,
         target_size: int = 448,
-        sigma: float = 4.0,
+        sigma: float = 2.5,
         jitter: Optional[Dict[str, float]] = None,
         is_train: bool = True,
         canvas_size: int = 640,
@@ -48,6 +49,7 @@ class CVMROIDataset(Dataset):
         self.dimensions_map = dimensions_map if dimensions_map is not None else get_image_dimensions_map()
         self.transform = transform
         self.margin_ratio = margin_ratio
+        self.bottom_margin_ratio = bottom_margin_ratio
         self.min_size = min_size
         self.target_size = target_size
         self.sigma = sigma
@@ -67,12 +69,13 @@ class CVMROIDataset(Dataset):
         data = np.load(npz_path)
         gt_coords_canvas = data["coords"].astype(np.float32)  # [13, 2]
 
-        # 2. Compute isotropic square bounding box
+        # 2. Compute isotropic square bounding box with bottom headroom for C4
         bbox = compute_roi_bbox(
             coords=gt_coords_canvas,
             img_w=self.canvas_size,
             img_h=self.canvas_size,
             margin_ratio=self.margin_ratio,
+            bottom_margin_ratio=self.bottom_margin_ratio,
             min_size=self.min_size,
             jitter=self.jitter,
         )
@@ -232,8 +235,9 @@ def get_roi_dataloaders(
     val_npz_dir: str = "dataset/val/labels",
     batch_size: int = 8,
     target_size: int = 448,
-    sigma: float = 4.0,
+    sigma: float = 2.5,
     margin_ratio: float = 0.18,
+    bottom_margin_ratio: Optional[float] = 0.28,
     jitter: Optional[Dict[str, float]] = None,
     num_workers: int = 4,
     use_balanced_sampling: bool = True,
@@ -267,6 +271,7 @@ def get_roi_dataloaders(
         native_img_dir=native_img_dir,
         transform=train_transform,
         margin_ratio=margin_ratio,
+        bottom_margin_ratio=bottom_margin_ratio,
         target_size=target_size,
         sigma=sigma,
         jitter=default_jitter,
@@ -280,6 +285,7 @@ def get_roi_dataloaders(
         native_img_dir=native_img_dir,
         transform=val_transform,
         margin_ratio=margin_ratio,
+        bottom_margin_ratio=bottom_margin_ratio,
         target_size=target_size,
         sigma=sigma,
         jitter=None,
@@ -322,7 +328,8 @@ def get_test_roi_dataloader(
     batch_size: int = 8,
     target_size: int = 448,
     margin_ratio: float = 0.18,
-    sigma: float = 4.0,
+    bottom_margin_ratio: Optional[float] = 0.28,
+    sigma: float = 2.5,
     native_img_dir: Optional[str] = None,
     num_workers: int = 0,
 ) -> DataLoader:
@@ -341,6 +348,7 @@ def get_test_roi_dataloader(
         native_img_dir=native_img_dir,
         transform=test_transform,
         margin_ratio=margin_ratio,
+        bottom_margin_ratio=bottom_margin_ratio,
         target_size=target_size,
         sigma=sigma,
         jitter=None,
