@@ -353,7 +353,7 @@ def train_stage2_main(
     lambda_graph: float = 1.0,
     lambda_morph: float = 0.0,
     stage1_weights: str = "artifacts/stage1_best.pth",
-    warmstart_from_stage1: bool = False,
+    warmstart_from_stage1: bool = True,
     save_path: str = "artifacts/stage2_best.pth",
     save_optimizer: bool = True,
     train_img_dir: str = "dataset/train/images",
@@ -387,8 +387,22 @@ def train_stage2_main(
     # 1. Initialize Model
     will_warmstart = warmstart_from_stage1 and os.path.exists(stage1_weights)
     if warmstart_from_stage1 and not will_warmstart:
-        print(f"⚠️  WARNING: Warmstart requested from '{stage1_weights}', but file does not exist!")
-        print("--> Falling back to ImageNet pretrained Swin-Base backbone.")
+        run_id_for_stage1 = os.getenv("STAGE1_RUN_ID", "2d4d452398b14c688f51ac4431d40698")
+        print(f"--> Stage 1 weights not found locally at '{stage1_weights}'. Automatically downloading from MLflow run '{run_id_for_stage1}'...")
+        try:
+            from scripts.download_checkpoint import download_checkpoint_from_mlflow
+            download_checkpoint_from_mlflow(
+                run_id=run_id_for_stage1,
+                artifact_path="checkpoints/best.pth",
+                dest_path=stage1_weights,
+                tracking_uri=tracking_uri or os.getenv("MLFLOW_TRACKING_URI"),
+                username=tracking_username or os.getenv("MLFLOW_TRACKING_USERNAME"),
+                password=tracking_password or os.getenv("MLFLOW_TRACKING_PASSWORD"),
+            )
+            will_warmstart = os.path.exists(stage1_weights)
+        except Exception as dl_err:
+            print(f"⚠️  WARNING: Failed to auto-download Stage 1 weights from MLflow: {dl_err}")
+            print("--> Falling back to ImageNet pretrained Swin-Base backbone.")
 
     model = CephalometricSwinGCN(
         num_landmarks=NUM_LANDMARKS,
@@ -809,7 +823,7 @@ def main():
     parser.add_argument("--stage1-weights", type=str, default="artifacts/stage1_best.pth", help="Stage 1 weights for warm-start")
     parser.add_argument("--warmstart", dest="warmstart", action="store_true", help="Warmstart Stage 2 from Stage 1 weights")
     parser.add_argument("--no-warmstart", dest="warmstart", action="store_false", help="Train Stage 2 directly from ImageNet pretrained backbone")
-    parser.set_defaults(warmstart=False)
+    parser.set_defaults(warmstart=True)
     parser.add_argument("--save-path", type=str, default="artifacts/stage2_best.pth", help="Checkpoint save destination")
     parser.add_argument(
         "--save-optimizer",

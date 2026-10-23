@@ -683,10 +683,10 @@ def main():
         else:
             print("\n[1-4/6] Skipping steps 1 to 4 (--train-only flag set).")
 
-        # Step 5: Stage 2 Fine Model Training on Ground-Truth ROIs (Stage 1 Disabled)
+        # Step 5: Stage 2 Fine Model Training on Ground-Truth ROIs (Warmstarted from Stage 1)
         print("\n" + "=" * 50)
         print("🌟 STAGE 2 FINE ROI MODEL TRAINING (GROUND-TRUTH ROIs)")
-        print("   Stage 1 is disabled. Training Swin refiner directly on GT vertebrae ROIs.")
+        print("   Stage 1 training is bypassed. Stage 2 warmstarts directly from Stage 1 cephalometric checkpoint.")
         print("=" * 50)
 
         # Determine consistent native image directory for Stage 2 training & evaluation
@@ -695,6 +695,24 @@ def main():
         )
 
         effective_epochs = args.stage2_epochs if args.stage2_epochs else args.epochs
+
+        # Ensure Stage 1 checkpoint is present locally for Stage 2 warmstart
+        stage1_weights = args.stage1_weights or "artifacts/stage1_best.pth"
+        if not os.path.exists(stage1_weights):
+            stage1_run_id = getattr(args, "stage1_run_id", None) or os.getenv("STAGE1_RUN_ID", "2d4d452398b14c688f51ac4431d40698")
+            print(f"\n--> Stage 1 weights not found locally at '{stage1_weights}'. Automatically downloading from MLflow run '{stage1_run_id}'...")
+            try:
+                from scripts.download_checkpoint import download_checkpoint_from_mlflow
+                download_checkpoint_from_mlflow(
+                    run_id=stage1_run_id,
+                    artifact_path="checkpoints/best.pth",
+                    dest_path=stage1_weights,
+                    tracking_uri=args.mlflow_tracking_uri,
+                    username=args.mlflow_username,
+                    password=args.mlflow_password,
+                )
+            except Exception as dl_err:
+                print(f"⚠️ Warning: Auto-download of Stage 1 weights from MLflow failed: {dl_err}")
 
         if not args.skip_stage2 and not os.path.exists(args.stage2_weights):
             print(f"\n[5/6] Executing Stage 2 Fine Model Training ({effective_epochs} epochs, {args.stage2_size}x{args.stage2_size}, sigma={args.stage2_sigma}, bottom_margin={args.bottom_margin_ratio})...")
@@ -707,7 +725,8 @@ def main():
                 sigma=args.stage2_sigma,
                 margin_ratio=args.margin_ratio,
                 bottom_margin_ratio=args.bottom_margin_ratio,
-                warmstart_from_stage1=False,
+                stage1_weights=stage1_weights,
+                warmstart_from_stage1=True,
                 save_path=args.stage2_weights,
                 train_img_dir="dataset/train/images",
                 train_npz_dir="dataset/train/labels",
