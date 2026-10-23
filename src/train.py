@@ -584,6 +584,8 @@ def validate_epoch(
             "share_within_2_5pct": 0.0,
             "share_within_7_5pct": 0.0,
             "share_within_10pct": 0.0,
+            "share_within_11_5pct": 0.0,
+            "share_within_15pct": 0.0,
             "rmse_norm_err": 0.0,
         }
 
@@ -598,6 +600,8 @@ def validate_epoch(
         "share_within_2_5pct": norm_summary["share_within_2_5pct"],
         "share_within_7_5pct": norm_summary["share_within_7_5pct"],
         "share_within_10pct": norm_summary["share_within_10pct"],
+        "share_within_11_5pct": norm_summary.get("share_within_11_5pct", 0.0),
+        "share_within_15pct": norm_summary.get("share_within_15pct", 0.0),
         "rmse_norm_err": norm_summary["rmse_norm_err"],
         "mae": val_mae,
         "rmse": val_rmse,
