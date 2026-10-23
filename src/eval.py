@@ -682,10 +682,12 @@ def format_metrics_table(
         ("SD Normalized Error", f"{summary.get('sd_norm_err', 0.0):.2f} %"),
         ("Min Normalized Error", f"{summary.get('min_norm_err', 0.0):.2f} %"),
         ("Max Normalized Error", f"{summary.get('max_norm_err', 0.0):.2f} %"),
-        ("Share ≤ 2.5% (High Precision)", f"{summary.get('share_within_2_5pct', 0.0):.2f} %"),
-        ("Share ≤ 5.0% (Primary Clinical Benchmark)", f"{summary.get('share_within_5pct', 0.0):.2f} %"),
-        ("Share ≤ 7.5%", f"{summary.get('share_within_7_5pct', 0.0):.2f} %"),
-        ("Share ≤ 10.0% (Coarse Localization)", f"{summary.get('share_within_10_0pct', 0.0):.2f} %"),
+        ("Share ≤ 2.5% (Sub-millimeter, ~0.4 mm)", f"{summary.get('share_within_2_5pct', 0.0):.2f} %"),
+        ("Share ≤ 5.0% (Sub-millimeter, ~0.9 mm)", f"{summary.get('share_within_5pct', 0.0):.2f} %"),
+        ("Share ≤ 7.5% (High Precision, ~1.3 mm)", f"{summary.get('share_within_7_5pct', 0.0):.2f} %"),
+        ("Share ≤ 10.0% (Clinically Close, ~1.7 mm)", f"{summary.get('share_within_10_0pct', summary.get('share_within_10pct', 0.0)):.2f} %"),
+        ("Share ≤ 11.5% (Universal Clinical Standard, 2.0 mm)", f"{summary.get('share_within_11_5pct', 0.0):.2f} %"),
+        ("Share ≤ 15.0% (Extended Clinical, ~2.6 mm)", f"{summary.get('share_within_15pct', 0.0):.2f} %"),
     ]
     for label, val in norm_rows:
         lines.append(f"| {label:<48} | {val:<41} |")

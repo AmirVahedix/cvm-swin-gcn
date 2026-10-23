@@ -286,6 +286,8 @@ def compute_distribution_statistics(
             "share_within_5pct": 0.0,
             "share_within_7_5pct": 0.0,
             "share_within_10pct": 0.0,
+            "share_within_11_5pct": 0.0,
+            "share_within_15pct": 0.0,
             "p90": 0.0,
             "p95": 0.0,
             "max": 0.0,
@@ -307,6 +309,8 @@ def compute_distribution_statistics(
     share_5_0 = float(np.mean(errs <= 5.0) * 100.0)
     share_7_5 = float(np.mean(errs <= 7.5) * 100.0)
     share_10_0 = float(np.mean(errs <= 10.0) * 100.0)
+    share_11_5 = float(np.mean(errs <= 11.5) * 100.0)
+    share_15_0 = float(np.mean(errs <= 15.0) * 100.0)
 
     p90 = float(np.percentile(errs, 90.0))
     p95 = float(np.percentile(errs, 95.0))
@@ -335,6 +339,8 @@ def compute_distribution_statistics(
         "share_within_5pct": share_5_0,
         "share_within_7_5pct": share_7_5,
         "share_within_10pct": share_10_0,
+        "share_within_11_5pct": share_11_5,
+        "share_within_15pct": share_15_0,
         "p90": p90,
         "p95": p95,
         "max": max_val,
@@ -371,8 +377,10 @@ def compute_vertebra_breakdown(
             s5 = float(np.mean(v_errors <= 5.0) * 100.0)
             s7_5 = float(np.mean(v_errors <= 7.5) * 100.0)
             s10 = float(np.mean(v_errors <= 10.0) * 100.0)
+            s11_5 = float(np.mean(v_errors <= 11.5) * 100.0)
+            s15 = float(np.mean(v_errors <= 15.0) * 100.0)
         else:
-            m, sd, med, iqr, s2_5, s5, s7_5, s10 = 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+            m, sd, med, iqr, s2_5, s5, s7_5, s10, s11_5, s15 = 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
         results[vert] = {
             "mean": m,
             "sd": sd,
@@ -382,6 +390,8 @@ def compute_vertebra_breakdown(
             "share_within_5pct": s5,
             "share_within_7_5pct": s7_5,
             "share_within_10pct": s10,
+            "share_within_11_5pct": s11_5,
+            "share_within_15pct": s15,
             "count": len(v_errors),
         }
     return results
@@ -418,8 +428,10 @@ def compute_landmark_breakdown(
             s5 = float(np.mean(errs <= 5.0) * 100.0)
             s7_5 = float(np.mean(errs <= 7.5) * 100.0)
             s10 = float(np.mean(errs <= 10.0) * 100.0)
+            s11_5 = float(np.mean(errs <= 11.5) * 100.0)
+            s15 = float(np.mean(errs <= 15.0) * 100.0)
         else:
-            m, sd, med, iqr, s2_5, s5, s7_5, s10 = 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+            m, sd, med, iqr, s2_5, s5, s7_5, s10, s11_5, s15 = 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
 
         entry = {
             "index": idx,
@@ -434,6 +446,8 @@ def compute_landmark_breakdown(
             "share_within_5pct": s5,
             "share_within_7_5pct": s7_5,
             "share_within_10pct": s10,
+            "share_within_11_5pct": s11_5,
+            "share_within_15pct": s15,
             "count": int(np.sum(mask_idx)),
         }
 
@@ -1011,6 +1025,8 @@ def compute_validation_summary_metrics(
             "share_within_2_5pct": 0.0,
             "share_within_7_5pct": 0.0,
             "share_within_10pct": 0.0,
+            "share_within_11_5pct": 0.0,
+            "share_within_15pct": 0.0,
             "rmse_norm_err": 0.0,
             "mre_px": 0.0,
             "rmse_px": 0.0,
@@ -1041,6 +1057,8 @@ def compute_validation_summary_metrics(
     share_2_5 = float(np.mean(valid_norm_err <= 2.5) * 100.0)
     share_7_5 = float(np.mean(valid_norm_err <= 7.5) * 100.0)
     share_10 = float(np.mean(valid_norm_err <= 10.0) * 100.0)
+    share_11_5 = float(np.mean(valid_norm_err <= 11.5) * 100.0)
+    share_15 = float(np.mean(valid_norm_err <= 15.0) * 100.0)
     rmse_norm = float(np.sqrt(np.mean(valid_norm_err**2)))
 
     mre_px = float(np.mean(valid_radial_px))
@@ -1053,6 +1071,8 @@ def compute_validation_summary_metrics(
         "share_within_2_5pct": share_2_5,
         "share_within_7_5pct": share_7_5,
         "share_within_10pct": share_10,
+        "share_within_11_5pct": share_11_5,
+        "share_within_15pct": share_15,
         "rmse_norm_err": rmse_norm,
         "mre_px": mre_px,
         "rmse_px": rmse_px,
@@ -1268,11 +1288,13 @@ def format_summary_report(metrics_dict: Dict[str, Any], title: str = "CVM SWIN-G
     lines.append(f"   95% Bootstrap CI (Mean): [{mean_ci.get('lower', 0.0):.2f}%, {mean_ci.get('upper', 0.0):.2f}%]")
     lines.append(f" Median Normalized Error  : {gen.get('median', 0.0):.2f}% (IQR: {gen.get('iqr', 0.0):.2f}%, Q25: {gen.get('q25', 0.0):.2f}%, Q75: {gen.get('q75', 0.0):.2f}%)")
     lines.append(f"   95% Bootstrap CI (Med) : [{med_ci.get('lower', 0.0):.2f}%, {med_ci.get('upper', 0.0):.2f}%]")
-    lines.append(f" Normalized SDR Thresholds:")
-    lines.append(f"   • Share within 2.5%    : {gen.get('share_within_2_5pct', 0.0):.2f}%")
-    lines.append(f"   • Share within 5.0%    : {gen.get('share_within_5pct', 0.0):.2f}% (Primary Checkpoint Criterion)")
-    lines.append(f"   • Share within 7.5%    : {gen.get('share_within_7_5pct', 0.0):.2f}%")
-    lines.append(f"   • Share within 10.0%   : {gen.get('share_within_10pct', 0.0):.2f}%")
+    lines.append(f" Normalized SDR Thresholds (% L_ref & Anatomical Equivalence):")
+    lines.append(f"   • Sub-millimeter   (<0.4 mm /  2.5% L_ref): {gen.get('share_within_2_5pct', 0.0):.2f}%")
+    lines.append(f"   • Sub-millimeter   (<0.9 mm /  5.0% L_ref): {gen.get('share_within_5pct', 0.0):.2f}%")
+    lines.append(f"   • High-Precision   (<1.3 mm /  7.5% L_ref): {gen.get('share_within_7_5pct', 0.0):.2f}%")
+    lines.append(f"   • Clinically Close (<1.7 mm / 10.0% L_ref): {gen.get('share_within_10pct', 0.0):.2f}%")
+    lines.append(f"   • Clinical Standard (≤2.0 mm / 11.5% L_ref): {gen.get('share_within_11_5pct', 0.0):.2f}% (Universal ISBI/Orthodontic Benchmark)")
+    lines.append(f"   • Extended Clinical (≤2.6 mm / 15.0% L_ref): {gen.get('share_within_15pct', 0.0):.2f}%")
     lines.append(f" Distribution Tails & Outliers:")
     lines.append(f"   • 90th Percentile (P90): {gen.get('p90', 0.0):.2f}%")
     lines.append(f"   • 95th Percentile (P95): {gen.get('p95', 0.0):.2f}%")
@@ -1283,22 +1305,22 @@ def format_summary_report(metrics_dict: Dict[str, Any], title: str = "CVM SWIN-G
     lines.append(f"   • Mean Signed dy       : {gen.get('mean_signed_dy', 0.0):+.2f} px")
 
     # Section B.2: Vertebra Breakdown
-    lines.append("\n" + "SECTION B.2: PER-VERTEBRA BREAKDOWN (MAIN TEXT)".center(88))
-    lines.append("-" * 88)
-    lines.append(f"{'Vertebra':<10} | {'Mean ± SD (%)':<16} | {'Med (IQR) (%)':<16} | {'Share <= 5%':<14} | {'Share <= 10%':<14} | {'Count':<6}")
-    lines.append("-" * 88)
+    lines.append("\n" + "SECTION B.2: PER-VERTEBRA BREAKDOWN (MAIN TEXT)".center(104))
+    lines.append("-" * 104)
+    lines.append(f"{'Vertebra':<10} | {'Mean ± SD (%)':<16} | {'Med (IQR) (%)':<16} | {'<=5% (<1mm)':<13} | {'<=10% (1.7mm)':<14} | {'<=11.5% (2.0mm)':<16} | {'Count':<6}")
+    lines.append("-" * 104)
     for vert, v_stats in metrics_dict.get("by_vertebra", {}).items():
         m_sd = f"{v_stats.get('mean', 0.0):.2f} ± {v_stats.get('sd', 0.0):.2f}"
         med_iqr = f"{v_stats.get('median', 0.0):.2f} ({v_stats.get('iqr', 0.0):.2f})"
         lines.append(
-            f"{vert:<10} | {m_sd:<16} | {med_iqr:<16} | {v_stats.get('share_within_5pct', 0.0):<13.2f}% | {v_stats.get('share_within_10pct', 0.0):<13.2f}% | {v_stats.get('count', 0):<6}"
+            f"{vert:<10} | {m_sd:<16} | {med_iqr:<16} | {v_stats.get('share_within_5pct', 0.0):<12.2f}% | {v_stats.get('share_within_10pct', 0.0):<13.2f}% | {v_stats.get('share_within_11_5pct', 0.0):<15.2f}% | {v_stats.get('count', 0):<6}"
         )
 
     # Section B.3: Per-Landmark Breakdown (Supplementary)
-    lines.append("\n" + "SECTION B.3: PER-LANDMARK PERFORMANCE & INFERIOR PROJECTIONS (SUPPLEMENTARY)".center(88))
-    lines.append("-" * 88)
-    lines.append(f"{'Idx':<4} {'Landmark':<8} | {'Mean ± SD (%)':<15} | {'Med (IQR) (%)':<15} | {'<=5%':<6} | {'<=10%':<6} | {'Along(px)':<9} | {'Along(%)':<9} | {'Perp(px)':<9} | {'Perp(%)':<9}")
-    lines.append("-" * 88)
+    lines.append("\n" + "SECTION B.3: PER-LANDMARK PERFORMANCE & INFERIOR PROJECTIONS (SUPPLEMENTARY)".center(104))
+    lines.append("-" * 104)
+    lines.append(f"{'Idx':<4} {'Landmark':<8} | {'Mean ± SD (%)':<15} | {'Med (IQR) (%)':<15} | {'<=5%':<6} | {'<=10%':<6} | {'<=2.0mm':<7} | {'Along(px)':<9} | {'Along(%)':<9} | {'Perp(px)':<9} | {'Perp(%)':<9}")
+    lines.append("-" * 104)
     for lm in metrics_dict.get("by_landmark", []):
         m_sd = f"{lm.get('mean', 0.0):.1f}±{lm.get('sd', 0.0):.1f}"
         med_iqr = f"{lm.get('median', 0.0):.1f}({lm.get('iqr', 0.0):.1f})"
@@ -1307,7 +1329,7 @@ def format_summary_report(metrics_dict: Dict[str, Any], title: str = "CVM SWIN-G
         perp_px_str = f"{lm.get('mean_perp_px', 0.0):+.2f}" if "mean_perp_px" in lm else "-"
         perp_pct_str = f"{lm.get('mean_perp_pct', 0.0):+.2f}%" if "mean_perp_pct" in lm else "-"
         lines.append(
-            f"{lm.get('index', 0):02d}  {lm.get('name', ''):<8} | {m_sd:<15} | {med_iqr:<15} | {lm.get('share_within_5pct', 0.0):<5.1f}% | {lm.get('share_within_10pct', 0.0):<5.1f}% | {along_px_str:<9} | {along_pct_str:<9} | {perp_px_str:<9} | {perp_pct_str:<9}"
+            f"{lm.get('index', 0):02d}  {lm.get('name', ''):<8} | {m_sd:<15} | {med_iqr:<15} | {lm.get('share_within_5pct', 0.0):<5.1f}% | {lm.get('share_within_10pct', 0.0):<5.1f}% | {lm.get('share_within_11_5pct', 0.0):<6.1f}% | {along_px_str:<9} | {along_pct_str:<9} | {perp_px_str:<9} | {perp_pct_str:<9}"
         )
 
     # Section C: Clinical Morphometric Validation

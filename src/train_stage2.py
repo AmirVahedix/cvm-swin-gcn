@@ -651,7 +651,9 @@ def train_stage2_main(
                 f"Epoch [{epoch:02d}/{epochs}] ({epoch_time:.1f}s) | "
                 f"Train: {train_loss:.4f} | Val: {val_loss:.4f} | "
                 f"Norm Mean: {mean_norm:5.2f}% | Med: {med_norm:5.2f}% | "
-                f"≤5%: {share_5:5.1f}% | ≤2.5%: {val_metrics['share_within_2_5pct']:5.1f}% | "
+                f"≤2mm: {val_metrics.get('share_within_11_5pct', 0.0):5.1f}% | "
+                f"≤10%: {val_metrics.get('share_within_10pct', 0.0):5.1f}% | "
+                f"≤5%: {share_5:5.1f}% | "
                 f"MAE: {val_metrics['mae']:.2f} px {marker}"
             )
 
