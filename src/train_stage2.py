@@ -663,12 +663,25 @@ def train_stage2_main(
                 "patience_counter": patience_counter,
             }
             # Log per-landmark validation normalized errors
-            for lm_name, lm_data in val_metrics.get("per_landmark_metrics", {}).items():
-                if isinstance(lm_data, dict):
-                    if "norm_err_mean" in lm_data:
-                        epoch_metrics_to_log[f"val_err_{lm_name}"] = float(lm_data["norm_err_mean"])
-                    if "share_within_5pct" in lm_data:
-                        epoch_metrics_to_log[f"val_share_5pct_{lm_name}"] = float(lm_data["share_within_5pct"])
+            per_lm = val_metrics.get("per_landmark_metrics") or []
+            if isinstance(per_lm, list):
+                for item in per_lm:
+                    if isinstance(item, dict):
+                        lm_name = item.get("name")
+                        if lm_name:
+                            err_val = item.get("mean_norm_err", item.get("norm_err_mean"))
+                            if err_val is not None:
+                                epoch_metrics_to_log[f"val_err_{lm_name}"] = float(err_val)
+                            if "share_within_5pct" in item:
+                                epoch_metrics_to_log[f"val_share_5pct_{lm_name}"] = float(item["share_within_5pct"])
+            elif isinstance(per_lm, dict):
+                for lm_name, lm_data in per_lm.items():
+                    if isinstance(lm_data, dict):
+                        err_val = lm_data.get("mean_norm_err", lm_data.get("norm_err_mean"))
+                        if err_val is not None:
+                            epoch_metrics_to_log[f"val_err_{lm_name}"] = float(err_val)
+                        if "share_within_5pct" in lm_data:
+                            epoch_metrics_to_log[f"val_share_5pct_{lm_name}"] = float(lm_data["share_within_5pct"])
 
             mlflow.log_metrics(epoch_metrics_to_log, step=epoch)
 
