@@ -143,7 +143,7 @@ def predict_landmarks_two_stage(
     device: torch.device,
     stage1_img_size: int = 640,
     stage2_img_size: int = 448,
-    margin_ratio: float = 0.18,
+    margin_ratio: float = 0.22,
     use_anatomical_prior: bool = True,
 ) -> Tuple[List[Tuple[float, float]], List[Tuple[float, float]]]:
     from src.utils.roi_utils import (
@@ -243,7 +243,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--stage2-weights", type=str, default=None, help="Optional Stage 2 fine refiner weights for Two-Stage inference"
     )
     parser.add_argument("--stage2-size", type=int, default=448, help="Stage 2 ROI resolution (default: 448)")
-    parser.add_argument("--margin-ratio", type=float, default=0.18, help="ROI margin ratio (default: 0.18)")
+    parser.add_argument("--margin-ratio", type=float, default=0.22, help="ROI margin ratio (default: 0.22)")
     parser.add_argument(
         "--no-anatomical-prior",
         dest="use_anatomical_prior",

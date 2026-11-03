@@ -548,8 +548,8 @@ def parse_args():
     parser.add_argument(
         "--margin-ratio",
         type=float,
-        default=0.18,
-        help="Vertebra ROI margin ratio (default: 0.18)",
+        default=0.22,
+        help="Vertebra ROI margin ratio (default: 0.22)",
     )
     parser.add_argument(
         "--no-anatomical-prior",
@@ -574,7 +574,7 @@ def run_batch_inference(
     stage1_weights: Optional[Union[str, Path]] = None,
     stage2_weights: Optional[Union[str, Path]] = None,
     stage2_size: int = 448,
-    margin_ratio: float = 0.18,
+    margin_ratio: float = 0.22,
     bottom_margin_ratio: Optional[float] = 0.28,
     use_peaks: bool = True,
     stage1_use_peaks: bool = False,

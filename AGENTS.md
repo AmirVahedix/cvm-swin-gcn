@@ -63,7 +63,7 @@ The repository supports two operational paradigms: **Single-Stage Baseline** and
 To achieve sub-millimeter clinical precision on high-resolution radiographs, the two-stage cascade isolates cervical vertebrae from background cranial structures:
 1. **Stage 1 (Coarse Global Detector)**: Operates on full $640 \times 640$ radiographs to localize all 13 landmarks and establish the cervical spine ROI.
 2. **Isotropic Square ROI Extraction (`src/utils/roi_utils.py`)**:
-   - Computes an isotropic, strictly square bounding box $[u_1, v_1, u_2, v_2, D]$ bounding C2–C4 with configurable margin ratio (`margin_ratio=0.18`, minimum size $180\text{ px}$).
+   - Computes an isotropic, strictly square bounding box $[u_1, v_1, u_2, v_2, D]$ bounding C2–C4 with configurable margin ratio (`margin_ratio=0.22`, minimum size $180\text{ px}$).
    - Employs zero/reflection padding (`crop_roi_with_padding`) to guarantee no aspect ratio distortion or coordinate clipping.
    - Provides coordinate forward mapping ($[0, 1] \to \text{ROI} \to [0, 1]$) and exact inverse half-pixel re-projection back to full image canvas space (`inverse_transform_coords`).
 3. **Anatomical Vertebra Height Prior**:
@@ -103,8 +103,8 @@ To overcome heterogeneous localization difficulty across cervical landmarks, the
   - `C3_IC` (Index 6):  **2.2×** multiplier (vital diagnostic concavity deciding CS2/CS3/CS4)
   - `C2_IC` (Index 1):  **2.2×** multiplier (vital diagnostic concavity deciding CS1/CS2)
 - **Tier 2 Boosted (Challenging Corners)**:
-  - `C4_PS` (Index 8): **1.8×** multiplier
-  - `C3_PS` (Index 3): **1.8×** multiplier
+  - `C4_PS` (Index 8): **2.2×** multiplier (boosted for posterior-superior facet overlap)
+  - `C3_PS` (Index 3): **2.2×** multiplier (boosted for posterior-superior facet overlap)
   - `C3_AS` (Index 4): **1.6×** multiplier
   - `C2_AI` (Index 2): **1.5×** multiplier
 - **Baseline (Well-Converged Landmarks)**:

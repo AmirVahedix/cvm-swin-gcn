@@ -231,8 +231,8 @@ def main():
     parser.add_argument(
         "--margin-ratio",
         type=float,
-        default=0.18,
-        help="ROI margin ratio (default: 0.18).",
+        default=0.22,
+        help="ROI margin ratio (default: 0.22).",
     )
     parser.add_argument(
         "--refine-2pass",

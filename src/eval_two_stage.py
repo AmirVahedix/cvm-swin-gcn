@@ -237,7 +237,7 @@ def run_two_stage_evaluation(
     run_name: Optional[str] = None,
     stage1_img_size: int = 640,
     stage2_img_size: int = 448,
-    margin_ratio: float = 0.18,
+    margin_ratio: float = 0.22,
     bottom_margin_ratio: Optional[float] = 0.28,
     use_peaks: bool = True,
     stage1_use_peaks: bool = False,
@@ -994,7 +994,7 @@ def main():
     parser.add_argument("--output-dir", type=str, default="evaluation/two_stage", help="Output directory")
     parser.add_argument("--stage1-size", type=int, default=640, help="Stage 1 input resolution")
     parser.add_argument("--stage2-size", type=int, default=448, help="Stage 2 input resolution")
-    parser.add_argument("--margin-ratio", type=float, default=0.18, help="ROI margin ratio")
+    parser.add_argument("--margin-ratio", type=float, default=0.22, help="ROI margin ratio (default: 0.22)")
     parser.add_argument("--bottom-margin-ratio", type=float, default=0.28, help="ROI bottom (inferior) margin ratio")
     parser.add_argument(
         "--use-peaks",

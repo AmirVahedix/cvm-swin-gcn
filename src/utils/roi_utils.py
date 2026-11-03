@@ -196,7 +196,7 @@ def compute_roi_bbox(
     coords: Optional[Union[np.ndarray, torch.Tensor]],
     img_w: int,
     img_h: int,
-    margin_ratio: float = 0.18,
+    margin_ratio: float = 0.22,
     bottom_margin_ratio: Optional[float] = None,
     extra_bottom_margin: float = 0.0,
     min_size: int = 180,
@@ -214,7 +214,7 @@ def compute_roi_bbox(
         coords: Landmark coordinates [N, 2] in normalized scale [0, 1] or pixel scale.
         img_w: Width of the image canvas.
         img_h: Height of the image canvas.
-        margin_ratio: Padding ratio added to top/left/right sides (default 0.18).
+        margin_ratio: Padding ratio added to top/left/right sides (default 0.22).
         bottom_margin_ratio: Optional padding ratio for bottom (inferior) border (e.g. 0.28).
         extra_bottom_margin: Extra relative margin added to bottom if bottom_margin_ratio is None.
         min_size: Minimum square dimension D in pixels.

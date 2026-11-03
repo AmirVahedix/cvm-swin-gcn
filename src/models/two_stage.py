@@ -31,7 +31,7 @@ class TwoStageCephalometricSwinGCN(nn.Module):
         num_landmarks: int = NUM_LANDMARKS,
         stage1_img_size: int = 640,
         stage2_img_size: int = 448,
-        margin_ratio: float = 0.18,
+        margin_ratio: float = 0.22,
         min_size: int = 180,
         stage1_backbone: str = "swin_base_patch4_window7_224",
         stage2_backbone: str = "swin_base_patch4_window7_224",

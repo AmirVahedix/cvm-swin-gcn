@@ -147,9 +147,9 @@ def get_landmark_weights(device: torch.device) -> torch.Tensor:
     weights[6]  = 2.2   # C3_IC (crucial C3 concavity, 10.4% error, decides CS2/CS3/CS4)
     weights[1]  = 2.2   # C2_IC (crucial C2 concavity, decides CS1/CS2)
     
-    # Tier 2: Challenging corners
-    weights[8]  = 1.8   # C4_PS (10.6% error, only ~10% <=5%)
-    weights[3]  = 1.8   # C3_PS (11.2% error, only ~16% <=5%)
+    # Tier 2: Challenging corners (boosted for posterior-superior occlusion)
+    weights[8]  = 2.2   # C4_PS (10.6% error, boosted for posterior-superior facet overlap)
+    weights[3]  = 2.2   # C3_PS (11.2% error, boosted for posterior-superior facet overlap)
     weights[4]  = 1.6   # C3_AS (8.6% error)
     weights[2]  = 1.5   # C2_AI (6.6% error)
     
