@@ -133,8 +133,10 @@ def main():
     )
     parser.add_argument(
         "--artifact",
+        "--artifact-path",
         type=str,
         default="checkpoints/best.pth",
+        dest="artifact",
         help="Artifact path inside the run (default: checkpoints/best.pth)",
     )
     parser.add_argument(
