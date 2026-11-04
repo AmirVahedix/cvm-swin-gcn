@@ -714,9 +714,10 @@ def train_stage2_main(
         history_path = Path(save_path).parent / "stage2_training_history.json"
         with open(history_path, "w", encoding="utf-8") as f:
             json.dump(history, f, indent=2)
-        mlflow.log_artifact(str(history_path))
-        if os.path.exists(save_path):
-            mlflow.log_artifact(save_path)
+        try:
+            mlflow.log_artifact(str(history_path))
+        except Exception as h_err:
+            print(f"⚠️ Warning: Could not log training history to MLflow: {h_err}")
 
         # --- Comprehensive Post-Training Evaluation Across All 3 Cohorts (Test, Val, Train) ---
         if not skip_eval and os.path.exists(save_path):
@@ -801,6 +802,18 @@ def train_stage2_main(
                     print(f"✅ Validation & Training cohorts evaluated and logged to MLflow!")
                 except Exception as b_err:
                     print(f"⚠️ Warning: Full dataset batch inference failed: {b_err}")
+
+        # --- Upload Large Model Checkpoint (Guarded against proxy timeouts / HTTP 500) ---
+        if os.path.exists(save_path):
+            model_size_mb = os.path.getsize(save_path) / (1024 * 1024)
+            print(f"\n--> Logging checkpoint '{save_path}' ({model_size_mb:.1f} MB) to MLflow...")
+            try:
+                mlflow.log_artifact(save_path)
+                print(f"✅ Successfully logged checkpoint artifact '{save_path}' to MLflow.")
+            except Exception as ml_err:
+                print(f"⚠️ Warning: Could not log {model_size_mb:.1f} MB checkpoint to MLflow: {ml_err}")
+                print(f"   The model weights are safely stored locally at '{save_path}'.")
+                print("   Tip: You can upload a compressed/FP16 version using scripts/shrink_checkpoint.py --fp16 or backup via FTP.")
 
     return {
         "best_epoch": best_epoch,

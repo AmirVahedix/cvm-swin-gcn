@@ -251,6 +251,7 @@ def run_two_stage_evaluation(
     tracking_username: Optional[str] = None,
     tracking_password: Optional[str] = None,
     experiment_name: Optional[str] = "cvm-two-stage-cascade-eval",
+    run_id: Optional[str] = None,
 ) -> Tuple[Dict[str, Any], str]:
     """
     Main programmatic routine evaluating Stage 1 alone, Stage 2 Oracle, and Two-Stage Cascade.
@@ -903,8 +904,13 @@ def run_two_stage_evaluation(
             exp_name = experiment_name or os.getenv("MLFLOW_EXPERIMENT_NAME") or "cvm-two-stage-cascade-eval"
             mlflow.set_experiment(exp_name)
 
-            run_name_to_use = actual_run_name if actual_run_name.startswith("eval_") else f"eval_{actual_run_name}"
-            with mlflow.start_run(run_name=run_name_to_use):
+            if run_id:
+                run_context = mlflow.start_run(run_id=run_id)
+            else:
+                run_name_to_use = actual_run_name if actual_run_name.startswith("eval_") else f"eval_{actual_run_name}"
+                run_context = mlflow.start_run(run_name=run_name_to_use)
+
+            with run_context:
                 mlflow.log_params({
                     "stage1_weights": stage1_weights,
                     "stage2_weights": stage2_weights,
@@ -1031,6 +1037,7 @@ def main():
     )
     parser.add_argument("--visualize", type=int, default=10, help="Number of visualization panels to save (-1 for all)")
     parser.add_argument("--run-name", type=str, default="test_split_cascade_eval", help="MLflow and report run name")
+    parser.add_argument("--run-id", type=str, default=None, help="Existing MLflow Run ID to attach evaluation metrics and artifacts to")
     parser.add_argument("--device", type=str, default=None, help="Device (cuda/mps/cpu)")
     parser.add_argument("--native-img-dir", type=str, default=None, help="Directory of high-resolution native radiographs")
     parser.add_argument("--skip-mlflow", action="store_true", help="Skip MLflow logging")
@@ -1056,6 +1063,7 @@ def main():
         device_str=args.device,
         native_img_dir=args.native_img_dir,
         log_to_mlflow=not args.skip_mlflow,
+        run_id=args.run_id,
     )
 
 
