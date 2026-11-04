@@ -726,35 +726,13 @@ def run_batch_inference(
                     if bbox.is_fallback:
                         final_coords_np[b_i] = s1_coords
                     else:
-                        img_p_cur, orig_w_cur, orig_h_cur, _, _, _ = batch_meta[b_i]
-                        # Use high-res native crop if available and higher resolution than canvas
-                        if max(orig_w_cur, orig_h_cur) > img_size:
-                            raw_bgr = cv2.imread(str(img_p_cur))
-                            if raw_bgr is not None:
-                                raw_rgb = cv2.cvtColor(raw_bgr, cv2.COLOR_BGR2RGB)
-                                native_bbox = map_bbox_to_native(bbox, orig_w=orig_w_cur, orig_h=orig_h_cur, canvas_size=img_size)
-                                roi_patch, _ = crop_roi_with_padding(
-                                    image=raw_rgb,
-                                    bbox=native_bbox,
-                                    target_size=stage2_size,
-                                    interpolation=cv2.INTER_LINEAR,
-                                )
-                            else:
-                                canvas = batch_canvases[b_i]
-                                roi_patch, _ = crop_roi_with_padding(
-                                    image=canvas,
-                                    bbox=bbox,
-                                    target_size=stage2_size,
-                                    interpolation=cv2.INTER_LINEAR,
-                                )
-                        else:
-                            canvas = batch_canvases[b_i]
-                            roi_patch, _ = crop_roi_with_padding(
-                                image=canvas,
-                                bbox=bbox,
-                                target_size=stage2_size,
-                                interpolation=cv2.INTER_LINEAR,
-                            )
+                        canvas = batch_canvases[b_i]
+                        roi_patch, _ = crop_roi_with_padding(
+                            image=canvas,
+                            bbox=bbox,
+                            target_size=stage2_size,
+                            interpolation=cv2.INTER_LINEAR,
+                        )
                         arr = roi_patch.astype(np.float32) / 255.0
                         mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
                         std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
@@ -771,6 +749,11 @@ def run_batch_inference(
                             target_size=stage2_size,
                             output_normalized=True,
                         )
+
+                        # Safeguard against localized crop drift: if any landmark drifted > 50px from S1, revert to S1
+                        drift_px = np.linalg.norm(reprojected - s1_coords, axis=-1) * float(img_size)
+                        reprojected = np.where(drift_px[:, None] > 50.0, s1_coords, reprojected)
+
                         final_coords_np[b_i] = reprojected
                 pred_coords = final_coords_np
             else:
