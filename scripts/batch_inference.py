@@ -901,3 +901,7 @@ def run_batch_inference(
 def main():
     args = parse_args()
     run_batch_inference(**vars(args))
+
+
+if __name__ == "__main__":
+    main()
