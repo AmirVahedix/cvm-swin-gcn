@@ -1160,22 +1160,17 @@ def run_two_stage_evaluation(
                 (cas_st == v_st) if v_st > 0 else "N/A",
             ])
 
-    # 8. Save structured Predictions JSON for Web/GUI applications
+    # 8. Save structured Predictions JSON (predicted landmarks only) for Web/GUI applications
     predictions_json_file = run_dir / "predictions_landmarks.json"
     predictions_dict: Dict[str, Any] = {}
     for idx, fn in enumerate(all_filenames):
         orig_w, orig_h = all_orig_dims[idx]
         casc_coords_native = casc_arr[idx]  # [13, 2] in native px
-        gt_coords_native = gt_arr[idx]      # [13, 2] in native px
 
         sample_entry: Dict[str, Any] = {
             "image_size": [int(orig_w), int(orig_h)],
-            "predicted_stage": f"CS{cascaded_stages[idx]}" if cascaded_stages[idx] > 0 else None,
-            "ground_truth_geom_stage": f"CS{gt_stages[idx]}" if gt_stages[idx] > 0 else None,
-            "voted_consensus_stage": f"CS{voted_stages[idx]}" if (has_voted_stages and voted_stages[idx] > 0) else None,
             "landmarks_pixel": {},
             "landmarks_normalized": {},
-            "ground_truth_pixel": {},
         }
 
         for l_idx, lm_name in enumerate(LANDMARK_CLASSES):
@@ -1185,10 +1180,6 @@ def run_two_stage_evaluation(
                 round(px_x / max(orig_w, 1), 5),
                 round(px_y / max(orig_h, 1), 5),
             ]
-
-            gt_x, gt_y = float(gt_coords_native[l_idx, 0]), float(gt_coords_native[l_idx, 1])
-            if gt_x >= 0 and gt_y >= 0:
-                sample_entry["ground_truth_pixel"][lm_name] = [round(gt_x, 2), round(gt_y, 2)]
 
         predictions_dict[fn] = sample_entry
 
