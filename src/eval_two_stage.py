@@ -55,6 +55,7 @@ from src.utils.metrics import (
     compute_mcnemar_test,
     compute_normalized_errors,
     compute_reference_length,
+    compute_staging_metrics,
     compute_test_comprehensive_metrics,
     format_summary_report,
 )
@@ -252,6 +253,7 @@ def run_two_stage_evaluation(
     tracking_password: Optional[str] = None,
     experiment_name: Optional[str] = "cvm-two-stage-cascade-eval",
     run_id: Optional[str] = None,
+    export_json: Optional[str] = "data/exports/export.json",
 ) -> Tuple[Dict[str, Any], str]:
     """
     Main programmatic routine evaluating Stage 1 alone, Stage 2 Oracle, and Two-Stage Cascade.
@@ -278,6 +280,18 @@ def run_two_stage_evaluation(
     vis_dir.mkdir(parents=True, exist_ok=True)
     charts_dir = run_dir / "charts"
     charts_dir.mkdir(parents=True, exist_ok=True)
+
+    # Load 3-Professor Consensus Voted CVM stage mapping if available
+    stage_map: Dict[str, int] = {}
+    resolved_export = export_json if (export_json and os.path.exists(export_json)) else ("data/exports/export.json" if os.path.exists("data/exports/export.json") else None)
+    if resolved_export:
+        try:
+            from src.eval import load_cvm_stage_mapping
+            stage_map = load_cvm_stage_mapping(export_json_path=resolved_export)
+            if stage_map:
+                print(f"--> Loaded {len(stage_map)} stage mapping entries for voted finalStage comparison from '{resolved_export}'.")
+        except Exception as e:
+            print(f"ℹ️ Note: Could not load voted finalStage mapping ({e}).")
 
     # 1. Load models
     stage1_model = load_model_checkpoint(stage1_weights, stage1_img_size, device)
@@ -317,6 +331,7 @@ def run_two_stage_evaluation(
 
     # Stages and morphometrics
     gt_stages = []
+    voted_stages = []
     s1_stages = []
     oracle_stages = []
     cascaded_stages = []
@@ -560,6 +575,14 @@ def run_two_stage_evaluation(
             except (ValueError, TypeError):
                 return -1
 
+        # Determine ground-truth clinical voted stage from stage_map if present
+        voted_stg = -1
+        for cand in (fname, stem, str(int(stem)) if stem.isdigit() else None):
+            if cand and cand in stage_map:
+                voted_stg = stage_map[cand]
+                break
+        voted_stages.append(voted_stg)
+
         gt_stages.append(_parse_stage(gt_cvm))
         s1_stages.append(_parse_stage(s1_cvm))
         oracle_stages.append(_parse_stage(oracle_cvm))
@@ -704,6 +727,28 @@ def run_two_stage_evaluation(
     icc_oracle = metrics_oracle.get("staging", {}).get("icc_2_1", 0.0)
     delta_icc = icc_casc - icc_s1
 
+    # Staging evaluation against 3-Professor Consensus Voted stage if available
+    has_voted_stages = sum(1 for s in voted_stages if s > 0) > 0
+    metrics_s1_voted: Dict[str, Any] = {}
+    metrics_oracle_voted: Dict[str, Any] = {}
+    metrics_cascade_voted: Dict[str, Any] = {}
+    if has_voted_stages:
+        metrics_s1_voted = compute_staging_metrics(
+            pred_stages=s1_stages,
+            gt_stages=voted_stages,
+            n_bootstrap=500,
+        )
+        metrics_oracle_voted = compute_staging_metrics(
+            pred_stages=oracle_stages,
+            gt_stages=voted_stages,
+            n_bootstrap=500,
+        )
+        metrics_cascade_voted = compute_staging_metrics(
+            pred_stages=cascaded_stages,
+            gt_stages=voted_stages,
+            n_bootstrap=500,
+        )
+
     # Statistical Significance: Paired Wilcoxon Signed-Rank Test across all landmark errors
     norm_dict_s1 = compute_normalized_errors(s1_arr, gt_arr, img_size=stage1_img_size)
     norm_dict_casc = compute_normalized_errors(casc_arr, gt_arr, img_size=stage1_img_size)
@@ -786,6 +831,87 @@ def run_two_stage_evaluation(
         metrics_cascade, title=f"TWO-STAGE CASCADED PIPELINE EVALUATION REPORT — {actual_run_name}"
     )
 
+    voted_report_block = ""
+    voted_comparison_rows = ""
+    if has_voted_stages and metrics_cascade_voted.get("valid_samples", 0) > 0:
+        v_stg = metrics_cascade_voted
+        w_ci = v_stg.get("accuracy_ci_95_wilson", {})
+        b_ci = v_stg.get("accuracy_ci_95_bootstrap", {})
+        adj_w = v_stg.get("adjacent_accuracy_ci_95_wilson", {})
+        adj_b = v_stg.get("adjacent_accuracy_ci_95_bootstrap", {})
+        qwk_ci = v_stg.get("quadratic_weighted_kappa_ci_95", {})
+        uwk_ci = v_stg.get("unweighted_cohen_kappa_ci_95", {})
+        icc_ci = v_stg.get("icc_2_1_ci_95", {})
+
+        v_lines = [
+            "\n" + "=" * 88,
+            "     SECTION D.2: CLINICAL CONSENSUS STAGING EVALUATION (3-PROFESSOR FINAL VOTED STAGE) ",
+            "=" * 88,
+            f" Total Evaluated Staging Samples : {v_stg.get('valid_samples', 0)} / {v_stg.get('total_samples', 0)}",
+            f" Overall Accuracy vs Voted Stage : {v_stg.get('overall_accuracy', 0.0):.2f}%",
+            f"   • 95% Wilson CI               : [{w_ci.get('lower', 0.0):.2f}%, {w_ci.get('upper', 0.0):.2f}%]",
+            f"   • 95% Bootstrap CI            : [{b_ci.get('lower', 0.0):.2f}%, {b_ci.get('upper', 0.0):.2f}%]",
+            f" Adjacent-Stage Accuracy (±1)    : {v_stg.get('adjacent_accuracy', 0.0):.2f}%",
+            f"   • 95% Wilson CI               : [{adj_w.get('lower', 0.0):.2f}%, {adj_w.get('upper', 0.0):.2f}%]",
+            f"   • 95% Bootstrap CI            : [{adj_b.get('lower', 0.0):.2f}%, {adj_b.get('upper', 0.0):.2f}%]",
+            f" Mean Absolute Stage Error (MASE): {v_stg.get('mean_absolute_stage_error', 0.0):.3f} stages",
+            "",
+            "Inter-Rater Reliability Agreement with Consensus Panel:",
+            f" • Quadratic Weighted Kappa (κw) : {v_stg.get('quadratic_weighted_kappa', 0.0):.3f} (95% CI: [{qwk_ci.get('lower', 0.0):.3f}, {qwk_ci.get('upper', 0.0):.3f}])",
+            f" • Unweighted Cohen's Kappa (κ)  : {v_stg.get('unweighted_cohen_kappa', 0.0):.3f} (95% CI: [{uwk_ci.get('lower', 0.0):.3f}, {uwk_ci.get('upper', 0.0):.3f}])",
+            f" • ICC(2,1) Absolute Agreement   : {v_stg.get('icc_2_1', 0.0):.3f} (95% CI: [{icc_ci.get('lower', 0.0):.3f}, {icc_ci.get('upper', 0.0):.3f}])",
+        ]
+
+        cm = v_stg.get("confusion_matrix", [])
+        if len(cm) == 6:
+            v_lines.append("\n6×6 Confusion Matrix (Rows: 3-Prof Consensus, Columns: Predicted):")
+            v_lines.append("  True \\ Pred |   CS1   CS2   CS3   CS4   CS5   CS6 | Total | Recall (%)")
+            v_lines.append("  " + "-" * 66)
+            col_totals = [0] * 6
+            for r_idx, row in enumerate(cm):
+                row_sum = sum(row)
+                row_rec = (row[r_idx] / row_sum * 100.0) if row_sum > 0 else 0.0
+                for c_idx in range(6):
+                    col_totals[c_idx] += row[c_idx]
+                row_str = " ".join(f"{val:>5d}" for val in row)
+                v_lines.append(f"  CS{r_idx+1:<8} | {row_str} | {row_sum:>5d} | {row_rec:>9.2f}%")
+            v_lines.append("  " + "-" * 66)
+            col_str = " ".join(f"{val:>5d}" for val in col_totals)
+            v_lines.append(f"  Total       | {col_str} | {sum(col_totals):>5d} |")
+            prec_vals = []
+            for c_idx in range(6):
+                p_v = (cm[c_idx][c_idx] / col_totals[c_idx] * 100.0) if col_totals[c_idx] > 0 else 0.0
+                prec_vals.append(f"{p_v:>5.1f}%")
+            v_lines.append(f"  Precision   | {' '.join(prec_vals)} |")
+
+        per_stage = v_stg.get("per_stage", [])
+        macro = v_stg.get("macro_average", {})
+        if per_stage:
+            v_lines.append("\nPer-Stage Classification Performance vs Consensus:")
+            v_lines.append("  Stage | Precision (%) | Recall (%) | F1-Score (%) | Support")
+            v_lines.append("  " + "-" * 56)
+            for row in per_stage:
+                v_lines.append(
+                    f"  {row.get('stage', ''):<5} | {row.get('precision', 0.0):>13.2f}% | {row.get('recall', 0.0):>10.2f}% | {row.get('f1_score', 0.0):>12.2f}% | {row.get('support', 0):>7d}"
+                )
+            v_lines.append("  " + "-" * 56)
+            v_lines.append(
+                f"  Macro | {macro.get('precision', 0.0):>13.2f}% | {macro.get('recall', 0.0):>10.2f}% | {macro.get('f1_score', 0.0):>12.2f}% | {v_stg.get('valid_samples', 0):>7d}"
+            )
+        v_lines.append("=" * 88 + "\n")
+        voted_report_block = "\n".join(v_lines)
+
+        acc_s1_v = metrics_s1_voted.get("overall_accuracy", 0.0)
+        acc_orc_v = metrics_oracle_voted.get("overall_accuracy", 0.0)
+        acc_casc_v = metrics_cascade_voted.get("overall_accuracy", 0.0)
+        kappa_s1_v = metrics_s1_voted.get("quadratic_weighted_kappa", 0.0)
+        kappa_orc_v = metrics_oracle_voted.get("quadratic_weighted_kappa", 0.0)
+        kappa_casc_v = metrics_cascade_voted.get("quadratic_weighted_kappa", 0.0)
+        voted_comparison_rows = (
+            f" CVM Staging (Consensus GT)  | {acc_s1_v:6.2f}%        | {acc_orc_v:6.2f}%        | {acc_casc_v:6.2f}%            | {acc_casc_v - acc_s1_v:+6.2f}%\n"
+            f" κw Kappa (Consensus GT)     | {kappa_s1_v:6.3f}         | {kappa_orc_v:6.3f}         | {kappa_casc_v:6.3f}             | {kappa_casc_v - kappa_s1_v:+6.3f}\n"
+        )
+
     comparison_table = (
         "\n" + "=" * 88 + "\n"
         + "                  SECTION E: TWO-STAGE CASCADED IMPROVEMENT COMPARISON                  \n"
@@ -806,14 +932,15 @@ def run_two_stage_evaluation(
         f" Share ≤ 11.5% (2.0mm Clin) | {gen_s1.get('share_within_11_5pct', 0.0):6.2f}%        | {gen_oracle.get('share_within_11_5pct', 0.0):6.2f}%        | {gen_casc.get('share_within_11_5pct', 0.0):6.2f}%            | {gen_casc.get('share_within_11_5pct', 0.0) - gen_s1.get('share_within_11_5pct', 0.0):+6.2f}%\n"
         f" Share ≤ 15.0% L_ref        | {gen_s1.get('share_within_15pct', 0.0):6.2f}%        | {gen_oracle.get('share_within_15pct', 0.0):6.2f}%        | {gen_casc.get('share_within_15pct', 0.0):6.2f}%            | {gen_casc.get('share_within_15pct', 0.0) - gen_s1.get('share_within_15pct', 0.0):+6.2f}%\n"
         f" 90th Percentile (P90)      | {gen_s1['p90']:6.2f}%        | {gen_oracle['p90']:6.2f}%        | {gen_casc['p90']:6.2f}%            | {gen_casc['p90'] - gen_s1['p90']:+6.2f}%\n"
-        f" CVM Staging Accuracy       | {acc_s1:6.2f}%        | {acc_oracle:6.2f}%        | {acc_casc:6.2f}%            | {acc_casc - acc_s1:+6.2f}%\n"
+        f" CVM Staging (Geometric GT) | {acc_s1:6.2f}%        | {acc_oracle:6.2f}%        | {acc_casc:6.2f}%            | {acc_casc - acc_s1:+6.2f}%\n"
+        + voted_comparison_rows +
         f" Quadratic Weighted Kappa   | {kappa_s1:6.3f}         | {kappa_oracle:6.3f}         | {kappa_casc:6.3f}             | {kappa_casc - kappa_s1:+6.3f}\n"
         f" ICC(2,1) Agreement         | {icc_s1:6.3f}         | {icc_oracle:6.3f}         | {icc_casc:6.3f}             | {delta_icc:+6.3f}\n"
         f" Inference Latency (ms)     | {latency_summary['stage1_ms']:6.1f} ms      |    N/A         | {latency_summary['cascade_ms']:6.1f} ms         | {latency_summary['cascade_ms'] - latency_summary['stage1_ms']:+6.1f} ms\n"
         "========================================================================================\n"
     )
 
-    full_report_text = report_cascade_text + comparison_table
+    full_report_text = report_cascade_text + voted_report_block + comparison_table
 
     # Save summary report text
     report_file = run_dir / "summary_report.txt"
@@ -843,13 +970,19 @@ def run_two_stage_evaluation(
         "stage1_alone": metrics_s1,
         "stage2_oracle": metrics_oracle,
         "two_stage_cascade": metrics_cascade,
+        "voted_staging": {
+            "has_voted_data": has_voted_stages,
+            "stage1_alone": metrics_s1_voted,
+            "stage2_oracle": metrics_oracle_voted,
+            "two_stage_cascade": metrics_cascade_voted,
+        },
     }
 
     metrics_json_file = run_dir / "metrics.json"
     with open(metrics_json_file, "w", encoding="utf-8") as f:
         json.dump(combined_metrics_payload, f, indent=2)
 
-    # 7. Save Predictions CSV
+    # 7. Save Predictions CSVs
     csv_file = run_dir / "predictions_landmarks.csv"
     with open(csv_file, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
@@ -883,10 +1016,41 @@ def run_two_stage_evaluation(
                     f"{(c_r / ref_l * 100.0):.2f}",
                 ])
 
+    staging_csv_file = run_dir / "predictions_staging.csv"
+    with open(staging_csv_file, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow([
+            "sample_id",
+            "gt_geom_stage",
+            "voted_prof_stage",
+            "s1_stage",
+            "oracle_stage",
+            "cascade_stage",
+            "cascade_matches_geom",
+            "cascade_matches_voted",
+        ])
+        for idx, fn in enumerate(all_filenames):
+            g_st = gt_stages[idx]
+            v_st = voted_stages[idx] if has_voted_stages else -1
+            s1_st = s1_stages[idx]
+            orc_st = oracle_stages[idx]
+            cas_st = cascaded_stages[idx]
+            writer.writerow([
+                fn,
+                f"CS{g_st}" if g_st > 0 else "N/A",
+                f"CS{v_st}" if v_st > 0 else "N/A",
+                f"CS{s1_st}" if s1_st > 0 else "N/A",
+                f"CS{orc_st}" if orc_st > 0 else "N/A",
+                f"CS{cas_st}" if cas_st > 0 else "N/A",
+                (cas_st == g_st) if g_st > 0 else "N/A",
+                (cas_st == v_st) if v_st > 0 else "N/A",
+            ])
+
     print(f"\n--> Successfully saved evaluation artifacts to '{run_dir}':")
     print(f"    • Report: {report_file.name}")
     print(f"    • Metrics: {metrics_json_file.name}")
     print(f"    • Landmarks CSV: {csv_file.name}")
+    print(f"    • Staging CSV: {staging_csv_file.name}")
     print(f"    • Visualizations: {vis_saved} panels in '{vis_dir.name}'")
 
     if log_to_mlflow:
@@ -918,7 +1082,7 @@ def run_two_stage_evaluation(
                     "stage2_img_size": stage2_img_size,
                     "samples": len(all_filenames),
                 })
-                mlflow.log_metrics({
+                metrics_to_log = {
                     "s1_mean_norm_err": gen_s1["mean"],
                     "cascade_mean_norm_err": gen_casc["mean"],
                     "oracle_mean_norm_err": gen_oracle["mean"],
@@ -951,10 +1115,20 @@ def run_two_stage_evaluation(
                     "mcnemar_b": mcnemar_res["b"],
                     "mcnemar_c": mcnemar_res["c"],
                     "fallback_rate_pct": delta_summary["fallback_rate_pct"],
-                })
+                }
+                if has_voted_stages and metrics_cascade_voted.get("valid_samples", 0) > 0:
+                    metrics_to_log.update({
+                        "s1_voted_staging_acc": metrics_s1_voted.get("overall_accuracy", 0.0),
+                        "cascade_voted_staging_acc": metrics_cascade_voted.get("overall_accuracy", 0.0),
+                        "oracle_voted_staging_acc": metrics_oracle_voted.get("overall_accuracy", 0.0),
+                        "cascade_voted_adjacent_acc": metrics_cascade_voted.get("adjacent_accuracy", 0.0),
+                        "cascade_voted_quadratic_kappa": metrics_cascade_voted.get("quadratic_weighted_kappa", 0.0),
+                    })
+                mlflow.log_metrics(metrics_to_log)
                 mlflow.log_artifact(str(report_file))
                 mlflow.log_artifact(str(metrics_json_file))
                 mlflow.log_artifact(str(csv_file))
+                mlflow.log_artifact(str(staging_csv_file))
                 mlflow.log_artifacts(str(vis_dir), artifact_path="visualizations")
 
                 # Also log available dataset split evaluation files (val & train) into splits_eval artifact path
@@ -1040,6 +1214,7 @@ def main():
     parser.add_argument("--run-id", type=str, default=None, help="Existing MLflow Run ID to attach evaluation metrics and artifacts to")
     parser.add_argument("--device", type=str, default=None, help="Device (cuda/mps/cpu)")
     parser.add_argument("--native-img-dir", type=str, default=None, help="Directory of high-resolution native radiographs")
+    parser.add_argument("--export-json", type=str, default="data/exports/export.json", help="Path to export.json for consensus finalStage mapping")
     parser.add_argument("--skip-mlflow", action="store_true", help="Skip MLflow logging")
 
     args = parser.parse_args()
@@ -1064,6 +1239,7 @@ def main():
         native_img_dir=args.native_img_dir,
         log_to_mlflow=not args.skip_mlflow,
         run_id=args.run_id,
+        export_json=args.export_json,
     )
 
 
