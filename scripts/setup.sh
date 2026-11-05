@@ -284,9 +284,9 @@ fi
 
 # Install project dependencies using extra index url
 echo -e "${BLUE}📦 Syncing remaining project dependencies...${NC}"
-if ! uv pip install --system --python "$PYTHON_BIN" --no-python-downloads --break-system-packages --extra-index-url "${PYTORCH_INDEX_URL}" --extra-index-url "https://download.pytorch.org/whl/cu126" --extra-index-url "https://download.pytorch.org/whl/nightly/cu128" .; then
+if ! uv pip install --system --python "$PYTHON_BIN" --no-python-downloads --break-system-packages --extra-index-url "${PYTORCH_INDEX_URL}" --extra-index-url "https://download.pytorch.org/whl/cu126" --extra-index-url "https://download.pytorch.org/whl/nightly/cu128" . ultralytics; then
     echo -e "${YELLOW}⚠️ uv pip install . failed, attempting fallback via $PYTHON_BIN -m pip...${NC}"
-    "$PYTHON_BIN" -m pip install --break-system-packages --ignore-installed --extra-index-url "${PYTORCH_INDEX_URL}" --extra-index-url "https://download.pytorch.org/whl/cu126" --extra-index-url "https://download.pytorch.org/whl/nightly/cu128" .
+    "$PYTHON_BIN" -m pip install --break-system-packages --ignore-installed --extra-index-url "${PYTORCH_INDEX_URL}" --extra-index-url "https://download.pytorch.org/whl/cu126" --extra-index-url "https://download.pytorch.org/whl/nightly/cu128" . ultralytics
 fi
 
 # --- Step 5: GPU Pre-Flight CUDA Test ---
