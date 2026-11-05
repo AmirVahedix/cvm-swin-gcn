@@ -269,9 +269,10 @@ def run_two_stage_evaluation(
     # If MLflow run IDs are provided and local files are missing, automatically download
     if stage1_run_id:
         from scripts.download_checkpoint import download_checkpoint_from_mlflow
-        target_s1 = Path("artifacts") / f"stage1_{stage1_run_id[:8]}.pt"
+        ext = Path(stage1_artifact_path).suffix or ".pt"
+        target_s1 = Path("artifacts") / f"stage1_{stage1_run_id[:8]}{ext}"
         if not target_s1.exists():
-            print(f"--> Automatically downloading Stage 1 checkpoint from MLflow run '{stage1_run_id}'...")
+            print(f"--> Automatically downloading Stage 1 checkpoint ('{stage1_artifact_path}') from MLflow run '{stage1_run_id}'...")
             download_checkpoint_from_mlflow(
                 run_id=stage1_run_id,
                 artifact_path=stage1_artifact_path,
@@ -282,9 +283,10 @@ def run_two_stage_evaluation(
 
     if stage2_run_id:
         from scripts.download_checkpoint import download_checkpoint_from_mlflow
-        target_s2 = Path("artifacts") / f"stage2_{stage2_run_id[:8]}.pth"
+        ext = Path(stage2_artifact_path).suffix or ".pth"
+        target_s2 = Path("artifacts") / f"stage2_{stage2_run_id[:8]}{ext}"
         if not target_s2.exists():
-            print(f"--> Automatically downloading Stage 2 checkpoint from MLflow run '{stage2_run_id}'...")
+            print(f"--> Automatically downloading Stage 2 checkpoint ('{stage2_artifact_path}') from MLflow run '{stage2_run_id}'...")
             download_checkpoint_from_mlflow(
                 run_id=stage2_run_id,
                 artifact_path=stage2_artifact_path,
@@ -1356,8 +1358,8 @@ def main():
     parser.add_argument("--run-id", type=str, default=None, help="Existing MLflow Run ID to attach evaluation metrics and artifacts to")
     parser.add_argument("--stage1-run-id", type=str, default=None, help="MLflow Run ID to automatically download Stage 1 weights from")
     parser.add_argument("--stage2-run-id", type=str, default=None, help="MLflow Run ID to automatically download Stage 2 weights from")
-    parser.add_argument("--stage1-artifact", type=str, default="weights/best.pt", help="Stage 1 artifact path inside MLflow run (default: weights/best.pt)")
-    parser.add_argument("--stage2-artifact", type=str, default="checkpoints/best.pth", help="Stage 2 artifact path inside MLflow run (default: checkpoints/best.pth)")
+    parser.add_argument("--stage1-artifact", "--stage1-artifact-path", dest="stage1_artifact", type=str, default="weights/best.pt", help="Stage 1 artifact path inside MLflow run (e.g. 'weights/best.pt' or 'checkpoints/best.pth')")
+    parser.add_argument("--stage2-artifact", "--stage2-artifact-path", dest="stage2_artifact", type=str, default="checkpoints/best.pth", help="Stage 2 artifact path inside MLflow run (e.g. 'checkpoints/best.pth')")
     parser.add_argument("--device", type=str, default=None, help="Device (cuda/mps/cpu)")
     parser.add_argument("--native-img-dir", type=str, default=None, help="Directory of high-resolution native radiographs")
     parser.add_argument("--export-json", type=str, default="data/exports/export.json", help="Path to export.json for consensus finalStage mapping")
