@@ -58,23 +58,36 @@ def download_checkpoint_from_mlflow(
         print(f"⚠️ Could not query run metadata: {e}")
         exp_id = "1"
 
-    # Search for actual artifact name and size
+    # Search for actual artifact name and size (auto-discovering .pt or .pth if path differs)
     actual_artifact = artifact_path
     file_size = None
     try:
-        if "/" in artifact_path:
-            parent_dir = artifact_path.split("/")[0]
-            artifacts = client.list_artifacts(run_id, path=parent_dir)
-        else:
-            artifacts = client.list_artifacts(run_id)
+        def find_file(path_prefix=""):
+            items = client.list_artifacts(run_id, path=path_prefix)
+            for item in items:
+                if item.is_dir:
+                    found = find_file(item.path)
+                    if found:
+                        return found
+                else:
+                    if item.path == artifact_path:
+                        return item
+                    # Smart match based on expected file extension
+                    target_suffix = Path(artifact_path).suffix.lower()
+                    if item.path.lower().endswith(target_suffix) and "best" in item.path.lower():
+                        return item
+            return None
 
-        for a in artifacts:
-            if a.path == artifact_path or a.path.endswith("best.pth"):
-                actual_artifact = a.path
-                file_size = a.file_size
-                break
+        matched_item = find_file()
+        if matched_item:
+            actual_artifact = matched_item.path
+            file_size = matched_item.file_size
+            print(f"--> Discovered matching checkpoint in MLflow: '{actual_artifact}'")
+        else:
+            actual_artifact = artifact_path
     except Exception as e:
         print(f"⚠️ Could not list artifacts ahead of download: {e}")
+        actual_artifact = artifact_path
 
     # 2. Stream download via direct HTTP endpoint with live byte-level progress bar
     direct_url = f"{uri.rstrip('/')}/api/2.0/mlflow-artifacts/artifacts/{exp_id}/{run_id}/artifacts/{actual_artifact}"
