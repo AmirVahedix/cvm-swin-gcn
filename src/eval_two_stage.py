@@ -356,6 +356,13 @@ def run_two_stage_evaluation(
     s1_latencies_ms = []
     casc_latencies_ms = []
 
+    # Collectors for YOLO Stage 1 ROI Bounding Box Evaluation Metrics
+    pred_bboxes_list = []
+    gt_bboxes_list = []
+    bbox_ious = []
+    bbox_center_dists_px = []
+    bbox_scale_errors = []
+
     print(f"\n--> Running inference on {len(img_files)} evaluation samples...")
 
     for fname in tqdm(img_files, desc="Evaluating Two-Stage Cascade"):
@@ -462,6 +469,32 @@ def run_two_stage_evaluation(
                 margin_ratio=margin_ratio,
                 bottom_margin_ratio=bottom_margin_ratio,
             )
+
+            # Evaluate Stage 1 predicted bounding box against ground-truth vertebra ROI
+            pred_b_coords = [float(s1_bbox.u1), float(s1_bbox.v1), float(s1_bbox.u2), float(s1_bbox.v2)]
+            gt_b_coords = [float(gt_bbox.u1), float(gt_bbox.v1), float(gt_bbox.u2), float(gt_bbox.v2)]
+            pred_bboxes_list.append(pred_b_coords)
+            gt_bboxes_list.append(gt_b_coords)
+
+            # Box IoU & Spatial Alignment
+            x1 = max(pred_b_coords[0], gt_b_coords[0])
+            y1 = max(pred_b_coords[1], gt_b_coords[1])
+            x2 = min(pred_b_coords[2], gt_b_coords[2])
+            y2 = min(pred_b_coords[3], gt_b_coords[3])
+            inter = max(0.0, x2 - x1) * max(0.0, y2 - y1)
+            area_p = max(0.0, pred_b_coords[2] - pred_b_coords[0]) * max(0.0, pred_b_coords[3] - pred_b_coords[1])
+            area_g = max(0.0, gt_b_coords[2] - gt_b_coords[0]) * max(0.0, gt_b_coords[3] - gt_b_coords[1])
+            union = area_p + area_g - inter
+            iou = inter / union if union > 0 else 0.0
+            bbox_ious.append(iou)
+
+            center_dist = math.hypot(s1_bbox.center_u - gt_bbox.center_u, s1_bbox.center_v - gt_bbox.center_v)
+            bbox_center_dists_px.append(center_dist)
+
+            diag_p = math.hypot(pred_b_coords[2] - pred_b_coords[0], pred_b_coords[3] - pred_b_coords[1])
+            diag_g = math.hypot(gt_b_coords[2] - gt_b_coords[0], gt_b_coords[3] - gt_b_coords[1])
+            scale_err = abs(diag_p - diag_g) / max(diag_g, 1e-6)
+            bbox_scale_errors.append(scale_err)
             oracle_patch = _get_roi_crop(gt_bbox)
             oracle_in = to_normalized_tensor(oracle_patch, device)
             oracle_hm, oracle_coords_roi_t = stage2_model(oracle_in)
@@ -796,6 +829,26 @@ def run_two_stage_evaluation(
         y_pred2=cascaded_stages,
     )
 
+    # Compute Stage 1 YOLO Cervical Spine Bounding Box Metrics (for paper reporting)
+    bbox_ious_arr = np.array(bbox_ious) if bbox_ious else np.array([0.0])
+    stage1_bbox_metrics = {
+        "mean_iou": float(np.mean(bbox_ious_arr)),
+        "median_iou": float(np.median(bbox_ious_arr)),
+        "std_iou": float(np.std(bbox_ious_arr)),
+        "iqr_iou": [float(np.percentile(bbox_ious_arr, 25)), float(np.percentile(bbox_ious_arr, 75))],
+        "iou_at_50_pct": float(np.mean(bbox_ious_arr >= 0.50) * 100.0),
+        "iou_at_75_pct": float(np.mean(bbox_ious_arr >= 0.75) * 100.0),
+        "iou_at_85_pct": float(np.mean(bbox_ious_arr >= 0.85) * 100.0),
+        "iou_at_90_pct": float(np.mean(bbox_ious_arr >= 0.90) * 100.0),
+        "iou_at_95_pct": float(np.mean(bbox_ious_arr >= 0.95) * 100.0),
+        "mean_center_distance_px": float(np.mean(bbox_center_dists_px)) if bbox_center_dists_px else 0.0,
+        "median_center_distance_px": float(np.median(bbox_center_dists_px)) if bbox_center_dists_px else 0.0,
+        "mean_scale_error_pct": float(np.mean(bbox_scale_errors) * 100.0) if bbox_scale_errors else 0.0,
+        "median_scale_error_pct": float(np.median(bbox_scale_errors) * 100.0) if bbox_scale_errors else 0.0,
+        "fallback_count": fallback_count,
+        "fallback_rate_pct": (fallback_count / max(len(all_filenames), 1)) * 100.0,
+    }
+
     # Latency summary (ms per image)
     latency_summary = {
         "stage1_ms": float(np.mean(s1_latencies_ms)) if s1_latencies_ms else 0.0,
@@ -941,8 +994,17 @@ def run_two_stage_evaluation(
         + f" Inference Latency          : Stage 1 = {latency_summary['stage1_ms']:.1f} ms | Cascade = {latency_summary['cascade_ms']:.1f} ms\n"
         + f" Paired Wilcoxon Test (N={len(s1_errors)}) : W = {wilcoxon_stat:.1f}, P = {wilcoxon_p:.4e}\n"
         + f" McNemar's Test (N={len(gt_stages)})    : discordant (b={mcnemar_res['b']}, c={mcnemar_res['c']}), P = {mcnemar_res['p_value']:.4f}\n"
-        "----------------------------------------------------------------------------------------\n"
-        " Metric                     | Stage 1 Coarse | Stage 2 Oracle | Two-Stage Cascade | Delta (Cascade - S1) \n"
+        + "----------------------------------------------------------------------------------------\n"
+        + " [STAGE 1 YOLO ROI LOCALIZATION PERFORMANCE]\n"
+        + f" Mean Box IoU               : {stage1_bbox_metrics['mean_iou']:.4f} ± {stage1_bbox_metrics['std_iou']:.4f} (Median: {stage1_bbox_metrics['median_iou']:.4f})\n"
+        + f" Success Rate at IoU ≥ 0.50 : {stage1_bbox_metrics['iou_at_50_pct']:.2f}%\n"
+        + f" Success Rate at IoU ≥ 0.75 : {stage1_bbox_metrics['iou_at_75_pct']:.2f}%\n"
+        + f" Success Rate at IoU ≥ 0.85 : {stage1_bbox_metrics['iou_at_85_pct']:.2f}%\n"
+        + f" Success Rate at IoU ≥ 0.90 : {stage1_bbox_metrics['iou_at_90_pct']:.2f}%\n"
+        + f" Mean Center Distance Error : {stage1_bbox_metrics['mean_center_distance_px']:.2f} px (Median: {stage1_bbox_metrics['median_center_distance_px']:.2f} px)\n"
+        + f" Mean Scale / Diagonal Err  : {stage1_bbox_metrics['mean_scale_error_pct']:.2f}%\n"
+        + "----------------------------------------------------------------------------------------\n"
+        + " Metric                     | Stage 1 Coarse | Stage 2 Oracle | Two-Stage Cascade | Delta (Cascade - S1) \n"
         "----------------------------------------------------------------------------------------\n"
         f" Mean Normalized Error (%)  | {gen_s1['mean']:6.2f}%        | {gen_oracle['mean']:6.2f}%        | {gen_casc['mean']:6.2f}%            | {delta_mean_norm:+6.2f}% ({pct_reduction:+.1f}% rel)\n"
         f" Median Norm Error (%)      | {gen_s1['median']:6.2f}%        | {gen_oracle['median']:6.2f}%        | {gen_casc['median']:6.2f}%            | {delta_med_norm:+6.2f}%\n"
@@ -978,6 +1040,7 @@ def run_two_stage_evaluation(
         "stage2_img_size": stage2_img_size,
         "margin_ratio": margin_ratio,
         "delta_comparison": delta_summary,
+        "stage1_bbox_metrics": stage1_bbox_metrics,
         "inference_latency": latency_summary,
         "statistical_tests": {
             "paired_wilcoxon": {
