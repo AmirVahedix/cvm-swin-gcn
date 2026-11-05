@@ -16,7 +16,7 @@ from ultralytics import YOLO
 
 def train_yolo_stage1(
     data_yaml: str = "dataset/yolo/cvm_roi.yaml",
-    model_name: str = "yolo11n.pt",
+    model_name: str = "yolo26s.pt",
     epochs: int = 50,
     batch_size: int = 16,
     img_size: int = 640,
@@ -67,7 +67,7 @@ def train_yolo_stage1(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train Stage 1 YOLO Cervical Spine ROI Detector")
     parser.add_argument("--data-yaml", default="dataset/yolo/cvm_roi.yaml", help="Path to cvm_roi.yaml")
-    parser.add_argument("--model", default="yolo11n.pt", help="Pretrained YOLO base model")
+    parser.add_argument("--model", default="yolo26s.pt", help="Pretrained YOLO base model")
     parser.add_argument("--epochs", type=int, default=50, help="Training epochs")
     parser.add_argument("--batch-size", type=int, default=16, help="Batch size")
     parser.add_argument("--img-size", type=int, default=640, help="Image resolution")

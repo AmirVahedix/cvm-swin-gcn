@@ -22,7 +22,7 @@ class CervicalYOLODetector:
         weights: Optional[str] = None,
         conf_threshold: float = 0.25,
         device: Optional[Union[str, torch.device]] = None,
-        default_model: str = "yolo11n.pt",
+        default_model: str = "yolo26s.pt",
     ):
         self.conf_threshold = conf_threshold
         if device is None:

@@ -245,8 +245,8 @@ def main():
     parser.add_argument(
         "--stage1-model",
         type=str,
-        default="yolo11n.pt",
-        help="Pretrained YOLO base model for Stage 1 (default: yolo11n.pt).",
+        default="yolo26s.pt",
+        help="Pretrained YOLO base model for Stage 1 (default: yolo26s.pt).",
     )
     parser.add_argument(
         "--stage2-weights",

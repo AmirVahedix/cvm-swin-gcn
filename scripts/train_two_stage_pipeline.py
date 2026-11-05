@@ -33,7 +33,7 @@ def main():
     # Stage 1 Parameters
     parser.add_argument("--skip-stage1", action="store_true", help="Skip Stage 1 training and use existing checkpoint")
     parser.add_argument("--stage1-weights", type=str, default="artifacts/yolo_stage1.pt", help="Stage 1 YOLO checkpoint path")
-    parser.add_argument("--stage1-model", type=str, default="yolo11n.pt", help="Base pretrained YOLO model")
+    parser.add_argument("--stage1-model", type=str, default="yolo26s.pt", help="Base pretrained YOLO model (default: yolo26s.pt)")
     parser.add_argument("--stage1-epochs", type=int, default=50, help="Epochs for Stage 1 YOLO training")
     parser.add_argument("--stage1-size", type=int, default=640, help="Stage 1 input resolution")
 
