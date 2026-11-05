@@ -24,3 +24,7 @@ wheels/
 # Evaluation outputs
 evaluation/predictions_*
 evaluation/two_stage/
+dataset/train
+dataset/val
+dataset/test/images
+dataset/test/labels

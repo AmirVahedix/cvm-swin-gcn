@@ -49,6 +49,7 @@ from src.data.loaders.dataset import get_image_dimensions_map
 from src.inference import resolve_device
 from src.models.model import CephalometricSwinGCN
 from src.models.two_stage import TwoStageCephalometricSwinGCN
+from src.models.yolo_stage1 import CervicalYOLODetector
 from src.utils.cvm_calculator import evaluate_landmarks_dict
 from src.utils.metrics import (
     compute_icc_2_1,
@@ -294,19 +295,28 @@ def run_two_stage_evaluation(
             print(f"ℹ️ Note: Could not load voted finalStage mapping ({e}).")
 
     # 1. Load models
-    stage1_model = load_model_checkpoint(stage1_weights, stage1_img_size, device)
+    is_yolo_stage1 = stage1_weights.endswith(".pt") or not os.path.exists(stage1_weights)
+    if is_yolo_stage1:
+        stage1_detector = CervicalYOLODetector(weights=stage1_weights, device=device)
+        stage1_model = None
+    else:
+        try:
+            stage1_model = load_model_checkpoint(stage1_weights, stage1_img_size, device)
+            stage1_detector = None
+        except Exception:
+            stage1_detector = CervicalYOLODetector(weights=stage1_weights, device=device)
+            stage1_model = None
+
     stage2_model = load_model_checkpoint(stage2_weights, stage2_img_size, device)
 
     two_stage_net = TwoStageCephalometricSwinGCN(
-        stage1_img_size=stage1_img_size,
+        stage1_weights=stage1_weights,
         stage2_img_size=stage2_img_size,
         margin_ratio=margin_ratio,
-        pretrained_stage1=False,
         pretrained_stage2=False,
+        device=device,
     )
-    two_stage_net.stage1 = stage1_model
     two_stage_net.stage2 = stage2_model
-    two_stage_net.freeze_stage1()
     two_stage_net.to(device)
     two_stage_net.eval()
 
@@ -415,9 +425,26 @@ def run_two_stage_evaluation(
                 torch.mps.synchronize()
             t0_s1 = time.perf_counter()
 
-            s1_hm, s1_coords_t = stage1_model(tensor_in)
-            if stage1_use_peaks:
-                s1_coords_t = extract_subpixel_peaks(s1_hm)
+            if stage1_detector is not None:
+                # YOLO Stage 1 ROI Detector
+                s1_bbox = stage1_detector.predict_roi(
+                    image=canvas_img,
+                    target_size=stage1_img_size,
+                    margin_ratio=0.0,
+                )
+                s1_coords_canvas = np.full((NUM_LANDMARKS, 2), np.nan, dtype=np.float32)
+            else:
+                s1_hm, s1_coords_t = stage1_model(tensor_in)
+                if stage1_use_peaks:
+                    s1_coords_t = extract_subpixel_peaks(s1_hm)
+                s1_coords_canvas = s1_coords_t.squeeze(0).cpu().numpy()  # [13, 2]
+                s1_bbox = compute_roi_bbox(
+                    coords=s1_coords_canvas,
+                    img_w=stage1_img_size,
+                    img_h=stage1_img_size,
+                    margin_ratio=margin_ratio,
+                    bottom_margin_ratio=bottom_margin_ratio,
+                )
 
             if device.type == "cuda":
                 torch.cuda.synchronize()
@@ -426,7 +453,6 @@ def run_two_stage_evaluation(
             t1_s1 = time.perf_counter()
             s1_ms = (t1_s1 - t0_s1) * 1000.0
             s1_latencies_ms.append(s1_ms)
-            s1_coords_canvas = s1_coords_t.squeeze(0).cpu().numpy()  # [13, 2]
 
             # B. Stage 2 Oracle Forward (Crop from Ground Truth BBox)
             gt_bbox = compute_roi_bbox(
@@ -456,13 +482,6 @@ def run_two_stage_evaluation(
                 torch.mps.synchronize()
             t0_casc = time.perf_counter()
 
-            s1_bbox = compute_roi_bbox(
-                coords=s1_coords_canvas,
-                img_w=stage1_img_size,
-                img_h=stage1_img_size,
-                margin_ratio=margin_ratio,
-                bottom_margin_ratio=bottom_margin_ratio,
-            )
             if s1_bbox.is_fallback:
                 fallback_count += 1
 
@@ -502,13 +521,14 @@ def run_two_stage_evaluation(
                         output_normalized=True,
                     )
 
-            # Safeguard against extreme localized crop drift: if any landmark drifted > 50px from S1, revert to S1
-            drift_dist_px = np.linalg.norm(cascaded_coords_canvas - s1_coords_canvas, axis=-1) * float(stage1_img_size)
-            cascaded_coords_canvas = np.where(
-                drift_dist_px[:, None] > 50.0,
-                s1_coords_canvas,
-                cascaded_coords_canvas,
-            )
+            # Safeguard against extreme localized crop drift: if Swin Stage 1 landmarks exist and drift > 50px, revert
+            if not np.all(np.isnan(s1_coords_canvas)):
+                drift_dist_px = np.linalg.norm(cascaded_coords_canvas - s1_coords_canvas, axis=-1) * float(stage1_img_size)
+                cascaded_coords_canvas = np.where(
+                    drift_dist_px[:, None] > 50.0,
+                    s1_coords_canvas,
+                    cascaded_coords_canvas,
+                )
 
             # Apply Anatomical Vertebra Height Prior post-processing safeguard
             if use_anatomical_prior:

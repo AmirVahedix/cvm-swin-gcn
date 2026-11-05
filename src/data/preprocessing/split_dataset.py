@@ -84,9 +84,9 @@ def copy_files(file_pairs, split_name, base_output_dir):
         shutil.copy2(label_path, label_dest)
 
 
-def load_label_studio_mapping(export_json_path=None) -> dict[str, int]:
+def load_task_id_mapping(export_json_path=None) -> dict[str, int]:
     """
-    Loads Label Studio JSON export and returns a mapping from image filename/stem to Label Studio task ID.
+    Loads dataset JSON export and returns a mapping from image filename/stem to CVM task ID.
     """
     mapping = {}
     candidate_paths = []
@@ -145,6 +145,10 @@ def load_label_studio_mapping(export_json_path=None) -> dict[str, int]:
         print(f"⚠️ Warning loading task ID mapping from {found_path}: {e}")
 
     return mapping
+
+
+# Backward compatibility alias
+load_label_studio_mapping = load_task_id_mapping
 
 
 def load_fixed_id_set(file_path) -> set:

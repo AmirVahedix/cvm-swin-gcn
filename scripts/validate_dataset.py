@@ -97,7 +97,7 @@ def extract_clean_filename(record: dict) -> str:
 
 def extract_landmarks(record: dict, img_w: int = 640, img_h: int = 640) -> Tuple[Dict[str, List[Dict[str, float]]], List[str]]:
     """
-    Extracts all keypoints from a Label Studio record.
+    Extracts all keypoints from a CVM API record or legacy annotations.
     Returns:
       landmarks: dict mapping label_name -> list of point dicts with {x, y, norm_x, norm_y}
       all_labels: list of all raw label occurrences in order
@@ -105,6 +105,37 @@ def extract_landmarks(record: dict, img_w: int = 640, img_h: int = 640) -> Tuple
     landmarks = {}
     all_labels = []
 
+    # 1. CVM Backend API format (landmarks list)
+    if "landmarks" in record and isinstance(record["landmarks"], list):
+        orig_w = record.get("orig_w") or record.get("original_width", img_w)
+        orig_h = record.get("orig_h") or record.get("original_height", img_h)
+
+        for lm in record["landmarks"]:
+            label_name = lm.get("id")
+            if not label_name:
+                continue
+            all_labels.append(label_name)
+
+            raw_x = float(lm.get("x", 0.0))
+            raw_y = float(lm.get("y", 0.0))
+            norm_x = raw_x / 100.0 if raw_x > 1.0 else raw_x
+            norm_y = raw_y / 100.0 if raw_y > 1.0 else raw_y
+            px_x = norm_x * float(orig_w)
+            px_y = norm_y * float(orig_h)
+
+            point_data = {
+                "x": round(px_x, 2),
+                "y": round(px_y, 2),
+                "norm_x": round(norm_x, 4),
+                "norm_y": round(norm_y, 4),
+            }
+            if label_name not in landmarks:
+                landmarks[label_name] = []
+            landmarks[label_name].append(point_data)
+
+        return landmarks, all_labels
+
+    # 2. Legacy annotations fallback
     annotations = record.get("annotations", [])
     if not annotations:
         return landmarks, all_labels
@@ -1287,19 +1318,6 @@ def main():
         description="Dataset Validation & Geometric Consistency Verification Script."
     )
     parser.add_argument(
-        "--data-source",
-        "--source",
-        type=str,
-        choices=["api", "label-studio"],
-        default=os.getenv("DATA_SOURCE", "api"),
-        help="Data source to load annotations and images from: 'api' (default: CVM Backend API) or 'label-studio' (legacy).",
-    )
-    parser.add_argument(
-        "--legacy-label-studio",
-        action="store_true",
-        help="Keep legacy Label Studio as the data source instead of the default CVM Backend API.",
-    )
-    parser.add_argument(
         "--api-url",
         type=str,
         default=os.getenv("CVM_API_URL", "http://localhost:8000"),
@@ -1405,24 +1423,21 @@ def main():
     )
 
     args = parser.parse_args()
-    if args.legacy_label_studio:
-        args.data_source = "label-studio"
 
-    verify_env(data_source=args.data_source)
+    verify_env()
 
     print("=" * 80)
     print("      CERVICAL VERTEBRAE DATASET VALIDATION & PRE-PROCESSING PIPELINE     ")
-    print(f"      DATA SOURCE: {args.data_source.upper()}")
+    print("      DATA SOURCE: CVM BACKEND API")
     print("=" * 80)
 
     # 1. Preprocessing Steps (up to generate_labels)
     if not args.skip_preprocessing:
         if not args.skip_download:
-            print(f"\n[Step 1/3] Executing: download_export_and_images(data_source='{args.data_source}')")
+            print("\n[Step 1/3] Executing: download_export_and_images()")
             download_export_and_images(
                 export_dir=args.raw_exports_dir,
                 img_dir=args.raw_images_dir,
-                data_source=args.data_source,
                 api_url=args.api_url,
                 api_token=args.api_token,
                 skip_review_needed=args.skip_review_needed,

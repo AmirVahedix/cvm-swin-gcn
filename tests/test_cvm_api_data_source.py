@@ -11,7 +11,6 @@ from src.data.constants import LANDMARK_CLASSES, NUM_LANDMARKS
 from src.data.preprocessing.download_data import (
     download_export_and_images,
     download_from_cvm_api,
-    download_from_label_studio,
 )
 from src.data.preprocessing.resize_images import resize_images
 from src.data.preprocessing.generate_labels import generate_labels, process_single_record
@@ -44,19 +43,18 @@ class TestCvmApiDataSource(unittest.TestCase):
             {"id": "C4_AI", "x": 0.36, "y": 0.77},
         ]
 
-    def test_verify_env_with_api_and_label_studio(self):
-        """verify_env should succeed for API data source without requiring Label Studio env vars."""
-        # For API data source:
-        with patch("src.utils.verify_env.load_dotenv"), patch.dict(os.environ, {}, clear=True):
+    def test_verify_env_with_api(self):
+        """verify_env should succeed when required CVM API env vars are present."""
+        with patch("src.utils.verify_env.load_dotenv"), patch.dict(os.environ, {"CVM_API_URL": "http://test", "CVM_API_TOKEN": "token"}, clear=True):
             try:
-                verify_env(data_source="api")
+                verify_env()
             except SystemExit:
-                self.fail("verify_env(data_source='api') raised SystemExit unexpectedly")
+                self.fail("verify_env() raised SystemExit unexpectedly")
 
-        # For Label Studio data source: should exit if missing
+        # When missing, should exit
         with patch("src.utils.verify_env.load_dotenv"), patch.dict(os.environ, {}, clear=True):
             with self.assertRaises(SystemExit):
-                verify_env(data_source="label-studio")
+                verify_env()
 
     def test_cvm_api_download_skips_review_needed(self):
         """download_from_cvm_api should skip all tasks marked as review_needed."""
@@ -157,19 +155,11 @@ class TestCvmApiDataSource(unittest.TestCase):
                 )
             self.assertIn("Could not retrieve dataset from CVM Backend API", str(ctx.exception))
 
-    def test_legacy_data_source_routing(self):
-        """Calling download_export_and_images with data_source='label-studio' routes to legacy."""
-        with patch("src.data.preprocessing.download_data.download_from_label_studio") as mock_ls, \
-             patch("src.data.preprocessing.download_data.download_from_cvm_api") as mock_api:
-            download_export_and_images(data_source="label-studio")
-            mock_ls.assert_called_once()
-            mock_api.assert_not_called()
-
-        with patch("src.data.preprocessing.download_data.download_from_label_studio") as mock_ls, \
-             patch("src.data.preprocessing.download_data.download_from_cvm_api") as mock_api:
-            download_export_and_images(data_source="api")
+    def test_data_source_routing(self):
+        """Calling download_export_and_images routes to download_from_cvm_api."""
+        with patch("src.data.preprocessing.download_data.download_from_cvm_api") as mock_api:
+            download_export_and_images()
             mock_api.assert_called_once()
-            mock_ls.assert_not_called()
 
     def test_resize_images_with_cvm_api_format(self):
         """resize_images should process CVM API export, resize image with letterboxing, and skip review_needed."""

@@ -15,9 +15,7 @@ load_dotenv()
 
 def extract_filename_from_url(img_url: str) -> str:
     """
-    Extracts a clean image filename from a Label Studio image URL or local-files query.
-    e.g. 'https://.../?d=cvm-images/0015.jpg' -> '0015.jpg'
-    e.g. '/data/upload/1/abc-0015.jpg' -> '0015.jpg'
+    Extracts a clean image filename from an image URL.
     """
     if "?d=" in img_url:
         parsed = urlparse(img_url)
@@ -51,169 +49,6 @@ def clear_directory(dir_path):
                 print(f"⚠️ Failed to delete {file_path}. Reason: {e}")
     else:
         os.makedirs(dir_path, exist_ok=True)
-
-
-def process_single_task(task, session, img_dir, ls_url):
-    """
-    Worker function to process a single image download from Label Studio.
-    """
-    img_url = task.get("data", {}).get("img") or task.get("data", {}).get("image") or task.get("file_upload")
-    if not img_url:
-        return f"⚠️ Skipping task {task.get('id')}: No image URL found"
-
-    clean_filename = extract_filename_from_url(img_url)
-    img_path = os.path.join(img_dir, clean_filename)
-
-    # Download image
-    full_img_url = img_url if img_url.startswith("http") else f"{ls_url.rstrip('/')}/{img_url.lstrip('/')}"
-    try:
-        response = session.get(full_img_url, stream=True, timeout=15)
-        if response.status_code == 200:
-            with open(img_path, "wb") as f_img:
-                for chunk in response.iter_content(1024):
-                    f_img.write(chunk)
-        else:
-            return f"⚠️ Skipping {clean_filename}: Image download failed (Status {response.status_code})"
-    except Exception as e:
-        return f"❌ Network Error on {clean_filename}: {e}"
-
-    return f"✅ Downloaded {clean_filename}"
-
-
-def download_from_label_studio(
-    export_dir="data/raw/exports", img_dir="data/raw/images", max_workers=10
-):
-    """
-    Legacy data loader that fetches export and images from Label Studio.
-    """
-    ls_url = (os.getenv("LABEL_STUDIO_URL") or "").rstrip("/")
-    project_id = os.getenv("LABEL_STUDIO_PROJECT_ID")
-    api_token = os.getenv("LABEL_STUDIO_API_TOKEN")
-    username = os.getenv("LABEL_STUDIO_USERNAME")
-    password = os.getenv("LABEL_STUDIO_PASSWORD")
-
-    if not ls_url:
-        raise ValueError("LABEL_STUDIO_URL is not set in environment or .env.")
-    if not project_id:
-        raise ValueError("LABEL_STUDIO_PROJECT_ID is not set in environment or .env.")
-
-    clear_directory(img_dir)
-    os.makedirs(export_dir, exist_ok=True)
-
-    session = requests.Session()
-    retries = Retry(
-        total=3,
-        backoff_factor=0.5,
-        status_forcelist=[500, 502, 503, 504],
-        raise_on_status=False,
-    )
-    adapter = requests.adapters.HTTPAdapter(
-        pool_connections=max_workers,
-        pool_maxsize=max_workers,
-        max_retries=retries,
-    )
-    session.mount("http://", adapter)
-    session.mount("https://", adapter)
-
-    authenticated = False
-
-    # 1. Primary auth: API Token
-    if api_token:
-        session.headers.update({"Authorization": f"Token {api_token}"})
-        try:
-            whoami_resp = session.get(f"{ls_url}/api/current-user/whoami", timeout=10)
-            if whoami_resp.status_code == 200:
-                print("🔑 Authenticated successfully using API Token.")
-                authenticated = True
-            else:
-                print(f"⚠️ API Token check warning (HTTP {whoami_resp.status_code}): {whoami_resp.text[:100]}")
-                authenticated = True
-        except Exception as e:
-            print(f"⚠️ Token auth verification error: {e}")
-            authenticated = True
-
-    # 2. Fallback auth: Username/Password session login
-    if not authenticated and username and password:
-        login_url = f"{ls_url}/user/login/"
-        try:
-            session.get(login_url, timeout=10)
-            csrf_token = session.cookies.get("csrftoken", "")
-            login_data = {
-                "email": username,
-                "password": password,
-                "csrfmiddlewaretoken": csrf_token,
-            }
-            login_response = session.post(
-                login_url, data=login_data, headers={"Referer": login_url}, timeout=10
-            )
-            if login_response.status_code in [200, 302] and ("sessionid" in session.cookies or login_response.status_code == 302):
-                print("🔑 Authenticated successfully via session login.")
-                authenticated = True
-            else:
-                print(f"❌ Session login failed (HTTP {login_response.status_code}).")
-        except Exception as e:
-            print(f"❌ Session login error: {e}")
-
-    if not authenticated:
-        raise RuntimeError("Failed to authenticate to Label Studio. Please verify LABEL_STUDIO_API_TOKEN or username/password in .env.")
-
-    print(f"📥 Fetching latest JSON export from Label Studio for project ID: {project_id}...")
-    export_url = f"{ls_url}/api/projects/{project_id}/export?exportType=JSON"
-    export_response = session.get(export_url)
-
-    if export_response.status_code != 200:
-        print(
-            f"❌ Failed to download export. HTTP Status: {export_response.status_code}"
-        )
-        return 0
-
-    tasks = export_response.json()
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    export_filename = f"project_{project_id}_export_{timestamp}.json"
-    export_filepath = os.path.join(export_dir, export_filename)
-    default_export_path = os.path.join(export_dir, "export.json")
-
-    try:
-        with open(export_filepath, "w") as json_file:
-            json.dump(tasks, json_file, indent=4)
-        with open(default_export_path, "w") as json_file:
-            json.dump(tasks, json_file, indent=4)
-        print(f"💾 Saved raw JSON export to: {os.path.abspath(export_filepath)}\n")
-    except Exception as e:
-        print(f"⚠️ Could not save JSON file to disk. Reason: {e}\n")
-
-    success_count = 0
-
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_task = {
-            executor.submit(
-                process_single_task,
-                task,
-                session,
-                img_dir,
-                ls_url,
-            ): task
-            for task in tasks
-        }
-
-        for future in tqdm(
-            as_completed(future_to_task),
-            total=len(tasks),
-            desc="Downloading Images (Label Studio)",
-            unit="img",
-            colour="green",
-        ):
-            try:
-                result = future.result()
-                if result and result.startswith("✅"):
-                    success_count += 1
-                else:
-                    tqdm.write(result)
-            except Exception as exc:
-                tqdm.write(f"❌ Thread generated an exception: {exc}")
-
-    print(f"\n🚀 Done! Downloaded {success_count}/{len(tasks)} images concurrently from Label Studio.")
-    return success_count
 
 
 def download_from_cvm_api(
@@ -437,49 +272,22 @@ def download_export_and_images(
     max_workers=10,
 ):
     """
-    Unified entry point to download data and labels.
-    - Default: CVM Backend API (data_source='api')
-    - Legacy: Label Studio (data_source='label-studio' or --legacy-label-studio flag)
+    Entry point to download data and labels from CVM Backend API.
     """
-    if data_source is None:
-        data_source = os.getenv("DATA_SOURCE", "api").lower().strip()
-
-    if data_source in ("label-studio", "label_studio", "legacy"):
-        print("📌 Data Source: Legacy Label Studio")
-        return download_from_label_studio(
-            export_dir=export_dir,
-            img_dir=img_dir,
-            max_workers=max_workers,
-        )
-    else:
-        print("📌 Data Source: CVM Backend API (Default)")
-        return download_from_cvm_api(
-            export_dir=export_dir,
-            img_dir=img_dir,
-            api_url=api_url,
-            api_token=api_token,
-            skip_review_needed=skip_review_needed,
-            skip_excluded=skip_excluded,
-            max_workers=max_workers,
-        )
+    return download_from_cvm_api(
+        export_dir=export_dir,
+        img_dir=img_dir,
+        api_url=api_url,
+        api_token=api_token,
+        skip_review_needed=skip_review_needed,
+        skip_excluded=skip_excluded,
+        max_workers=max_workers,
+    )
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Download dataset and export JSON for training. Uses CVM Backend API by default, or Label Studio via legacy flag."
-    )
-    parser.add_argument(
-        "--data-source",
-        "--source",
-        type=str,
-        choices=["api", "label-studio"],
-        default=os.getenv("DATA_SOURCE", "api"),
-        help="Data source: 'api' (default: CVM Backend API) or 'label-studio' (legacy).",
-    )
-    parser.add_argument(
-        "--legacy-label-studio",
-        action="store_true",
-        help="Use legacy Label Studio data source instead of CVM Backend API.",
+        description="Download dataset and export JSON for training strictly via CVM Backend API."
     )
     parser.add_argument(
         "--api-url",
@@ -490,41 +298,27 @@ if __name__ == "__main__":
     parser.add_argument(
         "--api-token",
         type=str,
-        default=os.getenv("CVM_API_TOKEN", "O0s66Vi.r8e8WBGfY9I3x4neIm"),
+        default=os.getenv("CVM_API_TOKEN", ""),
         help="Bearer authentication token for CVM Backend API.",
     )
     parser.add_argument(
         "--skip-review-needed",
-        dest="skip_review_needed",
         action="store_true",
         default=True,
         help="Skip images marked as review_needed (default: True).",
     )
     parser.add_argument(
-        "--no-skip-review-needed",
-        dest="skip_review_needed",
-        action="store_false",
-        help="Do not skip images marked as review_needed.",
-    )
-    parser.add_argument(
         "--skip-excluded",
-        dest="skip_excluded",
         action="store_true",
         default=True,
         help="Skip images marked as excluded (default: True).",
-    )
-    parser.add_argument(
-        "--no-skip-excluded",
-        dest="skip_excluded",
-        action="store_false",
-        help="Do not skip images marked as excluded.",
     )
     parser.add_argument(
         "--max-workers",
         "-j",
         type=int,
         default=int(os.getenv("MAX_WORKERS", "10")),
-        help="Number of concurrent worker threads for downloading images (default: 10 or $MAX_WORKERS).",
+        help="Number of concurrent worker threads.",
     )
     parser.add_argument(
         "--out_img_dir",
@@ -538,12 +332,10 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
-    chosen_source = "label-studio" if args.legacy_label_studio else args.data_source
 
     download_export_and_images(
         export_dir=args.out_export_dir,
         img_dir=args.out_img_dir,
-        data_source=chosen_source,
         api_url=args.api_url,
         api_token=args.api_token,
         skip_review_needed=args.skip_review_needed,

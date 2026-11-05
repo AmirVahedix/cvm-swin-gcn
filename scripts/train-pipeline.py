@@ -28,19 +28,6 @@ def main():
         description="Execute full end-to-end data downloading, preprocessing, label generation, splitting, model training, and evaluation pipeline."
     )
     parser.add_argument(
-        "--data-source",
-        "--source",
-        type=str,
-        choices=["api", "label-studio"],
-        default=os.getenv("DATA_SOURCE", "api"),
-        help="Data source to load annotations and images from: 'api' (default: CVM Backend API) or 'label-studio' (legacy).",
-    )
-    parser.add_argument(
-        "--legacy-label-studio",
-        action="store_true",
-        help="Keep legacy Label Studio as the data source instead of the default CVM Backend API.",
-    )
-    parser.add_argument(
         "--api-url",
         type=str,
         default=os.getenv("CVM_API_URL", "http://localhost:8000"),
@@ -252,14 +239,14 @@ def main():
     parser.add_argument(
         "--stage1-weights",
         type=str,
-        default="artifacts/stage1_best.pth",
-        help="Stage 1 checkpoint path (default: artifacts/stage1_best.pth).",
+        default="artifacts/yolo_stage1.pt",
+        help="Stage 1 YOLO checkpoint path (default: artifacts/yolo_stage1.pt).",
     )
     parser.add_argument(
-        "--stage1-run-id",
+        "--stage1-model",
         type=str,
-        default=None,
-        help="MLflow Run ID to automatically download Stage 1 checkpoint if not present locally.",
+        default="yolo11n.pt",
+        help="Pretrained YOLO base model for Stage 1 (default: yolo11n.pt).",
     )
     parser.add_argument(
         "--stage2-weights",
@@ -522,8 +509,6 @@ def main():
     )
 
     args = parser.parse_args()
-    if args.legacy_label_studio:
-        args.data_source = "label-studio"
 
     if args.eval_only:
         test_ready = (
@@ -547,10 +532,10 @@ def main():
             args.skip_stage1 = True
             args.skip_stage2 = True
 
-    verify_env(data_source=args.data_source)
+    verify_env()
 
     print("Initializing pipeline execution...\n" + "=" * 40)
-    print(f"Data source configured: {args.data_source.upper()}")
+    print("Data source configured: CVM BACKEND API")
     print(f"Training configured for {args.epochs} epochs.")
 
     try:
@@ -596,11 +581,10 @@ def main():
         if not args.train_only:
             # Step 1: Download Images & Exports
             if not args.skip_download:
-                print(f"\n[1/6] Executing: download_export_and_images(data_source='{args.data_source}')")
+                print("\n[1/6] Executing: download_export_and_images()")
                 download_export_and_images(
                     export_dir="data/raw/exports",
                     img_dir="data/raw/images",
-                    data_source=args.data_source,
                     api_url=args.api_url,
                     api_token=args.api_token,
                     skip_review_needed=args.skip_review_needed,
@@ -682,58 +666,31 @@ def main():
             print("🌟 TWO-STAGE COARSE-TO-FINE PIPELINE SELECTED")
             print("=" * 50)
 
-            # Step 5a: Stage 1 Training
+            # Step 5a: Stage 1 YOLO Dataset Gen & Training
             if not args.skip_stage1 and not os.path.exists(args.stage1_weights):
-                print(f"\n[5a/6] Executing Stage 1 Coarse Model Training ({args.epochs} epochs)...")
-                train_main(
-                    epochs=args.epochs,
-                    batch_size=args.batch_size,
-                    lr=args.lr,
-                    llrd_decay_rate=args.llrd_decay_rate,
-                    lambda_hm=args.lambda_hm,
-                    lambda_cd=args.lambda_cd,
-                    lambda_graph=args.lambda_graph,
-                    lambda_morph=args.lambda_morph,
-                    img_size=args.target_size,
-                    experiment_name=args.mlflow_experiment_name,
-                    tracking_uri=args.mlflow_tracking_uri,
-                    run_name=f"{args.mlflow_run_name}_stage1" if args.mlflow_run_name else "stage1_coarse",
-                    tracking_username=args.mlflow_username,
-                    tracking_password=args.mlflow_password,
-                    skip_eval=True,
-                    skip_ftp=True,
-                    save_optimizer=args.save_optimizer,
-                    use_amp=args.use_amp,
-                    compile_model=args.compile_model,
-                    warmup_coord_epochs=args.warmup_coord_epochs,
-                    use_balanced_sampling=args.use_balanced_sampling,
-                    balanced_sampling_power=args.balanced_sampling_power,
-                )
-                if os.path.exists("artifacts/best.pth"):
-                    import shutil
-                    shutil.copy("artifacts/best.pth", args.stage1_weights)
-                    print(f"--> Copied 'artifacts/best.pth' to '{args.stage1_weights}'")
-            elif os.path.exists(args.stage1_weights):
-                print(f"\n--> Stage 1 Skipped: Found existing checkpoint at '{args.stage1_weights}'")
-            else:
-                print("\n--> Stage 1 Skipped via --skip-stage1")
+                print(f"\n[5a/6] Generating YOLO Cervical Spine Dataset & Training Stage 1 YOLO Detector...")
+                from src.data.preprocessing.generate_yolo_labels import generate_yolo_dataset
+                from src.train_yolo import train_yolo_stage1
 
-            # Check if Stage 1 checkpoint is needed for Stage 2 warmstart and fetch from MLflow if missing
-            explicit_stage1_run = getattr(args, "stage1_run_id", None)
-            if explicit_stage1_run or not os.path.exists(args.stage1_weights):
-                run_id_for_stage1 = explicit_stage1_run or os.getenv("STAGE1_RUN_ID", "2d4d452398b14c688f51ac4431d40698")
-                print(f"\n--> Fetching Stage 1 weights from MLflow run '{run_id_for_stage1}' -> '{args.stage1_weights}'...")
-                from scripts.download_checkpoint import download_checkpoint_from_mlflow
-                try:
-                    download_checkpoint_from_mlflow(
-                        run_id=run_id_for_stage1,
-                        dest_path=args.stage1_weights,
-                        tracking_uri=args.mlflow_tracking_uri,
-                        username=args.mlflow_username,
-                        password=args.mlflow_password,
-                    )
-                except Exception as dl_err:
-                    print(f"⚠️ Warning: Download of Stage 1 weights from MLflow failed: {dl_err}")
+                generate_yolo_dataset(
+                    dataset_root="dataset",
+                    output_yolo_dir="dataset/yolo",
+                    margin_ratio=args.margin_ratio,
+                    min_size=180,
+                )
+
+                train_yolo_stage1(
+                    data_yaml="dataset/yolo/cvm_roi.yaml",
+                    model_name=args.stage1_model,
+                    epochs=min(args.epochs, 50),
+                    batch_size=args.batch_size,
+                    img_size=args.target_size,
+                    output_weights=args.stage1_weights,
+                )
+            elif os.path.exists(args.stage1_weights):
+                print(f"\n--> Stage 1 YOLO Skipped: Found existing checkpoint at '{args.stage1_weights}'")
+            else:
+                print("\n--> Stage 1 YOLO Skipped via --skip-stage1")
 
             # Determine consistent native image directory for Stage 2 training & evaluation
             native_dir = None if args.no_native_crops else (
@@ -751,8 +708,8 @@ def main():
                     target_size=args.stage2_size,
                     sigma=args.stage2_sigma,
                     margin_ratio=args.margin_ratio,
-                    stage1_weights=args.stage1_weights if os.path.exists(args.stage1_weights) else "artifacts/best.pth",
-                    warmstart_from_stage1=True,
+                    stage1_weights=args.stage1_weights if os.path.exists(args.stage1_weights) else None,
+                    warmstart_from_stage1=False,
                     save_path=args.stage2_weights,
                     train_img_dir="dataset/train/images",
                     train_npz_dir="dataset/train/labels",
@@ -796,7 +753,7 @@ def main():
                 s1_w = (
                     args.stage1_weights
                     if (args.stage1_weights and os.path.exists(args.stage1_weights))
-                    else ("artifacts/stage1_best.pth" if os.path.exists("artifacts/stage1_best.pth") else "artifacts/best.pth")
+                    else ("artifacts/yolo_stage1.pt" if os.path.exists("artifacts/yolo_stage1.pt") else "yolo11n.pt")
                 )
                 s2_w = (
                     args.stage2_weights

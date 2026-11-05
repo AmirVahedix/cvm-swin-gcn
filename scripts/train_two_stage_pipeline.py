@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-End-to-End Two-Stage Coarse-to-Fine Training & Evaluation Pipeline.
+End-to-End Two-Stage Pipeline: YOLO Stage 1 ROI Detector + Swin-GCN Stage 2 Refiner.
 
 Orchestrates:
-  Step 1: Train Stage 1 Coarse Model (640x640 full cephalograms) -> artifacts/stage1_best.pth
-  Step 2: Train Stage 2 Fine Model (448x448 vertebrae ROIs with jitter) -> artifacts/stage2_best.pth
+  Step 1: Train Stage 1 YOLO Cervical Spine Detector -> artifacts/yolo_stage1.pt
+  Step 2: Train Stage 2 Fine Swin-GCN (448x448 vertebrae ROIs with jitter) -> artifacts/stage2_best.pth
   Step 3: Run Full Cascaded Evaluation across Validation and Test sets, reporting:
-          - Stage 1 standalone performance
+          - Stage 1 YOLO ROI detection quality (IoU & Box metrics)
           - Stage 2 oracle performance (GT BBox)
           - Two-Stage cascaded pipeline performance
           - Delta improvement table
@@ -23,18 +23,18 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from src.eval_two_stage import run_two_stage_evaluation
-from src.train import main as train_stage1_main
 from src.train_stage2 import train_stage2_main
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="End-to-End Two-Stage Coarse-to-Fine Pipeline: Train Stage 1 -> Train Stage 2 -> Cascaded Evaluation"
+        description="End-to-End Two-Stage Pipeline: Train YOLO Stage 1 -> Train Stage 2 Swin -> Cascaded Evaluation"
     )
     # Stage 1 Parameters
     parser.add_argument("--skip-stage1", action="store_true", help="Skip Stage 1 training and use existing checkpoint")
-    parser.add_argument("--stage1-weights", type=str, default="artifacts/stage1_best.pth", help="Stage 1 checkpoint path")
-    parser.add_argument("--stage1-epochs", type=int, default=100, help="Epochs for Stage 1 training")
+    parser.add_argument("--stage1-weights", type=str, default="artifacts/yolo_stage1.pt", help="Stage 1 YOLO checkpoint path")
+    parser.add_argument("--stage1-model", type=str, default="yolo11n.pt", help="Base pretrained YOLO model")
+    parser.add_argument("--stage1-epochs", type=int, default=50, help="Epochs for Stage 1 YOLO training")
     parser.add_argument("--stage1-size", type=int, default=640, help="Stage 1 input resolution")
 
     # Stage 2 Parameters
@@ -87,21 +87,29 @@ def main():
     print("#" * 88)
 
     # -------------------------------------------------------------
-    # PHASE 1: STAGE 1 TRAINING (Coarse Model on Full Images)
+    # PHASE 1: STAGE 1 TRAINING (YOLO Cervical Spine ROI Detector)
     # -------------------------------------------------------------
     if not args.skip_stage1 and not os.path.exists(args.stage1_weights):
         print("\n" + "=" * 80)
-        print("PHASE 1: TRAINING STAGE 1 (COARSE MODEL ON 640x640 RADIOGRAPHS)")
+        print("PHASE 1: TRAINING STAGE 1 (YOLO CERVICAL SPINE ROI DETECTOR)")
         print("=" * 80)
-        train_stage1_main(
+        from src.data.preprocessing.generate_yolo_labels import generate_yolo_dataset
+        from src.train_yolo import train_yolo_stage1
+
+        generate_yolo_dataset(
+            dataset_root="dataset",
+            output_yolo_dir="dataset/yolo",
+            margin_ratio=args.margin_ratio,
+            min_size=180,
+        )
+
+        train_yolo_stage1(
+            data_yaml="dataset/yolo/cvm_roi.yaml",
+            model_name=args.stage1_model,
             epochs=args.stage1_epochs,
             batch_size=args.batch_size,
-            patience=args.patience,
-            lr=args.lr,
             img_size=args.stage1_size,
-            save_path=args.stage1_weights,
-            use_amp=not args.no_amp,
-            run_name="stage1_coarse_full",
+            output_weights=args.stage1_weights,
         )
     elif os.path.exists(args.stage1_weights):
         print(f"\n--> Phase 1 Skipped: Found pre-existing Stage 1 checkpoint at '{args.stage1_weights}'")
@@ -123,7 +131,7 @@ def main():
             sigma=args.sigma,
             margin_ratio=args.margin_ratio,
             stage1_weights=args.stage1_weights,
-            warmstart_from_stage1=not args.no_warmstart,
+            warmstart_from_stage1=False,
             save_path=args.stage2_weights,
             train_img_dir=args.train_img_dir,
             train_npz_dir=args.train_npz_dir,
