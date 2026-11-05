@@ -254,6 +254,10 @@ def run_two_stage_evaluation(
     tracking_password: Optional[str] = None,
     experiment_name: Optional[str] = "cvm-two-stage-cascade-eval",
     run_id: Optional[str] = None,
+    stage1_run_id: Optional[str] = None,
+    stage2_run_id: Optional[str] = None,
+    stage1_artifact_path: str = "weights/best.pt",
+    stage2_artifact_path: str = "checkpoints/best.pth",
     export_json: Optional[str] = "data/exports/export.json",
 ) -> Tuple[Dict[str, Any], str]:
     """
@@ -261,6 +265,33 @@ def run_two_stage_evaluation(
     """
     load_dotenv()
     device = resolve_device(device_str or "auto")
+
+    # If MLflow run IDs are provided and local files are missing, automatically download
+    if stage1_run_id:
+        from scripts.download_checkpoint import download_checkpoint_from_mlflow
+        target_s1 = Path("artifacts") / f"stage1_{stage1_run_id[:8]}.pt"
+        if not target_s1.exists():
+            print(f"--> Automatically downloading Stage 1 checkpoint from MLflow run '{stage1_run_id}'...")
+            download_checkpoint_from_mlflow(
+                run_id=stage1_run_id,
+                artifact_path=stage1_artifact_path,
+                dest_path=str(target_s1),
+                tracking_uri=tracking_uri,
+            )
+        stage1_weights = str(target_s1)
+
+    if stage2_run_id:
+        from scripts.download_checkpoint import download_checkpoint_from_mlflow
+        target_s2 = Path("artifacts") / f"stage2_{stage2_run_id[:8]}.pth"
+        if not target_s2.exists():
+            print(f"--> Automatically downloading Stage 2 checkpoint from MLflow run '{stage2_run_id}'...")
+            download_checkpoint_from_mlflow(
+                run_id=stage2_run_id,
+                artifact_path=stage2_artifact_path,
+                dest_path=str(target_s2),
+                tracking_uri=tracking_uri,
+            )
+        stage2_weights = str(target_s2)
 
     print("=" * 85)
     print(f"STARTING TWO-STAGE CASCADED EVALUATION | Device: {device}")
@@ -1129,9 +1160,45 @@ def run_two_stage_evaluation(
                 (cas_st == v_st) if v_st > 0 else "N/A",
             ])
 
+    # 8. Save structured Predictions JSON for Web/GUI applications
+    predictions_json_file = run_dir / "predictions_landmarks.json"
+    predictions_dict: Dict[str, Any] = {}
+    for idx, fn in enumerate(all_filenames):
+        orig_w, orig_h = all_orig_dims[idx]
+        casc_coords_native = casc_arr[idx]  # [13, 2] in native px
+        gt_coords_native = gt_arr[idx]      # [13, 2] in native px
+
+        sample_entry: Dict[str, Any] = {
+            "image_size": [int(orig_w), int(orig_h)],
+            "predicted_stage": f"CS{cascaded_stages[idx]}" if cascaded_stages[idx] > 0 else None,
+            "ground_truth_geom_stage": f"CS{gt_stages[idx]}" if gt_stages[idx] > 0 else None,
+            "voted_consensus_stage": f"CS{voted_stages[idx]}" if (has_voted_stages and voted_stages[idx] > 0) else None,
+            "landmarks_pixel": {},
+            "landmarks_normalized": {},
+            "ground_truth_pixel": {},
+        }
+
+        for l_idx, lm_name in enumerate(LANDMARK_CLASSES):
+            px_x, px_y = float(casc_coords_native[l_idx, 0]), float(casc_coords_native[l_idx, 1])
+            sample_entry["landmarks_pixel"][lm_name] = [round(px_x, 2), round(px_y, 2)]
+            sample_entry["landmarks_normalized"][lm_name] = [
+                round(px_x / max(orig_w, 1), 5),
+                round(px_y / max(orig_h, 1), 5),
+            ]
+
+            gt_x, gt_y = float(gt_coords_native[l_idx, 0]), float(gt_coords_native[l_idx, 1])
+            if gt_x >= 0 and gt_y >= 0:
+                sample_entry["ground_truth_pixel"][lm_name] = [round(gt_x, 2), round(gt_y, 2)]
+
+        predictions_dict[fn] = sample_entry
+
+    with open(predictions_json_file, "w", encoding="utf-8") as f:
+        json.dump(predictions_dict, f, indent=2)
+
     print(f"\n--> Successfully saved evaluation artifacts to '{run_dir}':")
     print(f"    • Report: {report_file.name}")
     print(f"    • Metrics: {metrics_json_file.name}")
+    print(f"    • Predictions JSON: {predictions_json_file.name}")
     print(f"    • Landmarks CSV: {csv_file.name}")
     print(f"    • Staging CSV: {staging_csv_file.name}")
     print(f"    • Visualizations: {vis_saved} panels in '{vis_dir.name}'")
@@ -1210,6 +1277,7 @@ def run_two_stage_evaluation(
                 mlflow.log_metrics(metrics_to_log)
                 mlflow.log_artifact(str(report_file))
                 mlflow.log_artifact(str(metrics_json_file))
+                mlflow.log_artifact(str(predictions_json_file))
                 mlflow.log_artifact(str(csv_file))
                 mlflow.log_artifact(str(staging_csv_file))
                 mlflow.log_artifacts(str(vis_dir), artifact_path="visualizations")
@@ -1295,6 +1363,10 @@ def main():
     parser.add_argument("--visualize", type=int, default=10, help="Number of visualization panels to save (-1 for all)")
     parser.add_argument("--run-name", type=str, default="test_split_cascade_eval", help="MLflow and report run name")
     parser.add_argument("--run-id", type=str, default=None, help="Existing MLflow Run ID to attach evaluation metrics and artifacts to")
+    parser.add_argument("--stage1-run-id", type=str, default=None, help="MLflow Run ID to automatically download Stage 1 weights from")
+    parser.add_argument("--stage2-run-id", type=str, default=None, help="MLflow Run ID to automatically download Stage 2 weights from")
+    parser.add_argument("--stage1-artifact", type=str, default="weights/best.pt", help="Stage 1 artifact path inside MLflow run (default: weights/best.pt)")
+    parser.add_argument("--stage2-artifact", type=str, default="checkpoints/best.pth", help="Stage 2 artifact path inside MLflow run (default: checkpoints/best.pth)")
     parser.add_argument("--device", type=str, default=None, help="Device (cuda/mps/cpu)")
     parser.add_argument("--native-img-dir", type=str, default=None, help="Directory of high-resolution native radiographs")
     parser.add_argument("--export-json", type=str, default="data/exports/export.json", help="Path to export.json for consensus finalStage mapping")
@@ -1322,6 +1394,10 @@ def main():
         native_img_dir=args.native_img_dir,
         log_to_mlflow=not args.skip_mlflow,
         run_id=args.run_id,
+        stage1_run_id=args.stage1_run_id,
+        stage2_run_id=args.stage2_run_id,
+        stage1_artifact_path=args.stage1_artifact,
+        stage2_artifact_path=args.stage2_artifact,
         export_json=args.export_json,
     )
 
