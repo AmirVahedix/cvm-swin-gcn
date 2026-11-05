@@ -259,6 +259,10 @@ def run_two_stage_evaluation(
     stage1_artifact_path: str = "weights/best.pt",
     stage2_artifact_path: str = "checkpoints/best.pth",
     export_json: Optional[str] = "data/exports/export.json",
+    eval_val: bool = True,
+    val_img_dir: str = "dataset/val/images",
+    val_npz_dir: str = "dataset/val/labels",
+    _is_internal_val_call: bool = False,
 ) -> Tuple[Dict[str, Any], str]:
     """
     Main programmatic routine evaluating Stage 1 alone, Stage 2 Oracle, and Two-Stage Cascade.
@@ -1303,6 +1307,59 @@ def run_two_stage_evaluation(
                             mlflow.log_artifact(str(pred_full_csv), artifact_path="predictions_light")
                         except Exception as e:
                             pass
+
+                # If requested and not in recursive call, also evaluate and log validation cohort
+                if eval_val and not _is_internal_val_call and os.path.exists(val_img_dir) and os.path.exists(val_npz_dir):
+                    print(f"\n{'='*85}\n[VAL EVALUATION] Automatically evaluating and logging VALIDATION cohort ({val_img_dir})...\n{'='*85}")
+                    try:
+                        active_run_id = mlflow.active_run().info.run_id if mlflow.active_run() else run_id
+                        val_payload, val_run_dir = run_two_stage_evaluation(
+                            stage1_weights=stage1_weights,
+                            stage2_weights=stage2_weights,
+                            img_dir=val_img_dir,
+                            npz_dir=val_npz_dir,
+                            output_dir=output_dir,
+                            run_name=f"{actual_run_name}_val" if actual_run_name else "val_split_cascade_eval",
+                            stage1_img_size=stage1_img_size,
+                            stage2_img_size=stage2_img_size,
+                            margin_ratio=margin_ratio,
+                            bottom_margin_ratio=bottom_margin_ratio,
+                            use_peaks=use_peaks,
+                            stage1_use_peaks=stage1_use_peaks,
+                            refine_2pass=refine_2pass,
+                            use_anatomical_prior=use_anatomical_prior,
+                            num_visualizations=num_visualizations,
+                            device_str=device_str,
+                            native_img_dir=native_img_dir,
+                            log_to_mlflow=False,
+                            export_json=export_json,
+                            eval_val=False,
+                            _is_internal_val_call=True,
+                        )
+                        # Log validation artifacts into evaluation/val in MLflow
+                        val_p = Path(val_run_dir)
+                        if (val_p / "metrics.json").exists():
+                            mlflow.log_artifact(str(val_p / "metrics.json"), artifact_path="evaluation/val")
+                        if (val_p / "summary_report.txt").exists():
+                            mlflow.log_artifact(str(val_p / "summary_report.txt"), artifact_path="evaluation/val")
+                        if (val_p / "predictions_landmarks.json").exists():
+                            mlflow.log_artifact(str(val_p / "predictions_landmarks.json"), artifact_path="evaluation/val")
+                        if (val_p / "predictions_landmarks.csv").exists():
+                            mlflow.log_artifact(str(val_p / "predictions_landmarks.csv"), artifact_path="evaluation/val")
+                        if (val_p / "predictions_staging.csv").exists():
+                            mlflow.log_artifact(str(val_p / "predictions_staging.csv"), artifact_path="evaluation/val")
+                        if (val_p / "visualizations").exists():
+                            mlflow.log_artifacts(str(val_p / "visualizations"), artifact_path="evaluation/val/visualizations")
+
+                        val_gen = val_payload.get("two_stage_cascade", {}).get("general", {})
+                        val_metrics_to_log = {
+                            f"val_{k}": float(v) for k, v in val_gen.items() if isinstance(v, (int, float))
+                        }
+                        if val_metrics_to_log:
+                            mlflow.log_metrics(val_metrics_to_log)
+                        print(f"✅ Validation cohort evaluation successfully logged to MLflow under 'evaluation/val'!")
+                    except Exception as v_err:
+                        print(f"⚠️ Warning: Validation cohort cascade evaluation failed: {v_err}")
         except Exception as ml_err:
             print(f"⚠️ MLflow logging notice: {ml_err}")
 
@@ -1363,6 +1420,9 @@ def main():
     parser.add_argument("--device", type=str, default=None, help="Device (cuda/mps/cpu)")
     parser.add_argument("--native-img-dir", type=str, default=None, help="Directory of high-resolution native radiographs")
     parser.add_argument("--export-json", type=str, default="data/exports/export.json", help="Path to export.json for consensus finalStage mapping")
+    parser.add_argument("--val-img-dir", type=str, default="dataset/val/images", help="Validation images directory for cascade evaluation")
+    parser.add_argument("--val-npz-dir", type=str, default="dataset/val/labels", help="Validation labels directory for cascade evaluation")
+    parser.add_argument("--no-eval-val", dest="eval_val", action="store_false", default=True, help="Disable running cascaded evaluation on validation cohort")
     parser.add_argument("--skip-mlflow", action="store_true", help="Skip MLflow logging")
 
     args = parser.parse_args()
@@ -1392,6 +1452,9 @@ def main():
         stage1_artifact_path=args.stage1_artifact,
         stage2_artifact_path=args.stage2_artifact,
         export_json=args.export_json,
+        eval_val=args.eval_val,
+        val_img_dir=args.val_img_dir,
+        val_npz_dir=args.val_npz_dir,
     )
 
 
