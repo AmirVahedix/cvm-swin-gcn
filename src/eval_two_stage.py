@@ -1351,6 +1351,34 @@ def run_two_stage_evaluation(
                         if (val_p / "visualizations").exists():
                             mlflow.log_artifacts(str(val_p / "visualizations"), artifact_path="evaluation/val/visualizations")
 
+                        # Create and log combined predictions_landmarks.json containing BOTH test and val images
+                        val_json_path = val_p / "predictions_landmarks.json"
+                        if val_json_path.exists() and predictions_json_file.exists():
+                            try:
+                                with open(predictions_json_file, "r", encoding="utf-8") as f_test:
+                                    combined_preds = json.load(f_test)
+                                with open(val_json_path, "r", encoding="utf-8") as f_val:
+                                    val_preds = json.load(f_val)
+                                combined_preds.update(val_preds)
+                                
+                                # Overwrite the main predictions_landmarks.json with the combined dict
+                                with open(predictions_json_file, "w", encoding="utf-8") as f_out:
+                                    json.dump(combined_preds, f_out, indent=2)
+                                
+                                # Also write to predictions_light directory for web app consumption
+                                pred_light_dir = Path("evaluation/predictions_light")
+                                pred_light_dir.mkdir(parents=True, exist_ok=True)
+                                combined_light_file = pred_light_dir / "predictions_full.json"
+                                with open(combined_light_file, "w", encoding="utf-8") as f_light:
+                                    json.dump(combined_preds, f_light, indent=2)
+                                
+                                # Re-log the unified file so root/MLflow has BOTH test and val
+                                mlflow.log_artifact(str(predictions_json_file))
+                                mlflow.log_artifact(str(combined_light_file), artifact_path="predictions_light")
+                                print(f"✅ Combined predictions_landmarks.json with BOTH test ({len(all_filenames)}) and val ({len(val_preds)}) images ({len(combined_preds)} total).")
+                            except Exception as c_err:
+                                print(f"⚠️ Warning: Could not combine test & val predictions JSON: {c_err}")
+
                         val_gen = val_payload.get("two_stage_cascade", {}).get("general", {})
                         val_metrics_to_log = {
                             f"val_{k}": float(v) for k, v in val_gen.items() if isinstance(v, (int, float))
