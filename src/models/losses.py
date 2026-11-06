@@ -309,3 +309,107 @@ class MorphometricShapeLoss(nn.Module):
             return total_loss / total_valid
         return torch.tensor(0.0, device=device)
 
+
+class AsymmetricEndplateConcavityLoss(nn.Module):
+    """
+    Asymmetric Endplate Concavity Loss for Cervical Vertebrae.
+    Penalizes both:
+    1. Tangential position (projection ratio along the inferior endplate axis PI -> AI)
+       to eliminate the model's tendency to predict the notch at the midpoint (50%).
+    2. Normal perpendicular concavity depth (height into the vertebral body).
+    
+    Vertebrae evaluated:
+    - C2: PI=0, IC=1, AI=2
+    - C3: PI=5, IC=6, AI=7
+    - C4: PI=10, IC=11, AI=12
+    """
+    def __init__(self, weight_tangential: float = 2.0, weight_depth: float = 1.0, beta: float = 0.02, eps: float = 1e-6):
+        super().__init__()
+        self.weight_tangential = weight_tangential
+        self.weight_depth = weight_depth
+        self.beta = beta
+        self.eps = eps
+        # (PI, IC, AI) landmark indices
+        self.triplets = [(0, 1, 2), (5, 6, 7), (10, 11, 12)]
+
+    @staticmethod
+    def compute_endplate_projections(
+        pi: torch.Tensor,
+        ic: torch.Tensor,
+        ai: torch.Tensor,
+        eps: float = 1e-6,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Computes the tangential projection ratio along (AI - PI) and the perpendicular depth.
+        
+        Args:
+            pi: [B, 2] Posterior-Inferior coordinates
+            ic: [B, 2] Inferior-Concavity coordinates
+            ai: [B, 2] Anterior-Inferior coordinates
+            
+        Returns:
+            proj_ratio: [B, 1] relative position of IC along baseline (0.0=at PI, 1.0=at AI)
+            perp_depth: [B, 1] perpendicular depth from baseline
+        """
+        base_v = ai - pi  # [B, 2]
+        base_len_sq = torch.sum(base_v ** 2, dim=-1, keepdim=True) + eps  # [B, 1]
+        base_len = torch.sqrt(base_len_sq)  # [B, 1]
+
+        v_ic = ic - pi  # [B, 2]
+        # Tangential projection scalar: (v_ic . base_v) / ||base_v||^2
+        dot = torch.sum(v_ic * base_v, dim=-1, keepdim=True)
+        proj_ratio = dot / base_len_sq  # [B, 1]
+
+        # Perpendicular 2D cross product magnitude: |dx * vy - dy * vx| / ||base_v||
+        cross_mag = torch.abs(base_v[:, 0:1] * v_ic[:, 1:2] - base_v[:, 1:2] * v_ic[:, 0:1])
+        perp_depth = cross_mag / base_len  # [B, 1]
+
+        return proj_ratio, perp_depth
+
+    def forward(self, pred_coords: torch.Tensor, gt_coords: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            pred_coords: [B, N, 2] in normalized coordinates [0, 1]
+            gt_coords: [B, N, 2] in normalized coordinates [0, 1]
+        """
+        device = pred_coords.device
+        total_loss = torch.tensor(0.0, device=device)
+        total_valid = 0.0
+
+        for pi_idx, ic_idx, ai_idx in self.triplets:
+            valid = (
+                (gt_coords[:, pi_idx, 0] >= 0) & (gt_coords[:, pi_idx, 1] >= 0) &
+                (gt_coords[:, ic_idx, 0] >= 0) & (gt_coords[:, ic_idx, 1] >= 0) &
+                (gt_coords[:, ai_idx, 0] >= 0) & (gt_coords[:, ai_idx, 1] >= 0)
+            )
+
+            if not valid.any():
+                continue
+
+            pred_ratio, pred_depth = self.compute_endplate_projections(
+                pred_coords[:, pi_idx, :],
+                pred_coords[:, ic_idx, :],
+                pred_coords[:, ai_idx, :],
+                eps=self.eps,
+            )
+
+            with torch.no_grad():
+                gt_ratio, gt_depth = self.compute_endplate_projections(
+                    gt_coords[:, pi_idx, :],
+                    gt_coords[:, ic_idx, :],
+                    gt_coords[:, ai_idx, :],
+                    eps=self.eps,
+                )
+
+            loss_ratio = F.smooth_l1_loss(pred_ratio, gt_ratio, beta=self.beta, reduction="none").squeeze(-1)
+            loss_depth = F.smooth_l1_loss(pred_depth, gt_depth, beta=self.beta, reduction="none").squeeze(-1)
+
+            triplet_loss = (self.weight_tangential * loss_ratio + self.weight_depth * loss_depth) * valid.float()
+            total_loss = total_loss + triplet_loss.sum()
+            total_valid += valid.float().sum()
+
+        if total_valid > 0.0:
+            return total_loss / total_valid
+        return torch.tensor(0.0, device=device)
+
+

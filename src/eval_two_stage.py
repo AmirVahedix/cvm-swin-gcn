@@ -94,6 +94,89 @@ IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
 IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 
 
+def predict_patch_with_tta(
+    model: nn.Module,
+    images: torch.Tensor,
+    use_tta: bool = True,
+    tta_scales: Tuple[float, ...] = (0.95, 1.0, 1.05),
+    use_peaks: bool = True,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Inference helper for ROI crop tensor with Test-Time Augmentation (TTA).
+    Evaluates multi-scale crops, inverting coordinate offsets and consensus averaging heatmaps.
+    """
+    if not use_tta or not tta_scales:
+        hm, cd = model(images)
+        if use_peaks:
+            cd = extract_subpixel_peaks(hm)
+        return hm, cd
+
+    B, C, H, W = images.shape
+    all_coords = []
+    all_heatmaps = []
+
+    for s in tta_scales:
+        if abs(s - 1.0) < 1e-4:
+            hm, cd = model(images)
+            all_coords.append(cd)
+            all_heatmaps.append(hm)
+        elif s < 1.0:
+            Hs = max(1, int(round(H * s)))
+            Ws = max(1, int(round(W * s)))
+            scaled_img = F.interpolate(images, size=(Hs, Ws), mode="bilinear", align_corners=False)
+            pad_top = (H - Hs) // 2
+            pad_bottom = H - Hs - pad_top
+            pad_left = (W - Ws) // 2
+            pad_right = W - Ws - pad_left
+            padded_img = F.pad(scaled_img, (pad_left, pad_right, pad_top, pad_bottom), mode="replicate")
+
+            hm_aug, cd_aug = model(padded_img)
+
+            cd_x_px = cd_aug[..., 0] * W
+            cd_y_px = cd_aug[..., 1] * H
+            orig_cd_x = (cd_x_px - pad_left) / float(Ws)
+            orig_cd_y = (cd_y_px - pad_top) / float(Hs)
+            orig_cd = torch.stack([orig_cd_x, orig_cd_y], dim=-1).clamp(0.0, 1.0)
+            all_coords.append(orig_cd)
+
+            hm_unpad = hm_aug[:, :, pad_top:pad_top + Hs, pad_left:pad_left + Ws]
+            hm_orig = F.interpolate(hm_unpad, size=(H, W), mode="bilinear", align_corners=False)
+            all_heatmaps.append(hm_orig)
+        else:
+            Hs = int(round(H * s))
+            Ws = int(round(W * s))
+            scaled_img = F.interpolate(images, size=(Hs, Ws), mode="bilinear", align_corners=False)
+            crop_top = (Hs - H) // 2
+            crop_left = (Ws - W) // 2
+            cropped_img = scaled_img[:, :, crop_top:crop_top + H, crop_left:crop_left + W]
+
+            hm_aug, cd_aug = model(cropped_img)
+
+            cd_x_px = cd_aug[..., 0] * W
+            cd_y_px = cd_aug[..., 1] * H
+            orig_cd_x = (cd_x_px + crop_left) / float(Ws)
+            orig_cd_y = (cd_y_px + crop_top) / float(Hs)
+            orig_cd = torch.stack([orig_cd_x, orig_cd_y], dim=-1).clamp(0.0, 1.0)
+            all_coords.append(orig_cd)
+
+            pad_top = crop_top
+            pad_bottom = Hs - H - crop_top
+            pad_left = crop_left
+            pad_right = Ws - W - crop_left
+            hm_pad = F.pad(hm_aug, (pad_left, pad_right, pad_top, pad_bottom), mode="constant", value=0.0)
+            hm_orig = F.interpolate(hm_pad, size=(H, W), mode="bilinear", align_corners=False)
+            all_heatmaps.append(hm_orig)
+
+    consensus_heatmaps = torch.mean(torch.stack(all_heatmaps, dim=0), dim=0)
+    if use_peaks:
+        consensus_coords = extract_subpixel_peaks(consensus_heatmaps)
+    else:
+        consensus_coords = torch.mean(torch.stack(all_coords, dim=0), dim=0)
+
+    return consensus_heatmaps, consensus_coords
+
+
+
 def to_normalized_tensor(img_rgb: np.ndarray, device: torch.device) -> torch.Tensor:
     """Normalizes an RGB uint8 image [H, W, 3] using ImageNet statistics into a float tensor [1, 3, H, W]."""
     norm = ((img_rgb.astype(np.float32) / 255.0) - IMAGENET_MEAN) / IMAGENET_STD
@@ -243,6 +326,8 @@ def run_two_stage_evaluation(
     bottom_margin_ratio: Optional[float] = 0.28,
     use_peaks: bool = True,
     stage1_use_peaks: bool = False,
+    use_tta: bool = True,
+    tta_scales: Tuple[float, ...] = (0.95, 1.0, 1.05),
     refine_2pass: bool = False,
     use_anatomical_prior: bool = False,
     num_visualizations: int = 10,
@@ -260,9 +345,13 @@ def run_two_stage_evaluation(
     stage2_artifact_path: str = "checkpoints/best.pth",
     export_json: Optional[str] = "data/exports/export.json",
     eval_val: bool = True,
+    eval_train: bool = True,
     val_img_dir: str = "dataset/val/images",
     val_npz_dir: str = "dataset/val/labels",
+    train_img_dir: str = "dataset/train/images",
+    train_npz_dir: str = "dataset/train/labels",
     _is_internal_val_call: bool = False,
+    _is_internal_train_call: bool = False,
 ) -> Tuple[Dict[str, Any], str]:
     """
     Main programmatic routine evaluating Stage 1 alone, Stage 2 Oracle, and Two-Stage Cascade.
@@ -534,9 +623,13 @@ def run_two_stage_evaluation(
             bbox_scale_errors.append(scale_err)
             oracle_patch = _get_roi_crop(gt_bbox)
             oracle_in = to_normalized_tensor(oracle_patch, device)
-            oracle_hm, oracle_coords_roi_t = stage2_model(oracle_in)
-            if use_peaks:
-                oracle_coords_roi_t = extract_subpixel_peaks(oracle_hm)
+            oracle_hm, oracle_coords_roi_t = predict_patch_with_tta(
+                model=stage2_model,
+                images=oracle_in,
+                use_tta=use_tta,
+                tta_scales=tta_scales,
+                use_peaks=use_peaks,
+            )
             oracle_coords_roi = oracle_coords_roi_t.squeeze(0).cpu().numpy()
             oracle_coords_canvas = inverse_transform_coords(
                 roi_coords=oracle_coords_roi,
@@ -557,9 +650,13 @@ def run_two_stage_evaluation(
 
             casc_patch = _get_roi_crop(s1_bbox)
             casc_in = to_normalized_tensor(casc_patch, device)
-            casc_hm, casc_coords_roi_t = stage2_model(casc_in)
-            if use_peaks:
-                casc_coords_roi_t = extract_subpixel_peaks(casc_hm)
+            casc_hm, casc_coords_roi_t = predict_patch_with_tta(
+                model=stage2_model,
+                images=casc_in,
+                use_tta=use_tta,
+                tta_scales=tta_scales,
+                use_peaks=use_peaks,
+            )
             casc_coords_roi = casc_coords_roi_t.squeeze(0).cpu().numpy()
             cascaded_coords_canvas = inverse_transform_coords(
                 roi_coords=casc_coords_roi,
@@ -580,9 +677,13 @@ def run_two_stage_evaluation(
                 if not s2_bbox.is_fallback:
                     casc_patch_2 = _get_roi_crop(s2_bbox)
                     casc_in_2 = to_normalized_tensor(casc_patch_2, device)
-                    casc_hm_2, casc_coords_roi_2_t = stage2_model(casc_in_2)
-                    if use_peaks:
-                        casc_coords_roi_2_t = extract_subpixel_peaks(casc_hm_2)
+                    casc_hm_2, casc_coords_roi_2_t = predict_patch_with_tta(
+                        model=stage2_model,
+                        images=casc_in_2,
+                        use_tta=use_tta,
+                        tta_scales=tta_scales,
+                        use_peaks=use_peaks,
+                    )
                     casc_coords_roi_2 = casc_coords_roi_2_t.squeeze(0).cpu().numpy()
                     cascaded_coords_canvas = inverse_transform_coords(
                         roi_coords=casc_coords_roi_2,
@@ -1326,6 +1427,8 @@ def run_two_stage_evaluation(
                             bottom_margin_ratio=bottom_margin_ratio,
                             use_peaks=use_peaks,
                             stage1_use_peaks=stage1_use_peaks,
+                            use_tta=use_tta,
+                            tta_scales=tta_scales,
                             refine_2pass=refine_2pass,
                             use_anatomical_prior=use_anatomical_prior,
                             num_visualizations=num_visualizations,
@@ -1388,6 +1491,62 @@ def run_two_stage_evaluation(
                         print(f"✅ Validation cohort evaluation successfully logged to MLflow under 'evaluation/val'!")
                     except Exception as v_err:
                         print(f"⚠️ Warning: Validation cohort cascade evaluation failed: {v_err}")
+
+                # Optional automatic evaluation of TRAIN cohort to ensure 100% complete dataset coverage (train + val + test)
+                if eval_train and not _is_internal_val_call and not _is_internal_train_call and os.path.exists(train_img_dir) and os.path.exists(train_npz_dir):
+                    print(f"\n--> Running cascaded evaluation on TRAIN cohort ({train_img_dir})...")
+                    try:
+                        train_payload, train_run_dir = run_two_stage_evaluation(
+                            stage1_weights=stage1_weights,
+                            stage2_weights=stage2_weights,
+                            img_dir=train_img_dir,
+                            npz_dir=train_npz_dir,
+                            output_dir=output_dir,
+                            run_name=f"{actual_run_name}_train" if actual_run_name else "train_split_cascade_eval",
+                            stage1_img_size=stage1_img_size,
+                            stage2_img_size=stage2_img_size,
+                            margin_ratio=margin_ratio,
+                            bottom_margin_ratio=bottom_margin_ratio,
+                            use_peaks=use_peaks,
+                            stage1_use_peaks=stage1_use_peaks,
+                            use_tta=use_tta,
+                            tta_scales=tta_scales,
+                            refine_2pass=refine_2pass,
+                            use_anatomical_prior=use_anatomical_prior,
+                            num_visualizations=0,
+                            device_str=device_str,
+                            native_img_dir=native_img_dir,
+                            log_to_mlflow=False,
+                            export_json=export_json,
+                            eval_val=False,
+                            eval_train=False,
+                            _is_internal_train_call=True,
+                        )
+                        train_p = Path(train_run_dir)
+                        train_json_path = train_p / "predictions_landmarks.json"
+                        if train_json_path.exists() and predictions_json_file.exists():
+                            with open(predictions_json_file, "r", encoding="utf-8") as f_curr:
+                                full_combined = json.load(f_curr)
+                            with open(train_json_path, "r", encoding="utf-8") as f_tr:
+                                train_preds = json.load(f_tr)
+                            full_combined.update(train_preds)
+
+                            # Overwrite main predictions_landmarks.json with ALL images (train+val+test)
+                            with open(predictions_json_file, "w", encoding="utf-8") as f_out:
+                                json.dump(full_combined, f_out, indent=2)
+
+                            pred_light_dir = Path("evaluation/predictions_light")
+                            pred_light_dir.mkdir(parents=True, exist_ok=True)
+                            combined_light_file = pred_light_dir / "predictions_full.json"
+                            with open(combined_light_file, "w", encoding="utf-8") as f_light:
+                                json.dump(full_combined, f_light, indent=2)
+
+                            mlflow.log_artifact(str(predictions_json_file))
+                            mlflow.log_artifact(str(combined_light_file), artifact_path="predictions_light")
+                            print(f"🎉 Fully merged predictions_landmarks.json with ALL images (train + val + test: {len(full_combined)} total images).")
+                    except Exception as t_err:
+                        print(f"⚠️ Warning: Train cohort cascade evaluation failed: {t_err}")
+
         except Exception as ml_err:
             print(f"⚠️ MLflow logging notice: {ml_err}")
 
@@ -1424,6 +1583,25 @@ def main():
         default=False,
         help="Extract Stage 1 coarse coordinates using heatmap peak finding instead of SoftArgmax (default: False)",
     )
+    parser.add_argument(
+        "--use-tta",
+        dest="use_tta",
+        action="store_true",
+        default=True,
+        help="Enable multi-scale Test-Time Augmentation (TTA) on Stage 2 ROI crops (default: True)",
+    )
+    parser.add_argument(
+        "--no-tta",
+        dest="use_tta",
+        action="store_false",
+        help="Disable Test-Time Augmentation (TTA)",
+    )
+    parser.add_argument(
+        "--tta-scales",
+        type=str,
+        default="0.95,1.0,1.05",
+        help="Comma-separated scale factors for Stage 2 TTA (default: '0.95,1.0,1.05')",
+    )
     parser.add_argument("--refine-2pass", action="store_true", help="Enable 2-pass iterative refinement")
     parser.add_argument(
         "--use-anatomical-prior",
@@ -1450,10 +1628,15 @@ def main():
     parser.add_argument("--export-json", type=str, default="data/exports/export.json", help="Path to export.json for consensus finalStage mapping")
     parser.add_argument("--val-img-dir", type=str, default="dataset/val/images", help="Validation images directory for cascade evaluation")
     parser.add_argument("--val-npz-dir", type=str, default="dataset/val/labels", help="Validation labels directory for cascade evaluation")
+    parser.add_argument("--train-img-dir", type=str, default="dataset/train/images", help="Train images directory for full dataset inference")
+    parser.add_argument("--train-npz-dir", type=str, default="dataset/train/labels", help="Train labels directory for full dataset inference")
     parser.add_argument("--no-eval-val", dest="eval_val", action="store_false", default=True, help="Disable running cascaded evaluation on validation cohort")
+    parser.add_argument("--no-eval-train", dest="eval_train", action="store_false", default=True, help="Disable running cascaded evaluation on train cohort")
     parser.add_argument("--skip-mlflow", action="store_true", help="Skip MLflow logging")
 
     args = parser.parse_args()
+
+    tta_scales_tuple = tuple(float(s.strip()) for s in args.tta_scales.split(",") if s.strip())
 
     run_two_stage_evaluation(
         stage1_weights=args.stage1_weights,
@@ -1468,6 +1651,8 @@ def main():
         bottom_margin_ratio=args.bottom_margin_ratio,
         use_peaks=args.use_peaks,
         stage1_use_peaks=args.stage1_use_peaks,
+        use_tta=args.use_tta,
+        tta_scales=tta_scales_tuple,
         refine_2pass=args.refine_2pass,
         use_anatomical_prior=args.use_anatomical_prior,
         num_visualizations=args.visualize,
@@ -1481,8 +1666,11 @@ def main():
         stage2_artifact_path=args.stage2_artifact,
         export_json=args.export_json,
         eval_val=args.eval_val,
+        eval_train=args.eval_train,
         val_img_dir=args.val_img_dir,
         val_npz_dir=args.val_npz_dir,
+        train_img_dir=args.train_img_dir,
+        train_npz_dir=args.train_npz_dir,
     )
 
 
