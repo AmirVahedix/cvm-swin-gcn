@@ -42,7 +42,7 @@ from src.train_stage2 import (
     get_cosine_schedule_with_warmup,
     validate_stage2_epoch,
 )
-from src.train import resolve_device
+from src.inference import resolve_device
 from scripts.download_checkpoint import download_checkpoint_from_mlflow
 
 
