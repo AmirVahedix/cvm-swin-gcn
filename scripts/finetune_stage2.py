@@ -40,7 +40,7 @@ from src.train_stage2 import (
     get_landmark_weights,
     get_llrd_param_groups,
     get_cosine_schedule_with_warmup,
-    evaluate_stage2_epoch,
+    validate_stage2_epoch,
 )
 from src.train import resolve_device
 from scripts.download_checkpoint import download_checkpoint_from_mlflow
@@ -221,7 +221,7 @@ def finetune_stage2(
             train_loss = epoch_loss / num_batches
 
             # Validation
-            val_loss, val_metrics = evaluate_stage2_epoch(
+            val_loss, val_metrics = validate_stage2_epoch(
                 model=model,
                 dataloader=val_loader,
                 awl_loss=awl_loss,
