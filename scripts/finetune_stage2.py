@@ -141,8 +141,7 @@ def finetune_stage2(
         sigma=sigma,
         margin_ratio=margin_ratio,
         bottom_margin_ratio=bottom_margin_ratio,
-        jitter_trans=0.04,
-        jitter_scale=0.05,
+        jitter={"trans": 0.04, "scale": 0.05},
         num_workers=4,
         native_img_dir=native_img_dir if (native_img_dir and os.path.exists(native_img_dir)) else None,
     )
