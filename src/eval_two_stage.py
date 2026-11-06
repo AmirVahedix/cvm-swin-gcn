@@ -29,6 +29,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import scipy.stats
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
 from dotenv import load_dotenv
 from tqdm import tqdm
 
