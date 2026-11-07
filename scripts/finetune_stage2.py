@@ -59,6 +59,11 @@ def finetune_stage2(
     lambda_hm: float = 50.0,
     lambda_cd: float = 2.0,
     lambda_endplate: float = 5.0,
+    penalty_underestimate: float = 3.0,
+    depth_threshold: float = 0.025,
+    use_off_midline_sampling: bool = True,
+    off_midline_threshold: float = 0.10,
+    off_midline_boost: float = 3.0,
     save_path: str = "artifacts/stage2_finetuned_best.pth",
     train_img_dir: str = "dataset/train/images",
     train_npz_dir: str = "dataset/train/labels",
@@ -129,8 +134,8 @@ def finetune_stage2(
     print(f"    Loaded weights (missing: {len(incompatible.missing_keys)}, unexpected: {len(incompatible.unexpected_keys)})")
     model = model.to(device)
 
-    # 3. Dataloaders with sharpened sigma
-    print(f"\n--> Building ROI Dataloaders (sigma={sigma})...")
+    # 3. Dataloaders with sharpened sigma and off-midline weighted sampling
+    print(f"\n--> Building ROI Dataloaders (sigma={sigma}, off_midline_sampling={use_off_midline_sampling})...")
     train_loader, val_loader = get_roi_dataloaders(
         train_img_dir=train_img_dir,
         train_npz_dir=train_npz_dir,
@@ -143,6 +148,9 @@ def finetune_stage2(
         bottom_margin_ratio=bottom_margin_ratio,
         jitter={"trans": 0.04, "scale": 0.05},
         num_workers=4,
+        use_off_midline_sampling=use_off_midline_sampling,
+        off_midline_threshold=off_midline_threshold,
+        off_midline_boost=off_midline_boost,
         native_img_dir=native_img_dir if (native_img_dir and os.path.exists(native_img_dir)) else None,
     )
 
@@ -154,7 +162,12 @@ def finetune_stage2(
 
     awl_loss = AdaptiveWingLoss().to(device)
     wing_loss = WingLoss(img_size=float(target_size)).to(device)
-    endplate_loss = AsymmetricEndplateConcavityLoss(weight_tangential=2.5, weight_depth=1.0).to(device)
+    endplate_loss = AsymmetricEndplateConcavityLoss(
+        weight_tangential=2.5,
+        weight_depth=1.0,
+        penalty_underestimate=penalty_underestimate,
+        depth_threshold=depth_threshold,
+    ).to(device)
     landmark_weights = get_landmark_weights(device)
 
     # 5. MLflow Init
@@ -178,6 +191,11 @@ def finetune_stage2(
             "lambda_cd": lambda_cd,
             "lambda_graph": 0.0,
             "lambda_endplate": lambda_endplate,
+            "penalty_underestimate": penalty_underestimate,
+            "depth_threshold": depth_threshold,
+            "use_off_midline_sampling": use_off_midline_sampling,
+            "off_midline_threshold": off_midline_threshold,
+            "off_midline_boost": off_midline_boost,
             "target_size": target_size,
         })
 
@@ -306,6 +324,11 @@ def main():
     parser.add_argument("--lr", type=float, default=3e-5, help="Fine-tuning learning rate (default: 3e-5)")
     parser.add_argument("--sigma", type=float, default=2.0, help="Target Gaussian sigma (default: 2.0)")
     parser.add_argument("--lambda-endplate", type=float, default=5.0, help="Weight for asymmetric endplate loss")
+    parser.add_argument("--penalty-underestimate", type=float, default=3.0, help="Steep multiplier for depth under-estimation")
+    parser.add_argument("--depth-threshold", type=float, default=0.025, help="Ground truth concavity threshold for depth penalty")
+    parser.add_argument("--no-off-midline-sampling", action="store_true", help="Disable off-midline weighted sampling")
+    parser.add_argument("--off-midline-threshold", type=float, default=0.10, help="Threshold deviation |ratio - 0.50| to qualify as off-midline")
+    parser.add_argument("--off-midline-boost", type=float, default=3.0, help="Sampling weight multiplier for off-midline images")
     parser.add_argument("--save-path", type=str, default="artifacts/stage2_best.pth")
     parser.add_argument("--skip-eval", action="store_true")
 
@@ -319,6 +342,11 @@ def main():
         lr=args.lr,
         sigma=args.sigma,
         lambda_endplate=args.lambda_endplate,
+        penalty_underestimate=args.penalty_underestimate,
+        depth_threshold=args.depth_threshold,
+        use_off_midline_sampling=not args.no_off_midline_sampling,
+        off_midline_threshold=args.off_midline_threshold,
+        off_midline_boost=args.off_midline_boost,
         save_path=args.save_path,
         stage1_run_id=args.stage1_run_id,
         stage1_artifact=args.stage1_artifact,

@@ -241,6 +241,9 @@ def get_roi_dataloaders(
     jitter: Optional[Dict[str, float]] = None,
     num_workers: int = 4,
     use_balanced_sampling: bool = True,
+    use_off_midline_sampling: bool = False,
+    off_midline_threshold: float = 0.10,
+    off_midline_boost: float = 3.0,
     sampling_power: Optional[float] = None,
     export_json_path: Optional[str] = None,
     native_img_dir: Optional[str] = None,
@@ -250,6 +253,7 @@ def get_roi_dataloaders(
     """
     from src.data.loaders.dataloader import (
         build_class_weighted_sampler,
+        build_off_midline_weighted_sampler,
         load_stage_mapping,
     )
 
@@ -294,7 +298,16 @@ def get_roi_dataloaders(
 
     train_sampler = None
     shuffle = True
-    if use_balanced_sampling:
+    if use_off_midline_sampling:
+        train_sampler = build_off_midline_weighted_sampler(
+            train_files,
+            labels_dir=train_npz_dir,
+            off_midline_threshold=off_midline_threshold,
+            boost_weight=off_midline_boost,
+        )
+        if train_sampler is not None:
+            shuffle = False
+    elif use_balanced_sampling:
         train_sampler = build_class_weighted_sampler(
             train_files, export_json_path=export_json_path, power=sampling_power
         )

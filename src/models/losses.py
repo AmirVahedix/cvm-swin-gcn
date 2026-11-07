@@ -316,18 +316,32 @@ class AsymmetricEndplateConcavityLoss(nn.Module):
     Penalizes both:
     1. Tangential position (projection ratio along the inferior endplate axis PI -> AI)
        to eliminate the model's tendency to predict the notch at the midpoint (50%).
-    2. Normal perpendicular concavity depth (height into the vertebral body).
+    2. Truly Asymmetric Depth Loss: Mathematically asymmetric Huber/Smooth-L1 loss.
+       When a true concavity exists in ground truth (gt_depth >= depth_threshold),
+       under-estimation (pred_depth < gt_depth, i.e., flattening out a genuine notch)
+       is penalized with a steep gradient multiplier (penalty_underestimate, e.g. 3.0x),
+       while over-estimation is penalized at standard 1.0x.
     
     Vertebrae evaluated:
     - C2: PI=0, IC=1, AI=2
     - C3: PI=5, IC=6, AI=7
     - C4: PI=10, IC=11, AI=12
     """
-    def __init__(self, weight_tangential: float = 2.0, weight_depth: float = 1.0, beta: float = 0.02, eps: float = 1e-6):
+    def __init__(
+        self,
+        weight_tangential: float = 2.0,
+        weight_depth: float = 1.0,
+        beta: float = 0.02,
+        penalty_underestimate: float = 3.0,
+        depth_threshold: float = 0.025,
+        eps: float = 1e-6,
+    ):
         super().__init__()
         self.weight_tangential = weight_tangential
         self.weight_depth = weight_depth
         self.beta = beta
+        self.penalty_underestimate = penalty_underestimate
+        self.depth_threshold = depth_threshold
         self.eps = eps
         # (PI, IC, AI) landmark indices
         self.triplets = [(0, 1, 2), (5, 6, 7), (10, 11, 12)]
@@ -402,11 +416,35 @@ class AsymmetricEndplateConcavityLoss(nn.Module):
                 )
 
             loss_ratio = F.smooth_l1_loss(pred_ratio, gt_ratio, beta=self.beta, reduction="none").squeeze(-1)
-            loss_depth = F.smooth_l1_loss(pred_depth, gt_depth, beta=self.beta, reduction="none").squeeze(-1)
+
+            # Mathematically True Asymmetric Depth Loss:
+            # Under-estimation (pred_depth < gt_depth) flattens a genuine concavity,
+            # which is clinically detrimental to CVM staging.
+            diff_depth = pred_depth - gt_depth
+            abs_diff_depth = torch.abs(diff_depth)
+
+            smooth_l1_depth = torch.where(
+                abs_diff_depth < self.beta,
+                0.5 * (diff_depth ** 2) / self.beta,
+                abs_diff_depth - 0.5 * self.beta,
+            )
+
+            # Apply asymmetric penalty multiplier when under-estimating a genuine notch
+            underestimate_mask = (diff_depth < 0.0) & (gt_depth >= self.depth_threshold)
+            multiplier = torch.where(
+                underestimate_mask,
+                torch.as_tensor(self.penalty_underestimate, device=device, dtype=pred_coords.dtype),
+                torch.as_tensor(1.0, device=device, dtype=pred_coords.dtype),
+            )
+            loss_depth = (multiplier * smooth_l1_depth).squeeze(-1)
 
             triplet_loss = (self.weight_tangential * loss_ratio + self.weight_depth * loss_depth) * valid.float()
             total_loss = total_loss + triplet_loss.sum()
             total_valid += valid.float().sum()
+
+        if total_valid > 0.0:
+            return total_loss / total_valid
+        return torch.tensor(0.0, device=device)
 
         if total_valid > 0.0:
             return total_loss / total_valid

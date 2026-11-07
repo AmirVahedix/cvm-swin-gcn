@@ -204,6 +204,103 @@ def build_class_weighted_sampler(
     return sampler
 
 
+def build_off_midline_weighted_sampler(
+    train_files: list[str],
+    labels_dir: str = TRAIN_NPZ_DIR,
+    off_midline_threshold: float = 0.10,
+    boost_weight: float = 3.0,
+    base_weight: float = 1.0,
+    num_samples: int | None = None,
+) -> WeightedRandomSampler | None:
+    """
+    Constructs a WeightedRandomSampler that boosts the sampling weight for images
+    that exhibit an off-midline concavity on ANY of the three cervical vertebrae (C2, C3, or C4).
+
+    Anatomical reasoning:
+    - Many models develop a central bias, predicting concavity dips at the exact geometric midpoint (50%).
+    - In lateral cephalograms, true anatomical concavities often develop asymmetrically along the endplate.
+    - If any single vertebra (C2, C3, or C4) has an inferior concavity projection ratio deviating
+      from 0.50 by at least `off_midline_threshold`, the image's sampling weight is boosted.
+
+    Args:
+        train_files: List of training image file paths or names.
+        labels_dir: Directory containing precomputed .npz ground truth arrays.
+        off_midline_threshold: Minimum absolute deviation from 0.50 (|ratio - 0.50|) to qualify as off-midline.
+        boost_weight: Sampling weight assigned to images with at least one off-midline vertebra.
+        base_weight: Sampling weight assigned to centered/symmetric images.
+        num_samples: Total samples to draw per epoch (defaults to len(train_files)).
+
+    Returns:
+        WeightedRandomSampler configured with per-sample weights, or None if train_files is empty.
+    """
+    if not train_files:
+        return None
+
+    import numpy as np
+
+    # Vertebrae triplets (PI, IC, AI)
+    triplets = [("C2", 0, 1, 2), ("C3", 5, 6, 7), ("C4", 10, 11, 12)]
+
+    sample_weights = []
+    boosted_count = 0
+    vert_counts = {"C2": 0, "C3": 0, "C4": 0}
+
+    for f in train_files:
+        stem = Path(f).stem
+        npz_path = os.path.join(labels_dir, f"{stem}.npz")
+
+        is_off_midline = False
+        if os.path.exists(npz_path):
+            try:
+                npz_data = np.load(npz_path)
+                coords = npz_data["coords"]  # [13, 2]
+
+                for vert_name, pi_idx, ic_idx, ai_idx in triplets:
+                    pi = coords[pi_idx]
+                    ic = coords[ic_idx]
+                    ai = coords[ai_idx]
+
+                    # Ensure landmarks are valid
+                    if (pi >= 0).all() and (ic >= 0).all() and (ai >= 0).all():
+                        base_v = ai - pi
+                        base_len_sq = np.sum(base_v ** 2)
+                        if base_len_sq > 1e-6:
+                            # Tangential projection ratio: (ic - pi) . (ai - pi) / ||ai - pi||^2
+                            proj_ratio = float(np.dot(ic - pi, base_v) / base_len_sq)
+                            if abs(proj_ratio - 0.50) >= off_midline_threshold:
+                                is_off_midline = True
+                                vert_counts[vert_name] += 1
+                                # If any single vertebra qualifies, image is boosted
+                                break
+            except Exception:
+                pass
+
+        if is_off_midline:
+            sample_weights.append(float(boost_weight))
+            boosted_count += 1
+        else:
+            sample_weights.append(float(base_weight))
+
+    total_samples = len(sample_weights)
+    target_num_samples = num_samples if num_samples is not None else total_samples
+
+    pct_boosted = (boosted_count / total_samples * 100.0) if total_samples > 0 else 0.0
+    print(f"\n🎯 Off-Midline Concavity Weighted Sampling Configured:")
+    print(f"   • Off-midline threshold (|ratio - 0.50|): >= {off_midline_threshold:.3f}")
+    print(f"   • Boosted images (C2, C3, or C4): {boosted_count}/{total_samples} ({pct_boosted:.1f}%) -> Weight: {boost_weight:.1f}x")
+    print(f"   • Baseline/Centered images:       {total_samples - boosted_count}/{total_samples} ({100.0 - pct_boosted:.1f}%) -> Weight: {base_weight:.1f}x")
+    print(f"   • Vertebra trigger counts:        C2: {vert_counts['C2']}, C3: {vert_counts['C3']}, C4: {vert_counts['C4']}")
+    print(f"   • Total samples drawn per epoch:  {target_num_samples} (with replacement=True)\n")
+
+    weights_tensor = torch.as_tensor(sample_weights, dtype=torch.double)
+    sampler = WeightedRandomSampler(
+        weights=weights_tensor,
+        num_samples=target_num_samples,
+        replacement=True,
+    )
+    return sampler
+
+
 def get_dataloaders(
     train_img_dir=TRAIN_IMG_DIR,
     train_npz_dir=TRAIN_NPZ_DIR,

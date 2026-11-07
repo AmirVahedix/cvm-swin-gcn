@@ -112,6 +112,11 @@ def main():
         help="Skip preprocessing steps 1-4 and run model training directly.",
     )
     parser.add_argument(
+        "--prepare-only",
+        action="store_true",
+        help="Execute only data downloading and preprocessing (steps 1 to 4) and exit immediately without training or evaluation.",
+    )
+    parser.add_argument(
         "--eval-only",
         action="store_true",
         help="Skip all downloading, preprocessing, and training steps, executing only Step 6 (Evaluation) and Step 7 (Batch Inference).",
@@ -657,6 +662,14 @@ def main():
                 print("-" * 20)
             else:
                 print("\n[4/6] Skipping dataset splitting (--skip-split set).")
+
+            if args.prepare_only:
+                print("\n" + "=" * 60)
+                print("✅ DATA PREPARATION COMPLETE (--prepare-only set).")
+                print("   Images downloaded, resized, heatmaps generated, and dataset split.")
+                print("   Exiting without running model training or evaluation.")
+                print("=" * 60)
+                return
         else:
             print("\n[1-4/6] Skipping steps 1 to 4 (--train-only flag set).")
 
