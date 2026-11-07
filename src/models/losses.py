@@ -429,8 +429,11 @@ class AsymmetricEndplateConcavityLoss(nn.Module):
                 abs_diff_depth - 0.5 * self.beta,
             )
 
-            # Apply asymmetric penalty multiplier when under-estimating a genuine notch
-            underestimate_mask = (diff_depth < 0.0) & (gt_depth >= self.depth_threshold)
+            # Apply asymmetric penalty multiplier when under-estimating a genuine notch.
+            # Anatomical specificity: Apply the steep penalty only to C3 (pi_idx=5) and C4 (pi_idx=10),
+            # while leaving C2 (pi_idx=0) with standard symmetric loss to prevent C2 over-estimation false-positives.
+            is_c3_or_c4 = (pi_idx != 0)
+            underestimate_mask = (diff_depth < 0.0) & (gt_depth >= self.depth_threshold) & is_c3_or_c4
             multiplier = torch.where(
                 underestimate_mask,
                 torch.as_tensor(self.penalty_underestimate, device=device, dtype=pred_coords.dtype),
@@ -441,10 +444,6 @@ class AsymmetricEndplateConcavityLoss(nn.Module):
             triplet_loss = (self.weight_tangential * loss_ratio + self.weight_depth * loss_depth) * valid.float()
             total_loss = total_loss + triplet_loss.sum()
             total_valid += valid.float().sum()
-
-        if total_valid > 0.0:
-            return total_loss / total_valid
-        return torch.tensor(0.0, device=device)
 
         if total_valid > 0.0:
             return total_loss / total_valid

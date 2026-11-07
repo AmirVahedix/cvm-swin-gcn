@@ -211,16 +211,17 @@ def build_off_midline_weighted_sampler(
     boost_weight: float = 3.0,
     base_weight: float = 1.0,
     num_samples: int | None = None,
+    include_c2: bool = False,
 ) -> WeightedRandomSampler | None:
     """
     Constructs a WeightedRandomSampler that boosts the sampling weight for images
-    that exhibit an off-midline concavity on ANY of the three cervical vertebrae (C2, C3, or C4).
+    that exhibit an off-midline concavity on C3 or C4 (and optionally C2 if include_c2=True).
 
     Anatomical reasoning:
     - Many models develop a central bias, predicting concavity dips at the exact geometric midpoint (50%).
     - In lateral cephalograms, true anatomical concavities often develop asymmetrically along the endplate.
-    - If any single vertebra (C2, C3, or C4) has an inferior concavity projection ratio deviating
-      from 0.50 by at least `off_midline_threshold`, the image's sampling weight is boosted.
+    - C2 naturally exhibits odontoid curvature which causes false-positive oversampling if included.
+      Therefore, by default, only C3 and C4 are evaluated for off-midline boosting.
 
     Args:
         train_files: List of training image file paths or names.
@@ -229,6 +230,7 @@ def build_off_midline_weighted_sampler(
         boost_weight: Sampling weight assigned to images with at least one off-midline vertebra.
         base_weight: Sampling weight assigned to centered/symmetric images.
         num_samples: Total samples to draw per epoch (defaults to len(train_files)).
+        include_c2: Whether to allow C2 off-midline to trigger boosting (default: False).
 
     Returns:
         WeightedRandomSampler configured with per-sample weights, or None if train_files is empty.
@@ -239,11 +241,14 @@ def build_off_midline_weighted_sampler(
     import numpy as np
 
     # Vertebrae triplets (PI, IC, AI)
-    triplets = [("C2", 0, 1, 2), ("C3", 5, 6, 7), ("C4", 10, 11, 12)]
+    # Default to C3 and C4 to prevent C2 false-positive oversampling
+    triplets = [("C3", 5, 6, 7), ("C4", 10, 11, 12)]
+    if include_c2:
+        triplets.insert(0, ("C2", 0, 1, 2))
 
     sample_weights = []
     boosted_count = 0
-    vert_counts = {"C2": 0, "C3": 0, "C4": 0}
+    vert_counts = {name: 0 for name, _, _, _ in triplets}
 
     for f in train_files:
         stem = Path(f).stem
@@ -270,7 +275,7 @@ def build_off_midline_weighted_sampler(
                             if abs(proj_ratio - 0.50) >= off_midline_threshold:
                                 is_off_midline = True
                                 vert_counts[vert_name] += 1
-                                # If any single vertebra qualifies, image is boosted
+                                # If any vertebra qualifies, image is boosted
                                 break
             except Exception:
                 pass
@@ -285,11 +290,13 @@ def build_off_midline_weighted_sampler(
     target_num_samples = num_samples if num_samples is not None else total_samples
 
     pct_boosted = (boosted_count / total_samples * 100.0) if total_samples > 0 else 0.0
+    vert_trigger_str = ", ".join(f"{k}: {v}" for k, v in vert_counts.items())
     print(f"\n🎯 Off-Midline Concavity Weighted Sampling Configured:")
+    print(f"   • Evaluated vertebrae:            {[t[0] for t in triplets]}")
     print(f"   • Off-midline threshold (|ratio - 0.50|): >= {off_midline_threshold:.3f}")
-    print(f"   • Boosted images (C2, C3, or C4): {boosted_count}/{total_samples} ({pct_boosted:.1f}%) -> Weight: {boost_weight:.1f}x")
+    print(f"   • Boosted images:                 {boosted_count}/{total_samples} ({pct_boosted:.1f}%) -> Weight: {boost_weight:.1f}x")
     print(f"   • Baseline/Centered images:       {total_samples - boosted_count}/{total_samples} ({100.0 - pct_boosted:.1f}%) -> Weight: {base_weight:.1f}x")
-    print(f"   • Vertebra trigger counts:        C2: {vert_counts['C2']}, C3: {vert_counts['C3']}, C4: {vert_counts['C4']}")
+    print(f"   • Vertebra trigger counts:        {vert_trigger_str}")
     print(f"   • Total samples drawn per epoch:  {target_num_samples} (with replacement=True)\n")
 
     weights_tensor = torch.as_tensor(sample_weights, dtype=torch.double)

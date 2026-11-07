@@ -83,6 +83,7 @@ class TestAsymmetricDepthAndSampling(unittest.TestCase):
             # Sample 3: All 3 vertebrae centered at exactly 50%
             np.savez(os.path.join(tmp_dir, "img_all_centered.npz"), coords=make_coords(c2_r=0.5, c3_r=0.5, c4_r=0.5))
 
+            # Default sampler evaluates C3 and C4 only (to protect C2 from over-sampling)
             sampler = build_off_midline_weighted_sampler(
                 train_files=filenames,
                 labels_dir=tmp_dir,
@@ -94,11 +95,26 @@ class TestAsymmetricDepthAndSampling(unittest.TestCase):
 
             self.assertIsNotNone(sampler)
             weights = sampler.weights.tolist()
-            # Samples 0, 1, 2 must have boost weight (3.0), Sample 3 must have base weight (1.0)
-            self.assertEqual(weights[0], 3.0)
+            # Sample 0 (only C2 off) must have base weight (1.0) under default include_c2=False
+            self.assertEqual(weights[0], 1.0)
+            # Samples 1 and 2 (C3 and C4 off) must have boost weight (3.0)
             self.assertEqual(weights[1], 3.0)
             self.assertEqual(weights[2], 3.0)
+            # Sample 3 (all centered) must have base weight (1.0)
             self.assertEqual(weights[3], 1.0)
+
+            # When include_c2=True, Sample 0 is also boosted
+            sampler_with_c2 = build_off_midline_weighted_sampler(
+                train_files=filenames,
+                labels_dir=tmp_dir,
+                off_midline_threshold=0.10,
+                boost_weight=3.0,
+                base_weight=1.0,
+                num_samples=4,
+                include_c2=True,
+            )
+            weights_c2 = sampler_with_c2.weights.tolist()
+            self.assertEqual(weights_c2[0], 3.0)
 
 
 if __name__ == "__main__":
