@@ -155,14 +155,34 @@ def resolve_test_images_and_ground_truth(
     # Map task IDs to filenames via export.json if present
     task_id_to_stem = {}
     if export_json and export_json.exists():
-        with open(export_json, "r") as f:
-            export_data = json.load(f)
-        for task in export_data:
-            tid = task.get("id")
-            if tid in test_ids_set:
-                img_url = task.get("data", {}).get("img", "")
-                if img_url:
-                    task_id_to_stem[tid] = Path(img_url).stem
+        try:
+            with open(export_json, "r", encoding="utf-8") as f:
+                raw_data = json.load(f)
+
+            if isinstance(raw_data, dict):
+                tasks = raw_data.get("data") or raw_data.get("tasks") or []
+            elif isinstance(raw_data, list):
+                tasks = raw_data
+            else:
+                tasks = []
+
+            for task in tasks:
+                if not isinstance(task, dict):
+                    continue
+                tid = task.get("id") or task.get("taskId") or task.get("task_id")
+                if tid is not None and tid in test_ids_set:
+                    fname = task.get("filename")
+                    if fname:
+                        task_id_to_stem[tid] = Path(fname).stem
+                    else:
+                        img_data = task.get("data")
+                        img_url = img_data.get("img") if isinstance(img_data, dict) else task.get("img")
+                        if not img_url:
+                            img_url = task.get("file_upload") or ""
+                        if img_url:
+                            task_id_to_stem[tid] = Path(img_url).stem
+        except Exception as e:
+            print(f"⚠️ Warning: Error parsing export_json: {e}")
 
     samples = []
     missing_count = 0
@@ -235,8 +255,70 @@ def resolve_test_images_and_ground_truth(
             "gt_yolo_norm": (cx, cy, nw, nh),
         })
 
-    if missing_count > 0:
-        print(f"⚠️ Warning: Could not locate image/npz pairs for {missing_count} test items.")
+    # Fallback to test directory pairs if any task ID was missing or unmapped
+    if len(samples) < len(test_ids_set):
+        all_test_npzs = sorted(test_npz_dir.glob("*.npz"))
+        existing_stems = {s["stem"] for s in samples}
+        for npz_path in all_test_npzs:
+            stem = npz_path.stem
+            if stem in existing_stems:
+                continue
+            img_matches = list(test_img_dir.glob(f"{stem}.*"))
+            if not img_matches:
+                continue
+            img_path = img_matches[0]
+            img_bgr = cv2.imread(str(img_path))
+            if img_bgr is None:
+                continue
+            img_h, img_w = img_bgr.shape[:2]
+
+            data = np.load(npz_path)
+            raw_coords = data["coords"]
+            is_normalized = (raw_coords.max() <= 1.05 and raw_coords.min() >= -0.05)
+            coords_px = raw_coords.copy()
+            if is_normalized:
+                coords_px[:, 0] *= img_w
+                coords_px[:, 1] *= img_h
+
+            roi: ROIBoundingBox = compute_roi_bbox(
+                coords=raw_coords,
+                img_w=img_w,
+                img_h=img_h,
+                margin_ratio=margin_ratio,
+                bottom_margin_ratio=bottom_margin_ratio,
+                min_size=min_size,
+                use_anatomical_prior=True,
+            )
+
+            gx1 = max(0.0, float(roi.u1))
+            gy1 = max(0.0, float(roi.v1))
+            gx2 = min(float(img_w), float(roi.u2))
+            gy2 = min(float(img_h), float(roi.v2))
+
+            box_w = gx2 - gx1
+            box_h = gy2 - gy1
+            cx = (gx1 + gx2) / 2.0 / float(img_w)
+            cy = (gy1 + gy2) / 2.0 / float(img_h)
+            nw = box_w / float(img_w)
+            nh = box_h / float(img_h)
+
+            samples.append({
+                "task_id": stem,
+                "stem": stem,
+                "img_path": img_path,
+                "npz_path": npz_path,
+                "img_w": img_w,
+                "img_h": img_h,
+                "coords_px": coords_px,
+                "gt_box_px": (gx1, gy1, gx2, gy2),
+                "gt_yolo_norm": (cx, cy, nw, nh),
+            })
+            existing_stems.add(stem)
+            if len(samples) >= len(test_ids_set):
+                break
+
+    if len(samples) < len(test_ids_set):
+        print(f"⚠️ Warning: Found {len(samples)} valid test items out of {len(test_ids_set)} requested.")
 
     return samples
 
