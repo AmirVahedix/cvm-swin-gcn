@@ -1,0 +1,6 @@
+names:
+  0: cervical_spine
+path: /Users/macbookair/cvm-project/swin-gcn-network/evaluation/yolo_evaluation/yolo_test_dataset
+test: images
+train: images
+val: images
